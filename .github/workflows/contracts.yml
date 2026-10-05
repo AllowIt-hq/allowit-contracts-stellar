@@ -1,0 +1,27 @@
+name: Validate contracts
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host Rust
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+      - name: Check shared policy identity and formatting
+        run: |
+          python3 scripts/check-policy.py
+          cargo fmt --all --check
+      - name: Install pinned Stellar CLI
+        run: |
+          curl -fsSL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar.tar.gz
+          echo 'c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462  /tmp/stellar.tar.gz' | sha256sum -c -
+          mkdir /tmp/stellar-cli
+          tar -xzf /tmp/stellar.tar.gz -C /tmp/stellar-cli
+          echo /tmp/stellar-cli >> "$GITHUB_PATH"
+          rustup target add wasm32v1-none --toolchain 1.98.0
+      - name: Build Wasm and test custody with compiled policy and vault
+        run: |
+          stellar contract build
+          cargo test --workspace --locked

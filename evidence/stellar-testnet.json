@@ -1,0 +1,226 @@
+{
+  "network": "stellar:testnet",
+  "passphrase": "Test SDF Network ; September 2015",
+  "source_hash": "c445348186c8d7ee9132539528c82a3c6a718718993db879cd9ceaf28e1d7cfa",
+  "policy_artifact": {
+    "sha256": "f6ca8400d3394ef5f87f2ba9421391673647049fc1fa394937ab957056a510c1",
+    "bytes": 1896
+  },
+  "vault_artifact": {
+    "sha256": "58c3102a275fd20e7995c9108aa6e5881429b968603c193169b5caa6867786b2",
+    "bytes": 7841
+  },
+  "factory_artifact": {
+    "sha256": "c9f93314ecb02cfba41a29a61ef35f1d370f161dc80fcf280308ded715be55c4",
+    "bytes": 1390
+  },
+  "owner": "GAAEBRF2KSFZ7PTFVU3WCUHAGKSVQTHPBSZW7CFDW5M2VXFQ7WIO7YTT",
+  "executor": "GBUCT3QWK7NRN3F37KRU56U3GVGQ4SS3ELZVGD4EZK2VSQBJAACED6AV",
+  "recipient": "GB5TGVX2ZU5PEVUL47DZQW7MV7KH5SN5R4GB2HOMNPNXJYJABXE6OCCF",
+  "asset": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "policy": "CBUC6Y5OJXEE5TX2B5G2DANESPKXDL36UQUILYQQH76A464BCBVR3HIX",
+  "factory": "CCEXJALBG2HVIX3644P7BKNNMBHHZYJ2OIGCXEO4WDQSXZIIT6WM52M3",
+  "vault": "CAR3TDALE7Y5WPIUIOASYHAVUDDAQIVHXMTXJSPYTS4F7PYFULUSACNS",
+  "recipient_delta_stroops": 11000000,
+  "complete": true,
+  "operations": [
+    {
+      "label": "owner address",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "recipient address",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "executor address",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "native asset",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "upload policy",
+      "success": true,
+      "transaction_candidates": [
+        "a2e06f4d685ce69ffba562a599e369c5db0e417bdfa2461353ee1fa2232ace3c",
+        "a2e06f4d685ce69ffba562a599e369c5db0e417bdfa2461353ee1fa2232ace3c"
+      ]
+    },
+    {
+      "label": "upload vault",
+      "success": true,
+      "transaction_candidates": [
+        "c2f348b4e3ef08ffa115f9d5ea46b6f6b1962b9daeb4bf574eb07b4c56f26073",
+        "c2f348b4e3ef08ffa115f9d5ea46b6f6b1962b9daeb4bf574eb07b4c56f26073"
+      ]
+    },
+    {
+      "label": "upload factory",
+      "success": true,
+      "transaction_candidates": [
+        "5395e351c525754c91e9fd10b1eb4dbe597b8549a5117e4cfce64014ee7909a2",
+        "5395e351c525754c91e9fd10b1eb4dbe597b8549a5117e4cfce64014ee7909a2"
+      ]
+    },
+    {
+      "label": "deploy policy",
+      "success": true,
+      "transaction_candidates": [
+        "f6ca8400d3394ef5f87f2ba9421391673647049fc1fa394937ab957056a510c1",
+        "48f2e2a861fa06b1edbc0cfb23797d9bbbb775884b1b66a434d9482c2abb5fb5",
+        "48f2e2a861fa06b1edbc0cfb23797d9bbbb775884b1b66a434d9482c2abb5fb5"
+      ]
+    },
+    {
+      "label": "deploy factory",
+      "success": true,
+      "transaction_candidates": [
+        "c9f93314ecb02cfba41a29a61ef35f1d370f161dc80fcf280308ded715be55c4",
+        "8545cac9ca8f5097b56a0e9b85def0847c6b11200ff982ee31bc2da0dcc9c1fc",
+        "8545cac9ca8f5097b56a0e9b85def0847c6b11200ff982ee31bc2da0dcc9c1fc"
+      ]
+    },
+    {
+      "label": "factory creates vault",
+      "success": true,
+      "transaction_candidates": [
+        "da2e558bdf6db95f105b922ebfdc4f86621fb476599d31786c68f61a56b9e94d",
+        "da2e558bdf6db95f105b922ebfdc4f86621fb476599d31786c68f61a56b9e94d"
+      ]
+    },
+    {
+      "label": "recipient initial balance",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "deposit 2 XLM",
+      "success": true,
+      "transaction_candidates": [
+        "2ad7c67d7d583bc9d6b072593828b16ec9d839ff392e8510f0d9f5b04c450158",
+        "2ad7c67d7d583bc9d6b072593828b16ec9d839ff392e8510f0d9f5b04c450158"
+      ]
+    },
+    {
+      "label": "unapproved transfer",
+      "success": false,
+      "transaction_candidates": []
+    },
+    {
+      "label": "approve policy",
+      "success": true,
+      "transaction_candidates": [
+        "1e92f94151ba63e91ea228c2b0b58e575cf2611a4e1a8f98ddba765aa94faee3",
+        "1e92f94151ba63e91ea228c2b0b58e575cf2611a4e1a8f98ddba765aa94faee3"
+      ]
+    },
+    {
+      "label": "transfer 0.6 XLM",
+      "success": true,
+      "transaction_candidates": [
+        "394e4e2c2b9bf9b5eef97cd868b1432d3172457b72113fe773b296bbc8b61d8e",
+        "394e4e2c2b9bf9b5eef97cd868b1432d3172457b72113fe773b296bbc8b61d8e",
+        "c445348186c8d7ee9132539528c82a3c6a718718993db879cd9ceaf28e1d7cfa"
+      ]
+    },
+    {
+      "label": "state after transfer",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "deny daily excess",
+      "success": false,
+      "transaction_candidates": [
+        "c445348186c8d7ee9132539528c82a3c6a718718993db879cd9ceaf28e1d7cfa"
+      ]
+    },
+    {
+      "label": "deny nonce replay",
+      "success": false,
+      "transaction_candidates": []
+    },
+    {
+      "label": "deny unauthorized tuning",
+      "success": false,
+      "transaction_candidates": []
+    },
+    {
+      "label": "deny tuning outside compiled bound",
+      "success": false,
+      "transaction_candidates": [
+        "c445348186c8d7ee9132539528c82a3c6a718718993db879cd9ceaf28e1d7cfa"
+      ]
+    },
+    {
+      "label": "tune daily limit",
+      "success": true,
+      "transaction_candidates": [
+        "9ddba16e110e1e3cc63f4a09d2aaef8b4ac14b2e1a0fda79dcc527e8a6ea0ec6",
+        "9ddba16e110e1e3cc63f4a09d2aaef8b4ac14b2e1a0fda79dcc527e8a6ea0ec6"
+      ]
+    },
+    {
+      "label": "counter preserved by tuning",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "deny old parameter revision",
+      "success": false,
+      "transaction_candidates": []
+    },
+    {
+      "label": "transfer with current revision",
+      "success": true,
+      "transaction_candidates": [
+        "4a0b03ffd72b1af1dda3325aae21d297aad89694cf155f89d6841161123480ab",
+        "4a0b03ffd72b1af1dda3325aae21d297aad89694cf155f89d6841161123480ab",
+        "c445348186c8d7ee9132539528c82a3c6a718718993db879cd9ceaf28e1d7cfa"
+      ]
+    },
+    {
+      "label": "revoke policy",
+      "success": true,
+      "transaction_candidates": [
+        "f8edb7eb5943e5f8c576af99d230426af711dc8b283c93a7b37b1ef011edea95",
+        "f8edb7eb5943e5f8c576af99d230426af711dc8b283c93a7b37b1ef011edea95"
+      ]
+    },
+    {
+      "label": "deny revoked transfer",
+      "success": false,
+      "transaction_candidates": []
+    },
+    {
+      "label": "unsupported method",
+      "success": false,
+      "transaction_candidates": []
+    },
+    {
+      "label": "recover remaining funds",
+      "success": true,
+      "transaction_candidates": [
+        "92de7aa6680e35f18eb637f8652b51a5cb6b511d6edba37605ac5ad6cca53c2d",
+        "92de7aa6680e35f18eb637f8652b51a5cb6b511d6edba37605ac5ad6cca53c2d"
+      ]
+    },
+    {
+      "label": "empty vault",
+      "success": true,
+      "transaction_candidates": []
+    },
+    {
+      "label": "recipient settled balance",
+      "success": true,
+      "transaction_candidates": []
+    }
+  ],
+  "note": "Successful mutations were sent by Stellar CLI to Testnet. Rejected operations can fail simulation without a broadcast; read-only checks use simulation. Token recipient delta is independently asserted. Full local diagnostic evidence is ignored."
+}
