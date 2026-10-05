@@ -16,16 +16,16 @@ impl NativePolicy {
         _env: Env,
         context: policy_api::Context,
     ) -> Result<u64, policy_api::PolicyError> {
-        policy::evaluate(&context)
+        policy::execute(&context)
     }
     pub fn validate_daily_limit(_env: Env, value: u64) -> Result<(), policy_api::PolicyError> {
-        policy::validate_daily_limit(value)
+        policy_api::validate_daily_limit(value)
     }
     pub fn source_hash(env: Env) -> BytesN<32> {
         BytesN::from_array(&env, &source_hash::SOURCE_HASH)
     }
     pub fn max_daily_limit(_env: Env) -> u64 {
-        policy::MAX_DAILY_LIMIT
+        policy_api::MAX_DAILY_LIMIT
     }
 }
 

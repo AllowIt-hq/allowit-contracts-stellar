@@ -36,3 +36,9 @@ Vault/factory storage TTL extends during use. Operators must maintain or restore
 ## Independent review
 
 Claude Code Opus 5.5 found no remaining material blockers for the hackathon MVP. The raw report and exact reviewed code revisions are in `evidence/opus-review.json`. Remaining test gaps and production/governance limitations are retained there. This review did not independently rerun builds or tests.
+
+## Policy entrypoint and system functions
+
+`policy/policy.rs` contains one generated function, `execute`. It calls `require_approval` and `enforce_daily_limit` from `policy/policy_api.rs`. Approval, daily rollover, clock checks, overflow checks and the compiled parameter ceiling belong to this standard library. Custody commits the returned next daily spend atomically with token movement. Both files are included in the pinned source bundle; clients display the literal compiled policy source and can show the exact system-function implementation separately. Chain adapters retain their version-1 ABI.
+
+The existing review record covers the preceding release. This entrypoint refactor requires a new independent review before handoff.

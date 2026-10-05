@@ -66,7 +66,7 @@ fn validate(
     source: &BytesN<32>,
     value: u64,
 ) -> Result<(), Error> {
-    policy::validate_daily_limit(value).map_err(|_| Error::InvalidDecision)?;
+    policy_api::validate_daily_limit(value).map_err(|_| Error::InvalidDecision)?;
     if policy.executable() != Some(Executable::Wasm(wasm.clone())) {
         return Err(Error::SourceChanged);
     }
@@ -182,7 +182,7 @@ impl Vault {
             &s.policy_source,
             s.daily_limit,
         )?;
-        policy::validate_daily_limit(value).map_err(|_| Error::InvalidDecision)?;
+        policy_api::validate_daily_limit(value).map_err(|_| Error::InvalidDecision)?;
         client.validate_daily_limit(&value);
         s.daily_limit = value;
         changed(&mut s)?;
