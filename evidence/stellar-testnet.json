@@ -222,5 +222,98 @@
       "transaction_candidates": []
     }
   ],
-  "note": "Successful mutations were sent by Stellar CLI to Testnet. Rejected operations can fail simulation without a broadcast; read-only checks use simulation. Token recipient delta is independently asserted. Full local diagnostic evidence is ignored."
+  "note": "Successful mutations were sent by Stellar CLI to Testnet. Rejected operations can fail simulation without a broadcast; read-only checks use simulation. Token recipient delta is independently asserted. Full local diagnostic evidence is ignored.",
+  "finalized_transactions": [
+    {
+      "label": "upload policy",
+      "hash": "a2e06f4d685ce69ffba562a599e369c5db0e417bdfa2461353ee1fa2232ace3c",
+      "status": "SUCCESS",
+      "ledger": 5027967,
+      "created_at": "2026-10-05T01:23:42Z"
+    },
+    {
+      "label": "upload vault",
+      "hash": "c2f348b4e3ef08ffa115f9d5ea46b6f6b1962b9daeb4bf574eb07b4c56f26073",
+      "status": "SUCCESS",
+      "ledger": 5027968,
+      "created_at": "2026-10-05T01:23:47Z"
+    },
+    {
+      "label": "upload factory",
+      "hash": "5395e351c525754c91e9fd10b1eb4dbe597b8549a5117e4cfce64014ee7909a2",
+      "status": "SUCCESS",
+      "ledger": 5027969,
+      "created_at": "2026-10-05T01:23:52Z"
+    },
+    {
+      "label": "deploy policy",
+      "hash": "48f2e2a861fa06b1edbc0cfb23797d9bbbb775884b1b66a434d9482c2abb5fb5",
+      "status": "SUCCESS",
+      "ledger": 5027970,
+      "created_at": "2026-10-05T01:23:57Z"
+    },
+    {
+      "label": "deploy factory",
+      "hash": "8545cac9ca8f5097b56a0e9b85def0847c6b11200ff982ee31bc2da0dcc9c1fc",
+      "status": "SUCCESS",
+      "ledger": 5027971,
+      "created_at": "2026-10-05T01:24:02Z"
+    },
+    {
+      "label": "factory creates vault",
+      "hash": "da2e558bdf6db95f105b922ebfdc4f86621fb476599d31786c68f61a56b9e94d",
+      "status": "SUCCESS",
+      "ledger": 5027972,
+      "created_at": "2026-10-05T01:24:07Z"
+    },
+    {
+      "label": "deposit 2 XLM",
+      "hash": "2ad7c67d7d583bc9d6b072593828b16ec9d839ff392e8510f0d9f5b04c450158",
+      "status": "SUCCESS",
+      "ledger": 5027974,
+      "created_at": "2026-10-05T01:24:17Z"
+    },
+    {
+      "label": "approve policy",
+      "hash": "1e92f94151ba63e91ea228c2b0b58e575cf2611a4e1a8f98ddba765aa94faee3",
+      "status": "SUCCESS",
+      "ledger": 5027976,
+      "created_at": "2026-10-05T01:24:27Z"
+    },
+    {
+      "label": "transfer 0.6 XLM",
+      "hash": "394e4e2c2b9bf9b5eef97cd868b1432d3172457b72113fe773b296bbc8b61d8e",
+      "status": "SUCCESS",
+      "ledger": 5027977,
+      "created_at": "2026-10-05T01:24:32Z"
+    },
+    {
+      "label": "tune daily limit",
+      "hash": "9ddba16e110e1e3cc63f4a09d2aaef8b4ac14b2e1a0fda79dcc527e8a6ea0ec6",
+      "status": "SUCCESS",
+      "ledger": 5027979,
+      "created_at": "2026-10-05T01:24:42Z"
+    },
+    {
+      "label": "transfer with current revision",
+      "hash": "4a0b03ffd72b1af1dda3325aae21d297aad89694cf155f89d6841161123480ab",
+      "status": "SUCCESS",
+      "ledger": 5027980,
+      "created_at": "2026-10-05T01:24:47Z"
+    },
+    {
+      "label": "revoke policy",
+      "hash": "f8edb7eb5943e5f8c576af99d230426af711dc8b283c93a7b37b1ef011edea95",
+      "status": "SUCCESS",
+      "ledger": 5027981,
+      "created_at": "2026-10-05T01:24:52Z"
+    },
+    {
+      "label": "recover remaining funds",
+      "hash": "92de7aa6680e35f18eb637f8652b51a5cb6b511d6edba37605ac5ad6cca53c2d",
+      "status": "SUCCESS",
+      "ledger": 5027982,
+      "created_at": "2026-10-05T01:24:57Z"
+    }
+  ]
 }
