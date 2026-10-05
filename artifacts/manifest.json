@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "source_bundle": "c445348186c8d7ee9132539528c82a3c6a718718993db879cd9ceaf28e1d7cfa",
-  "git_revision": "ff7833a9963e194b25698f0d9ed3650b56fcb1c9",
+  "source_bundle": "793db01595fbcb15503914744e49b45f470e9ca1d2805aceadeac00a0d843fc7",
+  "git_revision": "f011ecacdb37cc4c3f3a888ff344d0ef4352e648",
   "network": null,
   "deployments": [],
   "artifacts": [
@@ -12,8 +12,8 @@
     },
     {
       "name": "allowit_policy.wasm",
-      "bytes": 1896,
-      "sha256": "f6ca8400d3394ef5f87f2ba9421391673647049fc1fa394937ab957056a510c1"
+      "bytes": 1878,
+      "sha256": "25c21ae1b5e580af28684fa09b7092cba4bafe6bc17d0b47617ac1dedcb4b893"
     },
     {
       "name": "allowit_vault.wasm",
