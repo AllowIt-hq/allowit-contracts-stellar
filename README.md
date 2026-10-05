@@ -41,4 +41,4 @@ Claude Code Opus 5.5 found no remaining material blockers for the hackathon MVP.
 
 `policy/policy.rs` contains one generated function, `execute`. It calls `require_approval` and `enforce_daily_limit` from `policy/policy_api.rs`. Approval, daily rollover, clock checks, overflow checks and the compiled parameter ceiling belong to this standard library. Custody commits the returned next daily spend atomically with token movement. Both files are included in the pinned source bundle; clients display the literal compiled policy source and can show the exact system-function implementation separately. Chain adapters retain their version-1 ABI.
 
-The existing review record covers the preceding release. This entrypoint refactor requires a new independent review before handoff.
+The existing review record covers the preceding release. The entrypoint refactor was independently reviewed through Claude Code Opus 5.5 with no blocking or material findings. The report and exact reviewed revisions are in `evidence/execute-system-review.json`. Public Solana Testnet acceptance remains pending.
