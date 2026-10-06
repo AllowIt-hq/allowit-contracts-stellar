@@ -21,7 +21,7 @@ cargo test --workspace --locked
 python3 scripts/artifacts.py
 ```
 
-Tests execute compiled policy Wasm, token custody and factory deployment of compiled vault Wasm. Run `python3 -u scripts/testnet.py` with funded secure-store identities `allowit-native-owner`, `allowit-native-executor`, `allowit-native-recipient`. The driver is hardcoded to Stellar Testnet and native XLM through its Stellar Asset Contract. It checks recipient token deltas and exercises funding, approval, daily limits, nonce/revision rejection, bounded tuning, revocation, unsupported calls and recovery. This is not USDC or frontend/CLI E2E acceptance.
+Tests execute compiled policy Wasm, token custody and factory deployment of compiled vault Wasm. Run `python3 -u scripts/testnet.py --output-dir /path/to/ackrate-project/instance/artifacts/RESOURCE/testnet-RUN` with funded secure-store identities `allowit-native-owner`, `allowit-native-executor`, `allowit-native-recipient`. The driver is hardcoded to Stellar Testnet and native XLM through its Stellar Asset Contract. It checks recipient token deltas and exercises funding, approval, daily limits, nonce/revision rejection, bounded tuning, revocation, unsupported calls and recovery. This is not USDC or frontend/CLI E2E acceptance.
 
 ## ABI and deployment
 
@@ -33,12 +33,9 @@ Every policy use verifies its resolved executable matches the selected Wasm hash
 
 Vault/factory storage TTL extends during use. Operators must maintain or restore policy instance/code lifetime; archived policy can block evaluation while owner recovery remains independent. Obtain a fresh RPC simulation for upload, instance, resource and TTL fees before commercial deployment. No Mainnet deployment is included; this MVP is not a production audit.
 
-## Independent review
-
-Claude Code Opus 5.5 found no remaining material blockers for the hackathon MVP. The raw report and exact reviewed code revisions are in `evidence/opus-review.json`. Remaining test gaps and production/governance limitations are retained there. This review did not independently rerun builds or tests.
-
 ## Policy entrypoint and system functions
 
 `policy/policy.rs` contains one generated function, `execute`. It calls `require_approval` and `enforce_daily_limit` from `policy/policy_api.rs`. Approval, daily rollover, clock checks, overflow checks and the compiled parameter ceiling belong to this standard library. Custody commits the returned next daily spend atomically with token movement. Both files are included in the pinned source bundle; clients display the literal compiled policy source and can show the exact system-function implementation separately. Chain adapters retain their version-1 ABI.
 
-The existing review record covers the preceding release. The entrypoint refactor was independently reviewed through Claude Code Opus 5.5 with no blocking or material findings. The report and exact reviewed revisions are in `evidence/execute-system-review.json`. Public Solana Testnet acceptance remains pending.
+
+Review reports, deployment evidence and retained artifact manifests are in the [main project artifacts](https://github.com/ackrate/ackrate-project/tree/main/instance/artifacts/109-contract-and-branch-audit/AllowIt-contracts-stellar). Write new task outputs there under the numbered source resource. `python3 scripts/artifacts.py` prints a build manifest to stdout; pass `--output` with an explicit main-project artifact path to retain it.

@@ -6,3 +6,7 @@
 .DS_Store
 node_modules/
 **/test_snapshots/
+
+# Retained task outputs belong to ackrate-project instance/artifacts.
+/artifacts/
+/evidence/
