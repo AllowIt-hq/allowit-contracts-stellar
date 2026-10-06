@@ -4,7 +4,7 @@
 Requires funded secure-store identities: allowit-native-owner/executor/recipient.
 Only uses the hardcoded Stellar Testnet. Never prints or reads private keys.
 """
-import hashlib, json, os, re, subprocess, time
+import argparse, hashlib, json, os, re, subprocess, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,14 +12,16 @@ CLI = os.environ.get("STELLAR_BIN", "stellar")
 OWNER = "allowit-native-owner"
 EXECUTOR = "allowit-native-executor"
 RECIPIENT = "allowit-native-recipient"
-OUT = ROOT / "private" / f"testnet-{int(time.time())}"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--output-dir", type=Path, required=True, help="Main-project artifact directory for this Testnet run")
+OUT = parser.parse_args().output_dir.expanduser().resolve()
 OUT.mkdir(parents=True, mode=0o700)
 evidence = {"network": "stellar:testnet", "passphrase": "Test SDF Network ; September 2015", "source_hash": subprocess.check_output(["python3",str(ROOT/"scripts/check-policy.py")],text=True).strip(), "operations": []}
 
 def run(label, args, expect_failure=False):
     r = subprocess.run([CLI, *args], cwd=ROOT, text=True, capture_output=True, timeout=120)
     hashes = re.findall(r"\b[0-9a-f]{64}\b", r.stderr)
-    evidence["operations"].append({"label":label,"success":r.returncode==0,"transaction_candidates":hashes,"result":r.stdout.strip(),"diagnostic":r.stderr[-3000:]})
+    evidence["operations"].append({"label":label,"success":r.returncode==0,"transaction_candidates":hashes,"result":r.stdout.strip(),"exit_code":r.returncode})
     (OUT/"evidence.json").write_text(json.dumps(evidence, indent=2))
     if expect_failure:
         assert r.returncode != 0, f"{label} unexpectedly succeeded"
