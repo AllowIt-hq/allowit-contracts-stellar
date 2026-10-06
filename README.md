@@ -21,7 +21,7 @@ cargo test --workspace --locked
 python3 scripts/artifacts.py
 ```
 
-Tests execute compiled policy Wasm, token custody and factory deployment of compiled vault Wasm. Run `python3 -u scripts/testnet.py --output-dir /path/to/ackrate-project/instance/artifacts/RESOURCE/testnet-RUN` with funded secure-store identities `allowit-native-owner`, `allowit-native-executor`, `allowit-native-recipient`. The driver is hardcoded to Stellar Testnet and native XLM through its Stellar Asset Contract. It checks recipient token deltas and exercises funding, approval, daily limits, nonce/revision rejection, bounded tuning, revocation, unsupported calls and recovery. This is not USDC or frontend/CLI E2E acceptance.
+Tests execute compiled policy Wasm, token custody and factory deployment of compiled vault Wasm. Run `python3 -u scripts/testnet.py --output-dir /path/to/ackrate-project/instance/artifacts/RESOURCE/testnet-RUN` with funded secure-store identities `allowit-native-owner`, `allowit-native-executor`, `allowit-native-recipient`. Retained evidence includes public contract results, transaction hashes and exit codes; raw CLI diagnostics are not retained. Review and secret-scan evidence before committing it. The driver is hardcoded to Stellar Testnet and native XLM through its Stellar Asset Contract. It checks recipient token deltas and exercises funding, approval, daily limits, nonce/revision rejection, bounded tuning, revocation, unsupported calls and recovery. This is not USDC or frontend/CLI E2E acceptance.
 
 ## ABI and deployment
 

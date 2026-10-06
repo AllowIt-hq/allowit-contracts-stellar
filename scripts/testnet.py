@@ -21,7 +21,7 @@ evidence = {"network": "stellar:testnet", "passphrase": "Test SDF Network ; Sept
 def run(label, args, expect_failure=False):
     r = subprocess.run([CLI, *args], cwd=ROOT, text=True, capture_output=True, timeout=120)
     hashes = re.findall(r"\b[0-9a-f]{64}\b", r.stderr)
-    evidence["operations"].append({"label":label,"success":r.returncode==0,"transaction_candidates":hashes,"result":r.stdout.strip(),"diagnostic":r.stderr[-3000:]})
+    evidence["operations"].append({"label":label,"success":r.returncode==0,"transaction_candidates":hashes,"result":r.stdout.strip(),"exit_code":r.returncode})
     (OUT/"evidence.json").write_text(json.dumps(evidence, indent=2))
     if expect_failure:
         assert r.returncode != 0, f"{label} unexpectedly succeeded"
