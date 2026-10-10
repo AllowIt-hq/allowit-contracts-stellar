@@ -4,6 +4,8 @@ permissions:
   contents: read
 jobs:
   contracts:
+    if: >-
+      !((github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && (github.triggering_actor || github.actor) == 'agentool' && !(github.event_name == 'push' && github.ref == 'refs/heads/prod'))
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
