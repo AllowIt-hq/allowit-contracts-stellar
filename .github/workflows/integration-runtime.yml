@@ -26,6 +26,8 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: stellar-integration-runtime
       - name: Check shared policy identity and formatting
         run: |
           python3 scripts/check-policy.py
