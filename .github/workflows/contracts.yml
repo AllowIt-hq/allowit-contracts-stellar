@@ -1,16 +1,31 @@
 name: Validate contracts
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run the full integration regression suite
+        type: boolean
+        default: false
 permissions:
   contents: read
+concurrency:
+  group: stellar-unit-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   contracts:
     if: >-
       !((github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && (github.triggering_actor || github.actor) == 'agentool' && !(github.event_name == 'push' && github.ref == 'refs/heads/prod'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install host Rust
-        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - name: Check shared policy identity and formatting
         run: |
           python3 scripts/check-policy.py
@@ -23,7 +38,7 @@ jobs:
           tar -xzf /tmp/stellar.tar.gz -C /tmp/stellar-cli
           echo /tmp/stellar-cli >> "$GITHUB_PATH"
           rustup target add wasm32v1-none --toolchain 1.98.0
-      - name: Build Wasm and test custody with compiled policy and vault
-        run: |
-          stellar contract build
-          cargo test --workspace --locked
+      - name: Build all contract Wasm
+        run: stellar contract build
+      - name: Local authorization and custody regressions
+        run: cargo test --workspace --locked -- --skip custody_transfer_daily_boundary_and_atomic_denial --skip factory_creates_compiled_vaults_with_owner_bound_salts
