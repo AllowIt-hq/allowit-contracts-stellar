@@ -13,6 +13,7 @@ impl Factory {
         salt: BytesN<32>,
         owner: Address,
         executor: Address,
+        authority: Address,
         asset: Address,
         policy: Address,
         policy_source: BytesN<32>,
@@ -32,6 +33,7 @@ impl Factory {
             (
                 owner,
                 executor,
+                authority,
                 asset,
                 policy,
                 policy_source,
@@ -48,7 +50,7 @@ mod tests {
     use super::*;
     use allowit_policy::NativePolicyClient;
     use allowit_vault::VaultClient;
-    use soroban_sdk::{Bytes, testutils::Address as _};
+    use soroban_sdk::{Bytes, address_payload::AddressPayload, testutils::Address as _};
     const VAULT_WASM: &[u8] =
         include_bytes!("../../../target/wasm32v1-none/release/allowit_vault.wasm");
     const POLICY_WASM: &[u8] =
@@ -59,7 +61,14 @@ mod tests {
         env.mock_all_auths();
         let owner = Address::generate(&env);
         let other = Address::generate(&env);
-        let executor = Address::generate(&env);
+        let executor = Address::from_payload(
+            &env,
+            AddressPayload::AccountIdPublicKeyEd25519(BytesN::from_array(&env, &[2; 32])),
+        );
+        let authority = Address::from_payload(
+            &env,
+            AddressPayload::AccountIdPublicKeyEd25519(BytesN::from_array(&env, &[3; 32])),
+        );
         let asset = env
             .register_stellar_asset_contract_v2(owner.clone())
             .address();
@@ -79,6 +88,7 @@ mod tests {
             &salt,
             &owner,
             &executor,
+            &authority,
             &asset,
             &policy,
             &source,
@@ -89,6 +99,7 @@ mod tests {
             &salt,
             &other,
             &executor,
+            &authority,
             &asset,
             &policy,
             &source,
@@ -104,6 +115,7 @@ mod tests {
                     &salt,
                     &owner,
                     &executor,
+                    &authority,
                     &asset,
                     &policy,
                     &source,

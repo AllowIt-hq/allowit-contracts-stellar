@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Deploy fresh contracts and exercise actual Stellar Testnet token transfers.
 
-Requires funded secure-store identities: allowit-native-owner/executor/recipient.
-Only uses the hardcoded Stellar Testnet. Never prints or reads private keys.
+Requires funded secure-store identities: allowit-native-owner/executor/authority/recipient.
+Only uses the hardcoded Stellar Testnet. Never prints or persists private keys.
 """
-import argparse, hashlib, json, os, re, subprocess, time
+import argparse, hashlib, json, os, re, shutil, subprocess, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = os.environ.get("STELLAR_BIN", "stellar")
 OWNER = "allowit-native-owner"
 EXECUTOR = "allowit-native-executor"
+AUTHORITY = "allowit-native-authority"
 RECIPIENT = "allowit-native-recipient"
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--output-dir", type=Path, required=True, help="Main-project artifact directory for this Testnet run")
@@ -18,8 +19,8 @@ OUT = parser.parse_args().output_dir.expanduser().resolve()
 OUT.mkdir(parents=True, mode=0o700)
 evidence = {"network": "stellar:testnet", "passphrase": "Test SDF Network ; September 2015", "source_hash": subprocess.check_output(["python3",str(ROOT/"scripts/check-policy.py")],text=True).strip(), "operations": []}
 
-def run(label, args, expect_failure=False):
-    r = subprocess.run([CLI, *args], cwd=ROOT, text=True, capture_output=True, timeout=120)
+def run(label, args, expect_failure=False, *, command=None, stdin=None):
+    r = subprocess.run(command or [CLI, *args], input=stdin, cwd=ROOT, text=True, capture_output=True, timeout=120)
     hashes = re.findall(r"\b[0-9a-f]{64}\b", r.stderr)
     evidence["operations"].append({"label":label,"success":r.returncode==0,"transaction_candidates":hashes,"result":r.stdout.strip(),"exit_code":r.returncode})
     (OUT/"evidence.json").write_text(json.dumps(evidence, indent=2))
@@ -32,12 +33,27 @@ def run(label, args, expect_failure=False):
     print(label+": passed")
     return r.stdout.strip()
 
-def invoke(label, contract, method, args=(), signer=OWNER, failure=False, read=False):
+def invoke(label, contract, method, args=(), signer=OWNER, failure=False, read=False, cosign=True):
+    if method == "transfer" and signer == EXECUTOR and cosign:
+        node = os.environ.get("STELLAR_TESTNET_NODE") or shutil.which("node") or shutil.which("node.exe")
+        if not node:
+            raise RuntimeError("Node 22+ is required for exact dual-signer Testnet transfers; install the pinned npm dependencies first")
+        helper, proof = ROOT/"scripts/dual-transfer.mjs", OUT/f"transfer-{len(evidence['operations'])}.json"
+        if os.name != "nt" and Path(node).name.lower().endswith(".exe"):
+            helper = subprocess.check_output(["wslpath", "-w", str(helper)], text=True).strip()
+            proof = subprocess.check_output(["wslpath", "-w", str(proof)], text=True).strip()
+        values = dict(zip(args[::2], args[1::2]))
+        body = {"cli": CLI, "distro": os.environ.get("WSL_DISTRO_NAME", "Ubuntu"), "vault": contract,
+                "recipient": values["--recipient"], "amount": values["--amount"], "nonce": values["--nonce"],
+                "revision": values["--expected_revision"], "proofPath": str(proof)}
+        return run(label, [], failure, command=[node, str(helper)], stdin=json.dumps(body))
     return run(label,["contract","invoke","--id",contract,"--network","testnet","--source",signer,"--send",("no" if read else "yes"),"--",method,*args], failure)
 
 owner = run("owner address", ["keys","address",OWNER])
 recipient = run("recipient address", ["keys","address",RECIPIENT])
 executor = run("executor address", ["keys","address",EXECUTOR])
+authority = run("authority address", ["keys","address",AUTHORITY])
+assert len({owner, executor, authority}) == 3, "Owner, executor and authority must be distinct"
 asset = run("native asset", ["contract","id","asset","--asset","native","--network","testnet"])
 hashes = {}
 for name in ["policy","vault","factory"]:
@@ -47,12 +63,13 @@ for name in ["policy","vault","factory"]:
 policy=run("deploy policy",["contract","deploy","--wasm-hash",hashes["policy"],"--network","testnet","--source",OWNER])
 factory=run("deploy factory",["contract","deploy","--wasm-hash",hashes["factory"],"--network","testnet","--source",OWNER,"--","--vault_wasm",hashes["vault"]])
 salt=hashlib.sha256(str(time.time_ns()).encode()).hexdigest()
-vault=json.loads(invoke("factory creates vault",factory,"create",["--salt",salt,"--owner",owner,"--executor",executor,"--asset",asset,"--policy",policy,"--policy_source",evidence["source_hash"],"--policy_wasm",hashes["policy"],"--daily_limit","1000000"]))
-evidence.update({"owner":owner,"executor":executor,"recipient":recipient,"asset":asset,"policy":policy,"factory":factory,"vault":vault})
+vault=json.loads(invoke("factory creates vault",factory,"create",["--salt",salt,"--owner",owner,"--executor",executor,"--authority",authority,"--asset",asset,"--policy",policy,"--policy_source",evidence["source_hash"],"--policy_wasm",hashes["policy"],"--daily_limit","1000000"]))
+evidence.update({"owner":owner,"executor":executor,"authority":authority,"recipient":recipient,"asset":asset,"policy":policy,"factory":factory,"vault":vault})
 recipient_before=int(json.loads(invoke("recipient initial balance",asset,"balance",["--id",recipient],read=True)))
 invoke("deposit 2 XLM",vault,"deposit",["--from",owner,"--amount","2000000"])
 invoke("unapproved transfer",vault,"transfer",["--recipient",recipient,"--amount","1","--nonce","0","--expected_revision","0"],EXECUTOR,True)
 invoke("approve policy",vault,"approve",["--approved","true","--expected_revision","0"])
+invoke("deny executor without authority",vault,"transfer",["--recipient",recipient,"--amount","1","--nonce","0","--expected_revision","1"],EXECUTOR,True,cosign=False)
 invoke("transfer 0.6 XLM",vault,"transfer",["--recipient",recipient,"--amount","600000","--nonce","0","--expected_revision","1"],EXECUTOR)
 state=json.loads(invoke("state after transfer",vault,"state",read=True))
 assert int(state["spent"])==600000 and int(state["nonce"])==1
