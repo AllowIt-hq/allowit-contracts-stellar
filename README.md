@@ -54,3 +54,5 @@ Maintain policy code and instance TTL. Archived policy blocks evaluation. Owner 
 [Policy source](policy/policy.rs) calls `require_approval` and `enforce_daily_limit` from [policy_api.rs](policy/policy_api.rs). Custody commits spending and transfers atomically. Check shared source copies with `python3 scripts/check-policy.py --peer ../OTHER_REPO`.
 
 Save signed transaction bytes before broadcast. Check the original transaction after an uncertain result before signing a replacement. `python3 scripts/artifacts.py --output PATH` saves a build manifest.
+
+Design: [Ownership and shared-engine architecture](docs/architecture.md). This documentation change does not implement its upgrades or shared engine.
