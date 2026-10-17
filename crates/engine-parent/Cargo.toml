@@ -1,0 +1,15 @@
+[package]
+name = "allowit-engine-parent"
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk.workspace = true
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+allowit-wallet-protocol = { path = "../protocol" }

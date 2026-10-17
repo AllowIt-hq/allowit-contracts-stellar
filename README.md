@@ -1,5 +1,15 @@
 # AllowIt native Stellar contracts
 
+## Wallet MVP
+
+`allowit-odc` is an owner-controlled SAC transfer wallet. It checks recipient permissions, per-transfer/daily/lifetime caps, call count, expiry, nonce and revision locally. Amounts use exact native `i128` units. The shared `allowit-wallet-engine` returns only a veto decision. `allowit-engine-parent` manages its shared executable and separate upgrade authority.
+
+Owner pause, recovery, grant/agent/engine changes, ownership handoff and ODC code upgrades never call the engine. Spending counters survive configuration changes. General calls, token approvals and external contract-account signing are unsupported. Fund the ODC with a direct SAC transfer.
+
+[Architecture](docs/architecture.md) · [Setup and administration](docs/admin.md)
+
+## Existing daily-limit vault
+
 Rust/Soroban policy and vault contracts enforce owner-approved spending. A factory creates owner-bound vaults from shared Wasm.
 
 Owners fund, tune, approve, revoke, switch policy and withdraw. Transfers require the executor and check asset, UTC daily limit, nonce and revision. Funding and tuning preserve spending counters. Switching policy clears approval.
@@ -12,14 +22,14 @@ Use Rust 1.98.0, Soroban SDK 28.0.0 and [Stellar CLI](https://developers.stellar
 
 ```sh
 python3 scripts/check-policy.py
-stellar contract build
+scripts/build-contracts.sh
 cargo test --workspace --locked
 python3 scripts/artifacts.py
 ```
 
-Tests execute compiled policy and vault Wasm, token custody and factory deployment.
+Tests execute compiled ODC, parent and engine upgrades, owner recovery, token custody and the legacy vault/factory.
 
-## Deploy to Stellar Testnet
+## Legacy vault: deploy to Stellar Testnet
 
 Build first. Create a fresh funded identity in the secure store. Upload each Wasm, then deploy the policy and factory:
 
@@ -54,5 +64,3 @@ Maintain policy code and instance TTL. Archived policy blocks evaluation. Owner 
 [Policy source](policy/policy.rs) calls `require_approval` and `enforce_daily_limit` from [policy_api.rs](policy/policy_api.rs). Custody commits spending and transfers atomically. Check shared source copies with `python3 scripts/check-policy.py --peer ../OTHER_REPO`.
 
 Save signed transaction bytes before broadcast. Check the original transaction after an uncertain result before signing a replacement. `python3 scripts/artifacts.py --output PATH` saves a build manifest.
-
-Design: [Ownership and shared-engine architecture](docs/architecture.md). This documentation change does not implement its upgrades or shared engine.

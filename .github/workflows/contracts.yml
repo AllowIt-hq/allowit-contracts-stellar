@@ -36,6 +36,6 @@ jobs:
           echo /tmp/stellar-cli >> "$GITHUB_PATH"
           rustup target add wasm32v1-none --toolchain 1.98.0
       - name: Build all contract Wasm
-        run: stellar contract build
+        run: scripts/build-contracts.sh
       - name: Local authorization and custody regressions
         run: cargo test --workspace --locked -- --skip custody_transfer_daily_boundary_and_atomic_denial --skip factory_creates_compiled_vaults_with_owner_bound_salts

@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""Prepare explicit Stellar contract setup/admin XDR. Never signs or submits."""
+import argparse
+import copy
+import hashlib
+import time
+import json
+import os
+import re
+import subprocess
+from stellar_sdk import Address, Network, xdr, StrKey, TransactionEnvelope, InvokeHostFunction, Preconditions, TimeBounds
+from wallet_admin import admin as verify_admin, fetch, owner_only, PASSPHRASE
+
+# No transfers, token approvals, general calls or arbitrary method dispatch.
+ODC = {
+    "set_grant": {"grant", "expected_revision"},
+    "set_engine": {"engine", "expected_revision"},
+    "set_agent": {"agent", "expected_revision"},
+    "set_paused": {"paused", "expected_revision"},
+    "transfer_owner": {"new_owner", "expected_revision"},
+    "upgrade": {"new_wasm_hash", "expected_revision"},
+    "recover": {"recipient", "amount", "expected_revision"},
+}
+PARENT = {
+    "upgrade_engine": {"new_hash", "expected_revision"},
+    "upgrade_parent": {"new_hash", "expected_revision"},
+    "set_admin": {"new_admin", "expected_revision"},
+}
+
+
+def address(value):
+    if not isinstance(value, str) or not (StrKey.is_valid_ed25519_public_key(value) or StrKey.is_valid_contract(value)):
+        raise ValueError("Expected a public Stellar G or C address")
+    return value
+
+
+def account(value):
+    try:
+        valid = isinstance(value, str) and StrKey.is_valid_ed25519_public_key(value)
+    except Exception:
+        valid = False
+    if not valid:
+        raise argparse.ArgumentTypeError("Expected a public Stellar G address")
+    return value
+
+
+def contract(value):
+    if not isinstance(value, str) or not StrKey.is_valid_contract(value):
+        raise ValueError("Expected a contract C address")
+    return value
+
+
+def code_hash(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        raise ValueError("Expected 32-byte hexadecimal Wasm hash")
+    return value
+
+
+def grant(value):
+    fields = {"asset", "recipients", "per_transfer", "daily_limit", "total_limit", "max_calls", "expires_at"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("Grant fields must match the ODC ABI")
+    address(value["asset"])
+    recipients = value["recipients"]
+    if not isinstance(recipients, list) or not 1 <= len(recipients) <= 16 or len(set(recipients)) != len(recipients):
+        raise ValueError("Grant requires 1..16 distinct recipients")
+    for recipient in recipients:
+        address(recipient)
+    for key in fields - {"asset", "recipients"}:
+        limit = 2**64 - 1 if key in ("max_calls", "expires_at") else 2**127 - 1
+        if type(value[key]) is not int or not 0 < value[key] <= limit:
+            raise ValueError("Grant values must be positive bounded integers")
+    if not value["per_transfer"] <= value["daily_limit"] <= value["total_limit"]:
+        raise ValueError("Grant limits must satisfy per_transfer <= daily_limit <= total_limit")
+    return value
+
+
+def checked_args(method, values, family):
+    expected = (ODC if family == "odc" else PARENT)[method]
+    if not isinstance(values, dict) or set(values) != expected:
+        raise ValueError("Arguments must exactly match " + ", ".join(sorted(expected)))
+    for key, value in values.items():
+        if key == "expected_revision" or key == "amount":
+            if type(value) is not int or (value < 0 if key == "expected_revision" else value <= 0) or value > (2**64 - 1 if key == "expected_revision" else 2**127 - 1):
+                raise ValueError("Invalid integer " + key)
+        elif key in ("new_wasm_hash", "new_hash"):
+            code_hash(value)
+        elif key == "paused":
+            if type(value) is not bool:
+                raise ValueError("paused must be boolean")
+        elif key in ("new_owner", "agent", "new_admin"):
+            account(value)
+        elif key == "engine":
+            contract(value)
+        elif key == "grant":
+            grant(value)
+        else:
+            address(value)
+    return values
+
+
+def serialize(values):
+    args = []
+    for key, value in values.items():
+        if key == "grant":
+            value = dict(value)
+            for amount in ("per_transfer", "daily_limit", "total_limit"):
+                value[amount] = str(value[amount])
+        args += ["--" + key.replace("_", "-"), json.dumps(value, separators=(",", ":")) if not isinstance(value, str) else value]
+    return args
+
+
+def cli_run(args, input_data=None):
+    # Ignore inherited Stellar signing/source/network overrides. No secret inputs.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("STELLAR_")}
+    cli = os.environ.get("STELLAR_BIN", "stellar")
+    version = subprocess.run([cli, "--version"], check=True, capture_output=True, text=True, env=environment).stdout
+    if not version.startswith("stellar 28.1.0 "):
+        raise ValueError("Stellar CLI 28.1.0 is required")
+    return subprocess.run([cli] + args, check=True, capture_output=True, text=True, env=environment, input=input_data).stdout.strip()
+
+
+def prepare_xdr(raw_xdr, source, network, now=None, max_fee=10_000_000, candidate=None):
+    """Assemble RPC resources without permitting transaction-intent changes."""
+    raw = TransactionEnvelope.from_xdr(raw_xdr, PASSPHRASE[network])
+    tx = raw.transaction
+    if raw.signatures or not tx.v1 or tx.source.account_id != source or tx.source.account_muxed_id is not None:
+        raise ValueError("Expected unsigned v1 transaction with the selected native source")
+    if len(tx.operations) != 1 or not isinstance(tx.operations[0], InvokeHostFunction):
+        raise ValueError("Expected exactly one Soroban host-function operation")
+    operation_source = tx.operations[0].source
+    if operation_source is not None and operation_source.to_xdr_object() != tx.source.to_xdr_object():
+        raise ValueError("Operation source differs from selected transaction source")
+    now = int(time.time()) if now is None else now
+    if tx.preconditions is None:
+        tx.preconditions = Preconditions()
+    tx.preconditions.time_bounds = TimeBounds(0, now + 300)
+    simulation = ["tx", "simulate", "--network", network, "--source-account", source, "--auth-mode", "root"]
+    assembled_xdr = cli_run(simulation, input_data=raw.to_xdr())
+    assembled = TransactionEnvelope.from_xdr(assembled_xdr, PASSPHRASE[network])
+    result = assembled.transaction
+    if assembled.signatures or not result.v1 or result.soroban_data is None:
+        raise ValueError("Simulation must return unsigned assembled Soroban XDR")
+    if len(result.operations) != 1 or not isinstance(result.operations[0], InvokeHostFunction):
+        raise ValueError("Simulation changed the operation shape")
+    if type(max_fee) is not int or max_fee <= 0 or result.fee > max_fee or result.soroban_data.resource_fee.int64 > max_fee:
+        raise ValueError("Simulated fee exceeds the explicitly selected ceiling")
+    validate_auth(result.operations[0], candidate, network)
+    # Simulation may add authorization, resources/footprint and their fee only.
+    normalized = copy.deepcopy(result)
+    normalized.fee = tx.fee
+    normalized.soroban_data = tx.soroban_data
+    normalized.operations[0].auth = tx.operations[0].auth
+    if normalized.to_xdr_object().to_xdr() != tx.to_xdr_object().to_xdr() or result.fee < tx.fee:
+        raise ValueError("Simulation changed transaction intent")
+    return assembled.to_xdr()
+
+
+def deployment_address(create, network):
+    preimage = xdr.HashIDPreimage(
+        xdr.EnvelopeType.ENVELOPE_TYPE_CONTRACT_ID,
+        contract_id=xdr.HashIDPreimageContractID(xdr.Hash(Network(PASSPHRASE[network]).network_id()), create.contract_id_preimage))
+    return Address(StrKey.encode_contract(hashlib.sha256(preimage.to_xdr_bytes()).digest())).to_xdr_sc_address()
+
+
+def validate_auth(operation, candidate=None, network="testnet"):
+    host = operation.host_function
+    allowed_types = {
+        xdr.HostFunctionType.HOST_FUNCTION_TYPE_INVOKE_CONTRACT: (xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN, "invoke_contract", "contract_fn"),
+        xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT: (xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_HOST_FN, "create_contract", "create_contract_host_fn"),
+        xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2: (xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_V2_HOST_FN, "create_contract_v2", "create_contract_v2_host_fn"),
+    }
+    seen_source = False
+    seen_candidate = False
+    for entry in operation.auth:
+        root = entry.root_invocation
+        kind = allowed_types.get(host.type)
+        if kind is None or root.function.type != kind[0] or getattr(root.function, kind[2]) != getattr(host, kind[1]):
+            raise ValueError("Simulation requested unexpected authorization scope")
+        credentials = entry.credentials
+        if host.type == xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2:
+            if credentials.type != xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT or len(root.sub_invocations) != 1:
+                raise ValueError("Deployment requires one exact source-authorized constructor child")
+            child = root.sub_invocations[0]
+            constructor = child.function.contract_fn
+            if child.sub_invocations or child.function.type != xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN or constructor is None:
+                raise ValueError("Unexpected deployment constructor authorization shape")
+            if constructor.contract_address != deployment_address(host.create_contract_v2, network) or constructor.function_name.sc_symbol != b"__constructor" or constructor.args != host.create_contract_v2.constructor_args:
+                raise ValueError("Deployment constructor authorization does not match its preimage and arguments")
+        elif root.sub_invocations:
+            raise ValueError("Invocation authorization must not contain children")
+        if credentials.type == xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT:
+            if seen_source:
+                raise ValueError("Duplicate source authorization")
+            seen_source = True
+        elif credentials.type == xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS:
+            if not candidate or seen_candidate or credentials.address.address != Address(candidate).to_xdr_sc_address():
+                raise ValueError("Simulation requested an unexpected authorization address")
+            if credentials.address.signature.type != xdr.SCValType.SCV_VOID:
+                raise ValueError("Simulation supplied unexpected authorization signatures")
+            seen_candidate = True
+        else:
+            raise ValueError("Unsupported authorization credential type")
+    if host.type == xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2 and not seen_source:
+        raise ValueError("Deployment requires source-account constructor authorization")
+
+
+def command(args):
+    if args.network == "mainnet" and not args.allow_mainnet and args.action != "read":
+        raise ValueError("Mainnet preparation requires --allow-mainnet")
+    base = ["--network", args.network, "--source-account", account(args.source)]
+    if args.action == "upload":
+        if not args.wasm:
+            raise ValueError("--wasm is required")
+        return ["contract", "upload", "--wasm", args.wasm, "--build-only"] + base
+    if args.action.startswith("deploy-"):
+        code_hash(args.wasm_hash)
+        if args.action == "deploy-parent":
+            values = {"admin": address(args.admin), "engine_wasm": code_hash(args.engine_wasm)}
+            if args.source != args.admin:
+                raise ValueError("Parent deployment source must be its native admin account")
+        else:
+            values = {"owner": account(args.owner), "agent": account(args.agent), "engine": contract(args.engine), "grant": grant(json.loads(args.grant))}
+            if args.source != args.owner:
+                raise ValueError("ODC deployment source must be its owner")
+            if args.owner == args.agent:
+                raise ValueError("Owner and agent must differ")
+        return ["contract", "deploy", "--wasm-hash", args.wasm_hash, "--build-only"] + base + ["--"] + serialize(values)
+    address(args.contract)
+    if not StrKey.is_valid_contract(args.contract):
+        raise ValueError("Target must be a contract C address")
+    if args.action == "read":
+        if args.method not in ("state", "engine"):
+            raise ValueError("Only state/engine reads are supported")
+        return ["contract", "invoke", "--id", args.contract, "--send=no"] + base + ["--", args.method]
+    methods = ODC if args.family == "odc" else PARENT
+    if args.method not in methods:
+        raise ValueError("Method is outside the admin allowlist")
+    values = checked_args(args.method, json.loads(args.arguments), args.family)
+    return ["contract", "invoke", "--id", args.contract, "--build-only"] + base + ["--", args.method] + serialize(values)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("action", choices=["upload", "deploy-parent", "deploy-odc", "read", "admin"])
+    p.add_argument("--network", choices=["testnet", "mainnet"], default="testnet")
+    p.add_argument("--allow-mainnet", action="store_true")
+    p.add_argument("--source", required=True, type=account)
+    for flag in ("wasm", "wasm-hash", "admin", "engine-wasm", "owner", "agent", "engine", "grant", "contract", "method"):
+        p.add_argument("--" + flag)
+    p.add_argument("--family", choices=["odc", "parent"], default="odc")
+    p.add_argument("--member", action="append", default=[], type=account, help="Exactly three public members of the native parent admin")
+    p.add_argument("--candidate-member", action="append", default=[], type=account, help="Three admitted members for parent admin handoff candidate")
+    p.add_argument("--max-fee", type=int, default=10_000_000, help="Maximum total/resource fee in stroops; default 1 XLM")
+    p.add_argument("--arguments", default="{}", help="Public argument JSON; never keys or credentials")
+    args = p.parse_args()
+    prepared = command(args)
+    if args.action == "deploy-parent" or args.action == "admin" and args.family == "parent":
+        verify_admin(fetch(args.network, args.source), args.member)
+        if args.action == "admin" and args.method == "set_admin":
+            verify_admin(fetch(args.network, json.loads(args.arguments)["new_admin"]), args.candidate_member)
+    if args.action == "deploy-odc" or args.action == "admin" and args.family == "odc":
+        owner_only(fetch(args.network, args.source))
+        if args.action == "admin" and args.method == "transfer_owner":
+            owner_only(fetch(args.network, json.loads(args.arguments)["new_owner"]))
+    if args.action == "admin":
+        state_args = ["contract", "invoke", "--id", args.contract, "--network", args.network,
+                      "--source-account", args.source, "--send=no", "--", "state"]
+        state = json.loads(cli_run(state_args))
+        authority = state["owner" if args.family == "odc" else "upgrade_authority"]
+        if args.family == "odc":
+            values = json.loads(args.arguments)
+            roles = {"owner": state["owner"], "agent": state["agent"], "engine": state["engine"]}
+            for method, field, argument in (("set_agent", "agent", "agent"), ("set_engine", "engine", "engine"), ("transfer_owner", "owner", "new_owner")):
+                if args.method == method:
+                    roles[field] = values[argument]
+            if len(set(roles.values())) != 3 or args.contract in roles.values():
+                raise ValueError("Owner, agent, engine and ODC must be distinct")
+        if args.source != authority:
+            raise ValueError("Source is not the contract's current owner/admin")
+        if json.loads(args.arguments)["expected_revision"] != state["revision"]:
+            raise ValueError("Expected revision does not match current state")
+    output = cli_run(prepared)
+    candidate = None
+    if args.action == "admin" and args.method in ("set_admin", "transfer_owner"):
+        candidate = json.loads(args.arguments)["new_admin" if args.method == "set_admin" else "new_owner"]
+    print(output if args.action == "read" else prepare_xdr(output, args.source, args.network, max_fee=args.max_fee, candidate=candidate))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, KeyError, TypeError, argparse.ArgumentTypeError) as error:
+        raise SystemExit(str(error)) from None

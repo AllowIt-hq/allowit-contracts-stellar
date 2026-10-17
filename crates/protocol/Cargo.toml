@@ -1,0 +1,11 @@
+[package]
+name = "allowit-wallet-protocol"
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk.workspace = true
