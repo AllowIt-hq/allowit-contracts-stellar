@@ -3,6 +3,8 @@ import argparse
 import subprocess
 from io import BytesIO, StringIO
 import json
+import hashlib
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 import sys
@@ -236,9 +238,13 @@ class ContractAdmin(unittest.TestCase):
             prepared.transaction.soroban_data = xdr.SorobanTransactionData(xdr.SorobanTransactionDataExt(0), xdr.SorobanResources(xdr.LedgerFootprint([], []), xdr.Uint32(100), xdr.Uint32(0), xdr.Uint32(0)), xdr.Int64(123))
             return prepared.to_xdr()
         with patch.object(ca, "cli_run", side_effect=assemble):
-            assembled = TransactionEnvelope.from_xdr(ca.prepare_xdr(raw.to_xdr(), KEYS[0], "testnet", now=1000), wa.PASSPHRASE["testnet"])
+            assembled = TransactionEnvelope.from_xdr(ca.prepare_xdr(raw.to_xdr(), KEYS[0], "testnet", now=1000, expected_wasm="06" * 32), wa.PASSPHRASE["testnet"])
         self.assertEqual(assembled.transaction.operations[0].auth, [entry])
         self.assertEqual(assembled.signatures, [])
+        with patch.object(ca, "cli_run") as simulated:
+            with self.assertRaises(ValueError):
+                ca.prepare_xdr(raw.to_xdr(), KEYS[0], "testnet", expected_wasm="07" * 32)
+            simulated.assert_not_called()
         with self.assertRaises(ValueError):
             ca.validate_auth(operation, network="mainnet")
         for mutation in ("address", "name", "args", "deep", "candidate", "duplicate", "extra", "missing"):
@@ -316,6 +322,23 @@ class ContractAdmin(unittest.TestCase):
             ca.command(args)
         args.allow_mainnet = True
         self.assertIn("--build-only", ca.command(args))
+
+    def test_deployment_requires_matching_local_wasm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "contract.wasm"
+            path.write_bytes(b"test-wasm")
+            expected = hashlib.sha256(path.read_bytes()).hexdigest()
+            options = SimpleNamespace(action="deploy-parent", network="testnet", allow_mainnet=False, source=KEYS[0],
+                wasm=str(path), wasm_hash=expected, admin=KEYS[0], engine_wasm="11" * 32)
+            command = ca.command(options)
+            self.assertIn("--wasm", command)
+            self.assertNotIn("--wasm-hash", command)
+            options.wasm_hash = "00" * 32
+            with self.assertRaises(ValueError):
+                ca.command(options)
+            options.wasm = None
+            with self.assertRaises(ValueError):
+                ca.command(options)
 
     def test_secrets_and_hashes_reject(self):
         with self.assertRaises((ValueError, argparse.ArgumentTypeError)):

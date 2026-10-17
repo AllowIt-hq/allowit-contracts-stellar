@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 from stellar_sdk import Address, Network, xdr, StrKey, TransactionEnvelope, InvokeHostFunction, Preconditions, TimeBounds
 from wallet_admin import admin as verify_admin, fetch, owner_only, PASSPHRASE
 
@@ -54,6 +55,15 @@ def code_hash(value):
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
         raise ValueError("Expected 32-byte hexadecimal Wasm hash")
     return value
+
+
+def pinned_wasm(path, expected_hash):
+    expected_hash = code_hash(expected_hash).lower()
+    if not path:
+        raise ValueError("Constructor deployment requires --wasm and its pinned --wasm-hash")
+    if hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected_hash:
+        raise ValueError("Local Wasm does not match the pinned deployment hash")
+    return expected_hash
 
 
 def grant(value):
@@ -120,7 +130,7 @@ def cli_run(args, input_data=None):
     return subprocess.run([cli] + args, check=True, capture_output=True, text=True, env=environment, input=input_data).stdout.strip()
 
 
-def prepare_xdr(raw_xdr, source, network, now=None, max_fee=10_000_000, candidate=None):
+def prepare_xdr(raw_xdr, source, network, now=None, max_fee=10_000_000, candidate=None, expected_wasm=None):
     """Assemble RPC resources without permitting transaction-intent changes."""
     raw = TransactionEnvelope.from_xdr(raw_xdr, PASSPHRASE[network])
     tx = raw.transaction
@@ -128,6 +138,10 @@ def prepare_xdr(raw_xdr, source, network, now=None, max_fee=10_000_000, candidat
         raise ValueError("Expected unsigned v1 transaction with the selected native source")
     if len(tx.operations) != 1 or not isinstance(tx.operations[0], InvokeHostFunction):
         raise ValueError("Expected exactly one Soroban host-function operation")
+    if expected_wasm is not None:
+        host = tx.operations[0].host_function
+        if host.type != xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2 or host.create_contract_v2.executable.type != xdr.ContractExecutableType.CONTRACT_EXECUTABLE_WASM or host.create_contract_v2.executable.wasm_hash.hash.hex() != code_hash(expected_wasm).lower():
+            raise ValueError("Deployment transaction does not use the pinned Wasm executable")
     operation_source = tx.operations[0].source
     if operation_source is not None and operation_source.to_xdr_object() != tx.source.to_xdr_object():
         raise ValueError("Operation source differs from selected transaction source")
@@ -214,7 +228,7 @@ def command(args):
             raise ValueError("--wasm is required")
         return ["contract", "upload", "--wasm", args.wasm, "--build-only"] + base
     if args.action.startswith("deploy-"):
-        code_hash(args.wasm_hash)
+        pinned_wasm(args.wasm, args.wasm_hash)
         if args.action == "deploy-parent":
             values = {"admin": address(args.admin), "engine_wasm": code_hash(args.engine_wasm)}
             if args.source != args.admin:
@@ -225,7 +239,7 @@ def command(args):
                 raise ValueError("ODC deployment source must be its owner")
             if args.owner == args.agent:
                 raise ValueError("Owner and agent must differ")
-        return ["contract", "deploy", "--wasm-hash", args.wasm_hash, "--build-only"] + base + ["--"] + serialize(values)
+        return ["contract", "deploy", "--wasm", args.wasm, "--build-only"] + base + ["--"] + serialize(values)
     address(args.contract)
     if not StrKey.is_valid_contract(args.contract):
         raise ValueError("Target must be a contract C address")
@@ -284,7 +298,7 @@ def main():
     candidate = None
     if args.action == "admin" and args.method in ("set_admin", "transfer_owner"):
         candidate = json.loads(args.arguments)["new_admin" if args.method == "set_admin" else "new_owner"]
-    print(output if args.action == "read" else prepare_xdr(output, args.source, args.network, max_fee=args.max_fee, candidate=candidate))
+    print(output if args.action == "read" else prepare_xdr(output, args.source, args.network, max_fee=args.max_fee, candidate=candidate, expected_wasm=args.wasm_hash if args.action.startswith("deploy-") else None))
 
 
 if __name__ == "__main__":

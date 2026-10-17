@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import contract_admin as ca
@@ -27,12 +28,14 @@ class RealCliEncoding(unittest.TestCase):
         contract = StrKey.encode_contract(bytes([2]) * 32)
         recipient = Keypair.from_raw_ed25519_seed(bytes([3]) * 32).public_key
         grant = {"asset": contract, "recipients": [recipient], "per_transfer": 10, "daily_limit": 20, "total_limit": 30, "max_calls": 5, "expires_at": 1000}
+        methods = []
         class Rpc(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 method = request["method"]
+                methods.append(method)
                 if method == "getNetwork":
                     result = {"passphrase": Network.TESTNET_NETWORK_PASSPHRASE, "protocolVersion": 28}
                 elif method == "getLedgerEntries":
@@ -73,6 +76,27 @@ class RealCliEncoding(unittest.TestCase):
                 self.assertEqual(values["per_transfer"].type, xdr.SCValType.SCV_I128)
                 self.assertEqual(values["per_transfer"].i128.lo.uint64, 10)
                 self.assertEqual(values["max_calls"].u64.uint64, 5)
+                for action, wasm in (("deploy-parent", WASM.with_name("allowit_engine_parent.wasm")), ("deploy-odc", WASM)):
+                    with self.subTest(action=action):
+                        expected = hashlib.sha256(wasm.read_bytes()).hexdigest()
+                        options = SimpleNamespace(action=action, network="testnet", allow_mainnet=False, source=account,
+                            wasm=str(wasm), wasm_hash=expected, admin=account, engine_wasm="11" * 32,
+                            owner=account, agent=recipient, engine=contract, grant=json.dumps(grant))
+                        prepared = ca.command(options)
+                        self.assertIn("--wasm", prepared)
+                        self.assertNotIn("--wasm-hash", prepared)
+                        network_index = prepared.index("--network")
+                        prepared[network_index:network_index + 2] = ["--rpc-url", f"http://127.0.0.1:{server.server_port}", "--network-passphrase", Network.TESTNET_NETWORK_PASSPHRASE]
+                        result = subprocess.run([CLI, "--config-dir", config] + prepared, check=True, capture_output=True, text=True, timeout=30)
+                        deployed = TransactionEnvelope.from_xdr(result.stdout.strip(), Network.TESTNET_NETWORK_PASSPHRASE)
+                        self.assertEqual(deployed.signatures, [])
+                        host = deployed.transaction.operations[0].host_function
+                        self.assertEqual(host.type, xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2)
+                        self.assertEqual(host.create_contract_v2.executable.wasm_hash.hash.hex(), expected)
+                        self.assertEqual(len(host.create_contract_v2.constructor_args), 2 if action == "deploy-parent" else 4)
+                self.assertTrue(methods)
+                self.assertTrue(set(methods) <= {"getNetwork", "getLedgerEntries"})
+                self.assertNotIn("sendTransaction", methods)
         finally:
             server.shutdown()
             server.server_close()
