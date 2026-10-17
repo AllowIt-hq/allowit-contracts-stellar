@@ -55,7 +55,7 @@ python3 -u scripts/testnet.py --output-dir /absolute/path/outside/checkout/testn
 
 The driver deploys fresh policy, vault and factory contracts. It funds a vault, tests approved and rejected transfers, then withdraws the balance. Addresses and transaction hashes appear in `evidence.json`. This uses Testnet XLM, not USDC. Reuse existing funded identities instead of generating replacements.
 
-## Legacy vault: contract identity and operation
+## Contract identity and operation
 
 The [vault](crates/vault/src/lib.rs) defines the ABI. Clients pin factory address, factory/vault/policy Wasm hashes, source bundle, asset, owner and executor. Every policy call checks the resolved Wasm hash. Contracts expose no upgrade entrypoint. Owners can select a new policy version.
 
