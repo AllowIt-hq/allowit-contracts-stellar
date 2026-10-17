@@ -1,0 +1,329 @@
+import copy
+import argparse
+import subprocess
+from io import BytesIO, StringIO
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
+import sys
+import unittest
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import wallet_admin as wa
+import contract_admin as ca
+from stellar_sdk import Keypair, TransactionEnvelope, Account, TransactionBuilder, Address, StrKey, xdr
+
+KEYS = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 6)]
+
+
+def state():
+    return {"account_id": KEYS[0], "sequence": "42", "signers": [
+        {"key": KEYS[0], "weight": 1, "type": "ed25519_public_key"}],
+        "thresholds": {"low_threshold": 0, "med_threshold": 0, "high_threshold": 0}}
+
+
+class NativeAdmin(unittest.TestCase):
+    def test_owner_only_admission(self):
+        wa.owner_only(state())
+        value = state()
+        value["signers"][0]["weight"] = 3
+        value["thresholds"] = dict(zip(("low_threshold", "med_threshold", "high_threshold"), (2, 2, 3)))
+        wa.owner_only(value)
+        value["signers"] += [{"key": k, "weight": 1, "type": "ed25519_public_key"} for k in KEYS[1:3]]
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            wa.owner_only(value)
+        for change in ("zero", "drift", "hash"):
+            value = state()
+            if change == "zero":
+                value["signers"][0]["weight"] = 0
+            elif change == "drift":
+                value["thresholds"]["high_threshold"] = 2
+            else:
+                value["signers"].append({"key": "hash", "weight": 1, "type": "sha256_hash"})
+            with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+                wa.owner_only(value)
+
+    def test_setup_unsigned_atomic_exact(self):
+        envelope = wa.prepare(state(), "setup-wallet", "testnet", agent=KEYS[1], engine=KEYS[2], now=1000)
+        tx = TransactionEnvelope.from_xdr(envelope.to_xdr(), wa.PASSPHRASE["testnet"])
+        self.assertEqual(tx.signatures, [])
+        self.assertEqual(tx.transaction.sequence, 43)
+        self.assertEqual(tx.transaction.fee, 300)
+        self.assertEqual(tx.transaction.preconditions.time_bounds.min_time, 0)
+        self.assertEqual(tx.transaction.preconditions.time_bounds.max_time, 1300)
+        ops = tx.transaction.operations
+        self.assertEqual(len(ops), 3)
+        self.assertEqual(ops[0].signer, wa.Signer.ed25519_public_key(KEYS[1], 1))
+        self.assertEqual(ops[1].signer, wa.Signer.ed25519_public_key(KEYS[2], 1))
+        self.assertEqual((ops[2].master_weight, ops[2].low_threshold, ops[2].med_threshold, ops[2].high_threshold), (3, 2, 2, 3))
+        self.assertTrue(all(op.source is None for op in ops))
+
+    def test_setup_rejects_existing_authority(self):
+        for malformed in ("threshold", "signer", "preauth", "duplicate"):
+            value = state()
+            if malformed == "threshold":
+                value["thresholds"]["high_threshold"] = 1
+            else:
+                extra = {"key": KEYS[3], "weight": 1, "type": "ed25519_public_key"}
+                if malformed == "preauth":
+                    extra["type"] = "preauth_tx"
+                if malformed == "duplicate":
+                    extra["key"] = KEYS[0]
+                value["signers"].append(extra)
+            with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+                wa.prepare(value, "setup-wallet", "testnet", agent=KEYS[1], engine=KEYS[2])
+
+    def test_shutdown_removes_both_and_raises_thresholds(self):
+        value = state()
+        value["signers"][0]["weight"] = 3
+        value["signers"] += [{"key": k, "weight": 1, "type": "ed25519_public_key"} for k in KEYS[1:3]]
+        value["thresholds"] = dict(zip(("low_threshold", "med_threshold", "high_threshold"), (2, 2, 3)))
+        wa.wallet(value, KEYS[1], KEYS[2])
+        tx = wa.prepare(value, "shutdown-wallet", "testnet", agent=KEYS[1], engine=KEYS[2])
+        self.assertEqual([op.signer.weight for op in tx.transaction.operations[:2]], [0, 0])
+        self.assertEqual(tx.transaction.operations[-1].med_threshold, 3)
+        value["signers"].append({"key": KEYS[4], "weight": 1, "type": "ed25519_public_key"})
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            wa.wallet(value, KEYS[1], KEYS[2])
+
+    def test_shutdown_separate_sequence_and_operation_source(self):
+        value = state()
+        value["signers"][0]["weight"] = 3
+        value["signers"] += [{"key": k, "weight": 1, "type": "ed25519_public_key"} for k in KEYS[1:3]]
+        value["thresholds"] = dict(zip(("low_threshold", "med_threshold", "high_threshold"), (2, 2, 3)))
+        fee_source = state()
+        fee_source["account_id"] = KEYS[4]
+        fee_source["sequence"] = "100"
+        fee_source["signers"][0]["key"] = KEYS[4]
+        tx = wa.prepare(value, "shutdown-wallet", "testnet", agent=KEYS[1], engine=KEYS[2], source_state=fee_source)
+        self.assertEqual(tx.transaction.source.account_id, KEYS[4])
+        self.assertEqual(tx.transaction.sequence, 101)
+        self.assertTrue(all(op.source.account_id == KEYS[0] for op in tx.transaction.operations))
+        for delegated in KEYS[1:3]:
+            fee_source["account_id"] = delegated
+            fee_source["signers"][0]["key"] = delegated
+            with self.assertRaises(ValueError):
+                wa.prepare(value, "shutdown-wallet", "testnet", agent=KEYS[1], engine=KEYS[2], source_state=fee_source)
+
+    def test_offer_admission(self):
+        for records in ([], [{"id": "1"}]):
+            payload = json.dumps({"_embedded": {"records": records}}).encode()
+            with patch.object(wa, "urlopen", return_value=BytesIO(payload)):
+                if records:
+                    with self.assertRaises(ValueError):
+                        wa.no_offers("testnet", KEYS[0])
+                else:
+                    wa.no_offers("testnet", KEYS[0])
+            if records:
+                with patch.object(wa, "urlopen", return_value=BytesIO(payload)), patch.object(sys, "stderr", new_callable=StringIO) as warnings:
+                    wa.no_offers("testnet", KEYS[0], reject=False)
+                    self.assertIn("Revoke signers first", warnings.getvalue())
+
+    def test_admin_distinct_master_disabled(self):
+        tx = wa.prepare(state(), "setup-admin", "testnet", members=KEYS[1:4])
+        self.assertEqual(len(tx.transaction.operations), 4)
+        last = tx.transaction.operations[-1]
+        self.assertEqual((last.master_weight, last.low_threshold, last.med_threshold, last.high_threshold), (0, 2, 2, 2))
+        tx2 = wa.prepare(state(), "setup-admin", "testnet", members=KEYS[:3])
+        self.assertEqual(tx2.transaction.operations[-1].master_weight, 1)
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            wa.prepare(state(), "setup-admin", "testnet", members=[KEYS[1]] * 3)
+
+    def test_admin_candidate_exact_admission(self):
+        value = state()
+        with self.assertRaises(ValueError):
+            wa.admin(value, KEYS[1:4])
+        value["signers"][0]["weight"] = 0
+        value["signers"] += [{"key": key, "weight": 1, "type": "ed25519_public_key"} for key in KEYS[1:4]]
+        value["thresholds"] = dict.fromkeys(("low_threshold", "med_threshold", "high_threshold"), 2)
+        wa.admin(value, KEYS[1:4])
+        value["signers"][1]["weight"] = 2
+        with self.assertRaises(ValueError):
+            wa.admin(value, KEYS[1:4])
+
+    def test_bad_identity_and_fee(self):
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            wa.prepare(state(), "setup-wallet", "testnet", agent=KEYS[0], engine=KEYS[2])
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            wa.prepare(state(), "setup-wallet", "testnet", agent=KEYS[1], engine=KEYS[2], fee=1_000_000)
+
+
+class ContractAdmin(unittest.TestCase):
+    def test_exact_allowlist_and_types(self):
+        self.assertEqual(ca.checked_args("set_paused", {"paused": True, "expected_revision": 3}, "odc")["paused"], True)
+        for value in ({"paused": "false", "expected_revision": 3}, {"paused": True, "expected_revision": True}, {"paused": True, "expected_revision": 3, "target": KEYS[1]}):
+            with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+                ca.checked_args("set_paused", value, "odc")
+        self.assertNotIn("transfer", ca.ODC)
+        self.assertNotIn("approve", ca.ODC)
+        self.assertNotIn("set_grant", ca.PARENT)
+
+    def test_grant_limits_and_exact_fields(self):
+        value = {"asset": KEYS[0], "recipients": [KEYS[1]], "per_transfer": 1, "daily_limit": 2, "total_limit": 3, "max_calls": 4, "expires_at": 1000}
+        ca.grant(value)
+        for key, bad in (("per_transfer", 3), ("max_calls", 0), ("expires_at", True), ("recipients", [KEYS[1], KEYS[1]])):
+            modified = copy.deepcopy(value)
+            modified[key] = bad
+            with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+                ca.grant(modified)
+
+    def test_assembly_preserves_intent_and_adds_resources(self):
+        raw = TransactionBuilder(Account(KEYS[0], 42), wa.PASSPHRASE["testnet"], base_fee=100).append_upload_contract_wasm_op(b"test-wasm").set_timeout(0).build()
+        calls = []
+        def simulate(arguments, input_data=None):
+            calls.append(arguments)
+            result = TransactionEnvelope.from_xdr(input_data, wa.PASSPHRASE["testnet"])
+            self.assertEqual(result.signatures, [])
+            self.assertEqual(result.transaction.preconditions.time_bounds.min_time, 0)
+            self.assertEqual(result.transaction.preconditions.time_bounds.max_time, 1300)
+            result.transaction.fee += 123
+            result.transaction.soroban_data = xdr.SorobanTransactionData(
+                xdr.SorobanTransactionDataExt(0),
+                xdr.SorobanResources(xdr.LedgerFootprint([], []), xdr.Uint32(100), xdr.Uint32(0), xdr.Uint32(0)),
+                xdr.Int64(123))
+            return result.to_xdr()
+        with patch.object(ca, "cli_run", side_effect=simulate):
+            output = ca.prepare_xdr(raw.to_xdr(), KEYS[0], "testnet", now=1000)
+        assembled = TransactionEnvelope.from_xdr(output, wa.PASSPHRASE["testnet"])
+        self.assertEqual(assembled.signatures, [])
+        self.assertIsNotNone(assembled.transaction.soroban_data)
+        self.assertEqual(assembled.transaction.source.account_id, KEYS[0])
+        self.assertEqual(assembled.transaction.sequence, 43)
+        self.assertEqual(assembled.transaction.operations[0].host_function, raw.transaction.operations[0].host_function)
+        self.assertEqual(calls, [["tx", "simulate", "--network", "testnet", "--source-account", KEYS[0], "--auth-mode", "root"]])
+        for mutation in ("sequence", "bounds", "host", "unsigned_resources", "fee"):
+            def altered(arguments, input_data=None):
+                result = TransactionEnvelope.from_xdr(simulate(arguments, input_data), wa.PASSPHRASE["testnet"])
+                if mutation == "sequence":
+                    result.transaction.sequence += 1
+                elif mutation == "bounds":
+                    result.transaction.preconditions.time_bounds.max_time += 1
+                elif mutation == "host":
+                    other = TransactionBuilder(Account(KEYS[0], 42), wa.PASSPHRASE["testnet"]).append_upload_contract_wasm_op(b"other-wasm").set_timeout(0).build()
+                    result.transaction.operations[0].host_function = other.transaction.operations[0].host_function
+                elif mutation == "fee":
+                    result.transaction.fee = 10_000_001
+                else:
+                    result.transaction.soroban_data = None
+                return result.to_xdr()
+            with patch.object(ca, "cli_run", side_effect=altered):
+                with self.assertRaises(ValueError):
+                    ca.prepare_xdr(raw.to_xdr(), KEYS[0], "testnet", now=1000)
+        with self.assertRaises(ValueError):
+            ca.prepare_xdr(raw.to_xdr(), KEYS[1], "testnet", now=1000)
+
+    def test_deployment_constructor_authorization(self):
+        create = xdr.CreateContractArgsV2(
+            xdr.ContractIDPreimage(xdr.ContractIDPreimageType.CONTRACT_ID_PREIMAGE_FROM_ADDRESS,
+                from_address=xdr.ContractIDPreimageFromAddress(Address(KEYS[0]).to_xdr_sc_address(), xdr.Uint256(bytes([5]) * 32))),
+            xdr.ContractExecutable(xdr.ContractExecutableType.CONTRACT_EXECUTABLE_WASM, wasm_hash=xdr.Hash(bytes([6]) * 32)),
+            [Address(KEYS[0]).to_xdr_sc_val(), xdr.SCVal(xdr.SCValType.SCV_U64, u64=xdr.Uint64(7))])
+        host = xdr.HostFunction(xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2, create_contract_v2=create)
+        child = xdr.SorobanAuthorizedInvocation(xdr.SorobanAuthorizedFunction(
+            xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,
+            contract_fn=xdr.InvokeContractArgs(ca.deployment_address(create, "testnet"), xdr.SCSymbol(b"__constructor"), create.constructor_args)), [])
+        root = xdr.SorobanAuthorizedInvocation(xdr.SorobanAuthorizedFunction(
+            xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CREATE_CONTRACT_V2_HOST_FN,
+            create_contract_v2_host_fn=create), [child])
+        entry = xdr.SorobanAuthorizationEntry(xdr.SorobanCredentials(xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT), root)
+        operation = ca.InvokeHostFunction(host, auth=[entry])
+        ca.validate_auth(operation, network="testnet")
+        raw = TransactionBuilder(Account(KEYS[0], 42), wa.PASSPHRASE["testnet"]).append_operation(ca.InvokeHostFunction(host)).set_timeout(0).build()
+        def assemble(arguments, input_data=None):
+            prepared = TransactionEnvelope.from_xdr(input_data, wa.PASSPHRASE["testnet"])
+            prepared.transaction.operations[0].auth = [copy.deepcopy(entry)]
+            prepared.transaction.fee += 123
+            prepared.transaction.soroban_data = xdr.SorobanTransactionData(xdr.SorobanTransactionDataExt(0), xdr.SorobanResources(xdr.LedgerFootprint([], []), xdr.Uint32(100), xdr.Uint32(0), xdr.Uint32(0)), xdr.Int64(123))
+            return prepared.to_xdr()
+        with patch.object(ca, "cli_run", side_effect=assemble):
+            assembled = TransactionEnvelope.from_xdr(ca.prepare_xdr(raw.to_xdr(), KEYS[0], "testnet", now=1000), wa.PASSPHRASE["testnet"])
+        self.assertEqual(assembled.transaction.operations[0].auth, [entry])
+        self.assertEqual(assembled.signatures, [])
+        with self.assertRaises(ValueError):
+            ca.validate_auth(operation, network="mainnet")
+        for mutation in ("address", "name", "args", "deep", "candidate", "duplicate", "extra", "missing"):
+            altered = copy.deepcopy(operation)
+            node = altered.auth[0].root_invocation.sub_invocations[0]
+            if mutation == "address":
+                node.function.contract_fn.contract_address = Address(StrKey.encode_contract(bytes([9]) * 32)).to_xdr_sc_address()
+            elif mutation == "name":
+                node.function.contract_fn.function_name = xdr.SCSymbol(b"transfer")
+            elif mutation == "args":
+                node.function.contract_fn.args = []
+            elif mutation == "deep":
+                node.sub_invocations = [copy.deepcopy(child)]
+            elif mutation == "candidate":
+                altered.auth[0].credentials = xdr.SorobanCredentials(xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS, address=xdr.SorobanAddressCredentials(Address(KEYS[1]).to_xdr_sc_address(), xdr.Int64(1), xdr.Uint32(100), xdr.SCVal(xdr.SCValType.SCV_VOID)))
+            elif mutation == "duplicate":
+                altered.auth.append(copy.deepcopy(entry))
+            elif mutation == "extra":
+                altered.auth[0].root_invocation.sub_invocations.append(copy.deepcopy(child))
+            else:
+                altered.auth[0].root_invocation.sub_invocations = []
+            with self.assertRaises(ValueError, msg=mutation):
+                ca.validate_auth(altered, candidate=KEYS[1], network="testnet")
+
+    def test_simulated_authorization_scope(self):
+        contract = StrKey.encode_contract(bytes([8]) * 32)
+        tx = TransactionBuilder(Account(KEYS[0], 42), wa.PASSPHRASE["testnet"]).append_invoke_contract_function_op(contract, "set_paused", []).set_timeout(0).build()
+        op = tx.transaction.operations[0]
+        root = xdr.SorobanAuthorizedInvocation(xdr.SorobanAuthorizedFunction(xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN, contract_fn=op.host_function.invoke_contract), [])
+        source = xdr.SorobanAuthorizationEntry(xdr.SorobanCredentials(xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT), root)
+        op.auth = [source]
+        ca.validate_auth(op)
+        candidate = xdr.SorobanAuthorizationEntry(xdr.SorobanCredentials(xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS, address=xdr.SorobanAddressCredentials(Address(KEYS[1]).to_xdr_sc_address(), xdr.Int64(1), xdr.Uint32(100), xdr.SCVal(xdr.SCValType.SCV_VOID))), copy.deepcopy(root))
+        op.auth.append(candidate)
+        ca.validate_auth(op, KEYS[1])
+        with self.assertRaises(ValueError):
+            ca.validate_auth(op)
+        with self.assertRaises(ValueError):
+            ca.validate_auth(op, KEYS[2])
+        op.auth = [source, source]
+        with self.assertRaises(ValueError):
+            ca.validate_auth(op)
+        op.auth = [source]
+        source.root_invocation.sub_invocations = [copy.deepcopy(root)]
+        with self.assertRaises(ValueError):
+            ca.validate_auth(op)
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            ca.checked_args("set_admin", {"new_admin": contract, "expected_revision": 0}, "parent")
+        with self.assertRaises(ValueError):
+            ca.checked_args("recover", {"recipient": KEYS[1], "amount": 0, "expected_revision": 0}, "odc")
+
+    def test_cli_address_errors_do_not_echo_input(self):
+        scripts = Path(__file__).resolve().parents[1]
+        invalid_input = "invalid-private-input-for-test"
+        cases = [
+            ("wallet_admin.py", ["inspect", "--account", invalid_input]),
+            ("wallet_admin.py", ["setup-wallet", "--account", KEYS[0], "--agent", invalid_input]),
+            ("wallet_admin.py", ["setup-admin", "--account", KEYS[0], "--member", invalid_input]),
+            ("contract_admin.py", ["read", "--source", invalid_input]),
+            ("contract_admin.py", ["deploy-parent", "--source", KEYS[0], "--member", invalid_input]),
+        ]
+        for script, arguments in cases:
+            result = subprocess.run([sys.executable, str(scripts / script)] + arguments, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(invalid_input, result.stdout + result.stderr)
+            self.assertIn("Expected a public Stellar G address", result.stderr)
+
+    def test_cli_preparation_cannot_submit(self):
+        args = SimpleNamespace(network="testnet", allow_mainnet=False, action="upload", source=KEYS[0], wasm="artifact.wasm")
+        command = ca.command(args)
+        self.assertIn("--build-only", command)
+        self.assertNotIn("--send=yes", command)
+        args.network = "mainnet"
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            ca.command(args)
+        args.allow_mainnet = True
+        self.assertIn("--build-only", ca.command(args))
+
+    def test_secrets_and_hashes_reject(self):
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            ca.account("owner-key-alias")
+        with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
+            ca.code_hash("123")
+        self.assertEqual(ca.serialize({"paused": False}), ["--paused", "false"])
+
+
+if __name__ == "__main__":
+    unittest.main()

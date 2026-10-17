@@ -1,0 +1,336 @@
+use super::*;
+use allowit_wallet_protocol::{EngineClient, EngineContext, Grant, TransferRequest};
+use soroban_sdk::{
+    Bytes, IntoVal, Val, Vec,
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    vec,
+};
+
+const ENGINE_WASM: &[u8] =
+    include_bytes!("../../../target/wasm32v1-none/release/allowit_wallet_engine.wasm");
+const DENY_ENGINE_WASM: &[u8] = include_bytes!("../../../target/test-fixtures/engine_deny.wasm");
+const PARENT_WASM: &[u8] =
+    include_bytes!("../../../target/wasm32v1-none/release/allowit_engine_parent.wasm");
+
+struct Fixture {
+    env: Env,
+    parent: Address,
+    admin: Address,
+    engine_hash: BytesN<32>,
+}
+impl Fixture {
+    fn new(compiled_parent: bool) -> Self {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let admin = Address::generate(&env);
+        let engine_hash = env
+            .deployer()
+            .upload_contract_wasm(Bytes::from_slice(&env, ENGINE_WASM));
+        let parent = if compiled_parent {
+            env.register(PARENT_WASM, (admin.clone(), engine_hash.clone()))
+        } else {
+            env.register(EngineParent, (admin.clone(), engine_hash.clone()))
+        };
+        env.mock_auths(&[]);
+        Self {
+            env,
+            parent,
+            admin,
+            engine_hash,
+        }
+    }
+    fn client(&self) -> EngineParentClient<'_> {
+        EngineParentClient::new(&self.env, &self.parent)
+    }
+    fn auth(&self, actor: &Address, method: &str, args: Vec<Val>) {
+        self.env.mock_auths(&[MockAuth {
+            address: actor,
+            invoke: &MockAuthInvoke {
+                contract: &self.parent,
+                fn_name: method,
+                args,
+                sub_invokes: &[],
+            },
+        }]);
+    }
+}
+fn context(env: &Env) -> EngineContext {
+    let asset = Address::generate(env);
+    let recipient = Address::generate(env);
+    EngineContext {
+        wallet: Address::generate(env),
+        agent: Address::generate(env),
+        asset: asset.clone(),
+        request: TransferRequest {
+            recipient: recipient.clone(),
+            amount: 1,
+            nonce: 0,
+            revision: 0,
+            expires_at: 200,
+        },
+        grant: Grant {
+            asset,
+            recipients: vec![env, recipient],
+            per_transfer: 2,
+            daily_limit: 10,
+            total_limit: 20,
+            max_calls: 5,
+            expires_at: 300,
+        },
+        spent_daily: 0,
+        spent_total: 0,
+        calls: 0,
+        now: 100,
+    }
+}
+
+#[test]
+fn compiled_parent_deploys_compiled_external_reference_engine() {
+    let f = Fixture::new(true);
+    let state = f.client().state();
+    assert_eq!(state.upgrade_authority, f.admin);
+    assert_eq!(state.revision, 0);
+    assert_eq!(f.client().engine(), state.engine);
+    assert!(EngineClient::new(&f.env, &state.engine).evaluate(&context(&f.env)));
+}
+
+#[test]
+fn wrong_or_absent_admin_cannot_upgrade_and_stale_revision_does_not_commit() {
+    let f = Fixture::new(false);
+    let c = f.client();
+    let before = c.state();
+    assert!(c.try_upgrade_engine(&f.engine_hash, &0).is_err());
+    let wrong = Address::generate(&f.env);
+    f.auth(
+        &wrong,
+        "upgrade_engine",
+        (f.engine_hash.clone(), 0u64).into_val(&f.env),
+    );
+    assert!(c.try_upgrade_engine(&f.engine_hash, &0).is_err());
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (f.engine_hash.clone(), 1u64).into_val(&f.env),
+    );
+    assert_eq!(
+        c.try_upgrade_engine(&f.engine_hash, &1),
+        Err(Ok(Error::StaleRevision))
+    );
+    assert_eq!(c.state(), before);
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (f.engine_hash.clone(), 0u64).into_val(&f.env),
+    );
+    c.upgrade_engine(&f.engine_hash, &0);
+    assert_eq!(c.state().revision, 1);
+    assert_eq!(c.engine(), before.engine);
+}
+
+#[test]
+fn missing_uploaded_code_rolls_back_parent_revision() {
+    let f = Fixture::new(false);
+    let bad = BytesN::from_array(&f.env, &[99; 32]);
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (bad.clone(), 0u64).into_val(&f.env),
+    );
+    assert!(f.client().try_upgrade_engine(&bad, &0).is_err());
+    assert_eq!(f.client().state().revision, 0);
+    assert!(EngineClient::new(&f.env, &f.client().engine()).evaluate(&context(&f.env)));
+}
+
+#[test]
+fn rotation_requires_both_current_admin_and_candidate_for_exact_arguments() {
+    let f = Fixture::new(false);
+    let next = Address::generate(&f.env);
+    let args: Vec<Val> = (next.clone(), 0u64).into_val(&f.env);
+    f.auth(&f.admin, "set_admin", args.clone());
+    assert!(f.client().try_set_admin(&next, &0).is_err());
+    f.auth(&next, "set_admin", args.clone());
+    assert!(f.client().try_set_admin(&next, &0).is_err());
+    assert_eq!(f.client().state().revision, 0);
+    f.env.mock_auths(&[
+        MockAuth {
+            address: &f.admin,
+            invoke: &MockAuthInvoke {
+                contract: &f.parent,
+                fn_name: "set_admin",
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &next,
+            invoke: &MockAuthInvoke {
+                contract: &f.parent,
+                fn_name: "set_admin",
+                args,
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    f.client().set_admin(&next, &0);
+    assert_eq!(f.client().state().upgrade_authority, next);
+    assert_eq!(f.client().state().revision, 1);
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (f.engine_hash.clone(), 1u64).into_val(&f.env),
+    );
+    assert!(f.client().try_upgrade_engine(&f.engine_hash, &1).is_err());
+}
+
+#[test]
+fn compiled_parent_self_upgrade_preserves_state_and_admin_gate() {
+    let f = Fixture::new(true);
+    // An inert valid custom section produces a distinct executable hash.
+    let mut replacement = Bytes::from_slice(&f.env, PARENT_WASM);
+    replacement.append(&Bytes::from_slice(&f.env, &[0, 2, 1, b'x']));
+    let wasm = f.env.deployer().upload_contract_wasm(replacement);
+    let before = f.client().state();
+    assert!(f.client().try_upgrade_parent(&wasm, &0).is_err());
+    f.auth(
+        &f.admin,
+        "upgrade_parent",
+        (wasm.clone(), 0u64).into_val(&f.env),
+    );
+    f.client().upgrade_parent(&wasm, &0);
+    let after = f.client().state();
+    assert_eq!(after.engine, before.engine);
+    assert_eq!(after.upgrade_authority, before.upgrade_authority);
+    assert_eq!(after.revision, 1);
+    assert!(EngineClient::new(&f.env, &after.engine).evaluate(&context(&f.env)));
+}
+
+#[test]
+fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
+    let f = Fixture::new(true);
+    let engine = f.client().engine();
+    let context = context(&f.env);
+    assert!(EngineClient::new(&f.env, &engine).evaluate(&context));
+    let deny = f
+        .env
+        .deployer()
+        .upload_contract_wasm(Bytes::from_slice(&f.env, DENY_ENGINE_WASM));
+    assert_ne!(deny, f.engine_hash);
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (deny.clone(), 0u64).into_val(&f.env),
+    );
+    f.client().upgrade_engine(&deny, &0);
+    assert_eq!(f.client().engine(), engine);
+    assert!(!EngineClient::new(&f.env, &engine).evaluate(&context));
+    assert_eq!(f.client().state().revision, 1);
+    // A later authorized release can restore the engine, preserving identity.
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (f.engine_hash.clone(), 1u64).into_val(&f.env),
+    );
+    f.client().upgrade_engine(&f.engine_hash, &1);
+    assert!(EngineClient::new(&f.env, &engine).evaluate(&context));
+    assert_eq!(f.client().state().revision, 2);
+}
+
+#[test]
+fn engine_cannot_become_its_own_upgrade_admin() {
+    let f = Fixture::new(false);
+    let engine = f.client().engine();
+    f.auth(
+        &f.admin,
+        "set_admin",
+        (engine.clone(), 0u64).into_val(&f.env),
+    );
+    assert_eq!(
+        f.client().try_set_admin(&engine, &0),
+        Err(Ok(Error::InvalidAdmin))
+    );
+    assert_eq!(f.client().state().revision, 0);
+}
+
+#[test]
+fn revision_overflow_rejects_without_switching_engine() {
+    let f = Fixture::new(false);
+    f.env.as_contract(&f.parent, || {
+        let mut state: ParentState = f.env.storage().instance().get(&0u32).unwrap();
+        state.revision = u64::MAX;
+        f.env.storage().instance().set(&0u32, &state);
+    });
+    let before = f.client().state();
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (f.engine_hash.clone(), u64::MAX).into_val(&f.env),
+    );
+    assert_eq!(
+        f.client().try_upgrade_engine(&f.engine_hash, &u64::MAX),
+        Err(Ok(Error::Overflow))
+    );
+    assert_eq!(f.client().state(), before);
+}
+
+#[contract]
+pub struct ConstructorDeployer;
+#[contractimpl]
+impl ConstructorDeployer {
+    pub fn deploy_parent(
+        env: Env,
+        parent_wasm: BytesN<32>,
+        admin: Address,
+        engine_wasm: BytesN<32>,
+    ) -> Address {
+        env.deployer()
+            .with_current_contract(BytesN::from_array(&env, &[0; 32]))
+            .deploy_contract(ContractExecutable::Wasm(parent_wasm), (admin, engine_wasm))
+    }
+}
+
+#[test]
+fn constructor_requires_admin_authorization() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let engine_hash = env
+        .deployer()
+        .upload_contract_wasm(Bytes::from_slice(&env, ENGINE_WASM));
+    let parent_hash = env
+        .deployer()
+        .upload_contract_wasm(Bytes::from_slice(&env, PARENT_WASM));
+    let deployer = env.register(ConstructorDeployer, ());
+    env.mock_auths(&[]);
+    assert!(
+        ConstructorDeployerClient::new(&env, &deployer)
+            .try_deploy_parent(&parent_hash, &admin, &engine_hash)
+            .is_err()
+    );
+}
+
+#[test]
+fn engine_lookup_extends_cold_reference_instance_and_code_ttl() {
+    use soroban_sdk::testutils::Deployer as _;
+    let f = Fixture::new(true);
+    let state = f.client().state();
+    let before_code = f.env.deployer().get_contract_code_ttl(&state.engine);
+    let before_instance = f.env.deployer().get_contract_instance_ttl(&state.engine);
+    let before_ref = f
+        .env
+        .as_contract(&f.parent, || f.env.executable_refs().get_ttl(&tag(&f.env)));
+    let max = f.env.storage().max_ttl();
+    assert_eq!(f.env.deployer().get_contract_code_ttl(&f.parent), max);
+    assert!(before_code < max / 2);
+    assert!(before_instance < max / 2);
+    assert!(before_ref < max / 2);
+    assert_eq!(f.client().engine(), state.engine);
+    assert_eq!(f.env.deployer().get_contract_code_ttl(&state.engine), max);
+    assert_eq!(
+        f.env.deployer().get_contract_instance_ttl(&state.engine),
+        max
+    );
+    assert_eq!(
+        f.env
+            .as_contract(&f.parent, || f.env.executable_refs().get_ttl(&tag(&f.env))),
+        max
+    );
+}

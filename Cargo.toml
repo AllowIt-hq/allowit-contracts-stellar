@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/policy", "crates/vault", "crates/factory"]
+members = ["crates/policy", "crates/vault", "crates/factory", "crates/protocol", "crates/engine", "crates/engine-parent", "crates/odc"]
 resolver = "2"
 
 [workspace.dependencies]

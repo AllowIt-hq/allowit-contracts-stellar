@@ -2,7 +2,7 @@
 
 The ODC (policy wallet) holds assets and enforces the owner's delegation locally. The shared engine can refuse an agent operation. It cannot enlarge that delegation, administer the wallet or replace its code.
 
-This architecture defines the ownership boundary. The [README](../README.md) describes the implemented daily-limit vault and its current ABI.
+The [README](../README.md) defines the transfer-only MVP and the separate legacy daily-limit vault. [Administration](admin.md) covers setup and owner operations.
 
 ## Ownership and upgrades
 
@@ -48,9 +48,9 @@ The local kernel must enforce:
 
 General contract calls default to disabled. Enable only owner-allowlisted operations with locally bounded effects. Policy configuration constrains permitted arguments. Each execution binds exact arguments within those constraints. The baseline rejects token approvals, persistent allowances and uncontrolled token pulls.
 
-The ODC constructs the request from authenticated arguments and its own state. Engine approval binds that request and configuration. The engine returns an approval boolean, not commands, accounting deltas or expanded local policy. Missing approval, malformed responses, engine traps, archival and resource exhaustion reject agent execution. Automated `__check_auth` accepts only kernel-admitted contexts. Raw agent-signed token or dApp authorization rejects. The engine receives no ODC spending authorization.
+The ODC constructs the request from authenticated arguments and its own state. Engine approval binds that request and configuration. The engine returns an approval boolean, not commands, accounting deltas or expanded local policy. Missing approval, malformed responses, engine traps, archival and resource exhaustion reject agent execution. The ODC exposes no external `__check_auth` hook. Raw agent-signed token or dApp authorization rejects. The engine receives no ODC spending authorization.
 
-The ODC authorizes exact effects, checks actual gross debits through admitted adapters, and updates its counters atomically. Incoming funds cannot conceal outgoing spending through a net balance comparison. Reject effects that the local kernel cannot verify. A failed call or effect mismatch reverts accounting and execution.
+The ODC authorizes an exact direct SAC transfer, checks sender debits and recipient credits, and updates its counters atomically. Incoming funds cannot conceal outgoing spending through a net balance comparison. Reject effects that the local kernel cannot verify. A failed call or effect mismatch reverts accounting and execution.
 
 A compromised engine can approve every request that already fits the local delegation. It can therefore consume all delegated capacity. It cannot prove compliance with an arbitrary owner-authored predicate that only the engine evaluates. Enforce every restriction that must survive engine compromise in the kernel or an owner-controlled verifier. Otherwise, explicitly accept engine trust for that restriction. Owner-kernel bug fixes require owner upgrades. Shared engine fixes can take effect immediately, but cannot repair kernel bugs. Engine approval never substitutes for local containment.
 

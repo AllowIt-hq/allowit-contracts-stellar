@@ -10,3 +10,6 @@ node_modules/
 # Retained task outputs belong to ackrate-project instance/artifacts.
 /artifacts/
 /evidence/
+
+# Disposable Python bytecode from administration tests.
+__pycache__/
