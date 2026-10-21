@@ -1,18 +1,39 @@
 name: Validate contracts
 on:
   push:
-    branches: [main]
+    branches: [main, prod]
   pull_request:
+  schedule:
+    - cron: "41 4 * * *"
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: stellar-unit-${{ github.ref }}
-  cancel-in-progress: true
+  group: stellar-unit-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  policy:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        flow: [approval, limits]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test portable policy behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-policy.py
+          rustc --edition=2021 --test scripts/policy-smoke.rs -o "$RUNNER_TEMP/policy-smoke"
+          "$RUNNER_TEMP/policy-smoke" "${{ matrix.flow }}" --nocapture | tee "$RUNNER_TEMP/policy.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/policy.log"
   contracts:
-    if: >-
-      !((github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && (github.triggering_actor || github.actor) == 'agentool' && !(github.event_name == 'push' && github.ref == 'refs/heads/prod'))
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

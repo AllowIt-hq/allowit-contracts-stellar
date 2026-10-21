@@ -1,8 +1,7 @@
 name: Stellar runtime smoke
 on:
-  push:
-    branches: [main]
-  pull_request:
+  schedule:
+    - cron: "41 5 * * *"
   workflow_dispatch:
     inputs:
       full:
@@ -12,12 +11,10 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: stellar-runtime-${{ github.ref }}
-  cancel-in-progress: true
+  group: stellar-runtime-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   smoke:
-    if: >-
-      !((github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && (github.triggering_actor || github.actor) == 'agentool' && !(github.event_name == 'push' && github.ref == 'refs/heads/prod'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -66,5 +63,5 @@ jobs:
           "$RUNNER_TEMP/wallet-admin/bin/pip" install -r scripts/requirements-admin.txt
           "$RUNNER_TEMP/wallet-admin/bin/python" -m unittest discover -s scripts/tests -v
       - name: Full Stellar runtime regressions
-        if: github.event_name == 'workflow_dispatch' && inputs.full
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full)
         run: cargo test --workspace --locked
