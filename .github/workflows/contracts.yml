@@ -10,7 +10,7 @@ permissions:
   contents: read
 concurrency:
   group: stellar-unit-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   policy:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
