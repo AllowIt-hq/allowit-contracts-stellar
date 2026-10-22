@@ -16,6 +16,7 @@ stellar = []
 soroban-sdk.workspace = true
 
 [dev-dependencies]
+ed25519-dalek = "=2.2.0"
 allowit-policy = { path = "../policy" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 
