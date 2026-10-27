@@ -58,6 +58,7 @@ name = "allowit-vault"
 version = "0.1.0"
 dependencies = [
  "allowit-policy",
+ "ed25519-dalek",
  "sha2",
  "soroban-sdk",
 ]

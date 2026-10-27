@@ -3,7 +3,7 @@ members = ["crates/policy", "crates/vault", "crates/factory", "crates/protocol",
 resolver = "2"
 
 [workspace.dependencies]
-soroban-sdk = "=28.0.0"
+soroban-sdk = { version = "=28.0.0", features = ["hazmat-address"] }
 
 [profile.release]
 opt-level = "z"
