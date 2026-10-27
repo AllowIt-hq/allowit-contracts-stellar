@@ -47,7 +47,7 @@ After deployment, prepare a native Stellar CLI invocation of the parent's `engin
 
 `contract_admin.py admin` does not admit `engine()`, so use the native CLI for this operation. Monitor TTL separately. Restore archived dependencies through separate reviewed transactions before normal calls resume.
 
-Prepare `deploy-odc --source "$OWNER" --owner "$OWNER" --agent "$AGENT" --engine ENGINE_ADDRESS --wasm target/wasm32v1-none/release/allowit_odc.wasm --wasm-hash ODC_HASH --grant JSON`. Grant JSON contains `asset`, `recipients`, `per_transfer`, `daily_limit`, `total_limit`, `max_calls` and `expires_at`. Amounts are native asset units, not the legacy vault's six-decimal units.
+Prepare `deploy-odc --source "$OWNER" --owner "$OWNER" --agent "$AGENT" --engine ENGINE_ADDRESS --wasm target/wasm32v1-none/release/allowit_odc.wasm --wasm-hash ODC_HASH --grant JSON`. Grant JSON contains `asset`, `recipients`, `per_transfer`, `daily_limit`, `total_limit`, `max_calls` and `expires_at`. Amounts use native asset units.
 
 Fund the resulting ODC only with `grant.asset`, through an exact SAC transfer after deployment. The grant asset is immutable in this code. `recover` transfers only that asset. Recovering other SAC balances requires an owner-authorized code upgrade. Set each request expiry at or before `grant.expires_at`. The shared engine rejects a later expiry even when the ODC local expiry checks pass.
 

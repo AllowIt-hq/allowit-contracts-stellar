@@ -29,37 +29,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "allowit-factory"
-version = "0.1.0"
-dependencies = [
- "allowit-policy",
- "allowit-vault",
- "soroban-sdk",
-]
-
-[[package]]
 name = "allowit-odc"
 version = "0.1.0"
 dependencies = [
  "allowit-wallet-protocol",
- "soroban-sdk",
-]
-
-[[package]]
-name = "allowit-policy"
-version = "0.1.0"
-dependencies = [
- "sha2",
- "soroban-sdk",
-]
-
-[[package]]
-name = "allowit-vault"
-version = "0.1.0"
-dependencies = [
- "allowit-policy",
- "ed25519-dalek",
- "sha2",
  "soroban-sdk",
 ]
 
