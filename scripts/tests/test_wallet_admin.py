@@ -340,6 +340,25 @@ class ContractAdmin(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ca.command(options)
 
+    def test_odc_constructor_requires_explicit_nonzero_policy_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "odc.wasm"
+            path.write_bytes(b"reviewed-artifact")
+            asset = StrKey.encode_contract(bytes([2]) * 32)
+            engine = StrKey.encode_contract(bytes([3]) * 32)
+            values = {"asset": asset, "recipients": [KEYS[3]], "per_transfer": 10,
+                      "daily_limit": 20, "total_limit": 30, "max_calls": 5, "expires_at": 1000}
+            args = SimpleNamespace(action="deploy-odc", network="testnet", allow_mainnet=False,
+                source=KEYS[0], owner=KEYS[0], agent=KEYS[1], engine=engine,
+                wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
+                grant=json.dumps(values), policy_instance="11" * 32)
+            command = ca.command(args)
+            self.assertEqual(command[command.index("--policy-instance") + 1], "11" * 32)
+            for identity in (None, "", "00" * 32, "not-a-policy-id"):
+                args.policy_instance = identity
+                with self.assertRaises(ValueError):
+                    ca.command(args)
+
     def test_secrets_and_hashes_reject(self):
         with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
             ca.account("owner-key-alias")

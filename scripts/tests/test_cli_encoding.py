@@ -81,7 +81,7 @@ class RealCliEncoding(unittest.TestCase):
                         expected = hashlib.sha256(wasm.read_bytes()).hexdigest()
                         options = SimpleNamespace(action=action, network="testnet", allow_mainnet=False, source=account,
                             wasm=str(wasm), wasm_hash=expected, admin=account, engine_wasm="11" * 32,
-                            owner=account, agent=recipient, engine=contract, grant=json.dumps(grant))
+                            owner=account, agent=recipient, engine=contract, grant=json.dumps(grant), policy_instance="11" * 32)
                         prepared = ca.command(options)
                         self.assertIn("--wasm", prepared)
                         self.assertNotIn("--wasm-hash", prepared)
@@ -93,7 +93,7 @@ class RealCliEncoding(unittest.TestCase):
                         host = deployed.transaction.operations[0].host_function
                         self.assertEqual(host.type, xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2)
                         self.assertEqual(host.create_contract_v2.executable.wasm_hash.hash.hex(), expected)
-                        self.assertEqual(len(host.create_contract_v2.constructor_args), 2 if action == "deploy-parent" else 4)
+                        self.assertEqual(len(host.create_contract_v2.constructor_args), 2 if action == "deploy-parent" else 5)
                 self.assertTrue(methods)
                 self.assertTrue(set(methods) <= {"getNetwork", "getLedgerEntries"})
                 self.assertNotIn("sendTransaction", methods)

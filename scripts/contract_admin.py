@@ -234,7 +234,9 @@ def command(args):
             if args.source != args.admin:
                 raise ValueError("Parent deployment source must be its native admin account")
         else:
-            values = {"owner": account(args.owner), "agent": account(args.agent), "engine": contract(args.engine), "grant": grant(json.loads(args.grant))}
+            values = {"owner": account(args.owner), "agent": account(args.agent), "engine": contract(args.engine), "grant": grant(json.loads(args.grant)), "policy_instance": code_hash(args.policy_instance)}
+            if int(values["policy_instance"], 16) == 0:
+                raise ValueError("Policy instance must be a nonzero 32-byte identifier")
             if args.source != args.owner:
                 raise ValueError("ODC deployment source must be its owner")
             if args.owner == args.agent:
@@ -244,8 +246,8 @@ def command(args):
     if not StrKey.is_valid_contract(args.contract):
         raise ValueError("Target must be a contract C address")
     if args.action == "read":
-        if args.method not in ("state", "engine"):
-            raise ValueError("Only state/engine reads are supported")
+        if args.method not in ("state", "engine", "policy_binding"):
+            raise ValueError("Only state, engine and policy_binding reads are supported")
         return ["contract", "invoke", "--id", args.contract, "--send=no"] + base + ["--", args.method]
     methods = ODC if args.family == "odc" else PARENT
     if args.method not in methods:
@@ -260,7 +262,7 @@ def main():
     p.add_argument("--network", choices=["testnet", "mainnet"], default="testnet")
     p.add_argument("--allow-mainnet", action="store_true")
     p.add_argument("--source", required=True, type=account)
-    for flag in ("wasm", "wasm-hash", "admin", "engine-wasm", "owner", "agent", "engine", "grant", "contract", "method"):
+    for flag in ("wasm", "wasm-hash", "admin", "engine-wasm", "owner", "agent", "engine", "grant", "policy-instance", "contract", "method"):
         p.add_argument("--" + flag)
     p.add_argument("--family", choices=["odc", "parent"], default="odc")
     p.add_argument("--member", action="append", default=[], type=account, help="Exactly three public members of the native parent admin")
