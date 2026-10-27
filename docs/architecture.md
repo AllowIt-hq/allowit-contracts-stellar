@@ -2,7 +2,7 @@
 
 The ODC (policy wallet) holds assets and enforces the owner's delegation locally. The shared engine can refuse an agent operation. It cannot enlarge that delegation, administer the wallet or replace its code.
 
-The [README](../README.md) defines the transfer-only MVP and the separate legacy daily-limit vault. [Administration](admin.md) covers setup and owner operations.
+The [README](../README.md) defines the transfer wallet. [Administration](admin.md) covers setup and owner operations.
 
 ## Custody and owner control
 

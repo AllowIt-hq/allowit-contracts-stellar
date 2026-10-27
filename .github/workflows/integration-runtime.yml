@@ -39,18 +39,6 @@ jobs:
           rustup target add wasm32v1-none --toolchain 1.98.0
       - name: Build all contract Wasm
         run: scripts/build-contracts.sh
-      - name: Smoke compiled policy and token custody
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p allowit-vault tests::custody_transfer_daily_boundary_and_atomic_denial -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/smoke.log"
-          grep -F "1 passed; 0 failed" "$RUNNER_TEMP/smoke.log"
-      - name: Smoke compiled vault factory
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p allowit-factory tests::factory_creates_compiled_vaults_with_owner_bound_salts -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/smoke.log"
-          grep -F "1 passed; 0 failed" "$RUNNER_TEMP/smoke.log"
       - name: ODC and shared-engine containment
         shell: bash
         run: |
