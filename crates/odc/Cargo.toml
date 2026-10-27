@@ -7,6 +7,10 @@ license = "UNLICENSED"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+test-recipient-policy = []
+test-xlm-policy = []
+
 [dependencies]
 soroban-sdk = { workspace = true }
 allowit-wallet-protocol = { path = "../protocol" }

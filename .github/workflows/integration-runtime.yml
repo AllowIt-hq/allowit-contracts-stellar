@@ -28,6 +28,7 @@ jobs:
       - name: Check shared policy identity and formatting
         run: |
           python3 scripts/check-policy.py
+          python3 scripts/check-policy-bindings.py
           cargo fmt --all --check
       - name: Install pinned Stellar CLI
         run: |

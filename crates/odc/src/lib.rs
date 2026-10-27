@@ -1,11 +1,32 @@
 #![no_std]
 
 use allowit_wallet_protocol::{
-    EngineClient, EngineContext, Grant, MAX_RECIPIENTS, TransferRequest,
+    ARGUMENT_SCHEMA_DESCRIPTOR, EngineClient, EngineContext, ExecutionRequest, Grant,
+    MAX_ARGUMENT_BYTES, MAX_RECIPIENTS, PolicyBinding, PolicyContext, Sep41TransferArgs,
+    TransferReceipt, TransferRequest,
 };
 use soroban_sdk::{
-    Address, BytesN, Env, Executable, contract, contracterror, contractimpl, contracttype, token,
+    Address, Bytes, BytesN, Env, Executable, String, Symbol, contract, contracterror, contractimpl,
+    contracttype, token,
+    xdr::{FromXdr, ToXdr},
 };
+
+#[cfg(not(any(feature = "test-recipient-policy", feature = "test-xlm-policy")))]
+#[rustfmt::skip]
+#[allow(unused_braces)]
+mod generated_policy;
+#[cfg(feature = "test-recipient-policy")]
+#[path = "generated_recipient_policy.rs"]
+#[rustfmt::skip]
+#[allow(unused_braces)]
+mod generated_policy;
+#[cfg(feature = "test-xlm-policy")]
+#[path = "generated_xlm_policy.rs"]
+#[rustfmt::skip]
+#[allow(unused_braces)]
+mod generated_policy;
+#[cfg(all(feature = "test-recipient-policy", feature = "test-xlm-policy"))]
+compile_error!("Select only one test policy fixture");
 
 const DAY: u64 = 86_400;
 const VERSION: u32 = 1;
@@ -49,10 +70,49 @@ pub enum Error {
     InsufficientFunds = 14,
     InvalidEffects = 15,
     UnsupportedOperation = 16,
+    InvalidInvocation = 17,
+    PolicyDenied = 18,
+    Replay = 19,
+}
+
+#[contracttype]
+#[derive(Clone)]
+enum Key {
+    PolicyInstance,
+    Operation(BytesN<32>),
 }
 
 #[contract]
 pub struct Odc;
+
+fn binding(env: &Env) -> Result<PolicyBinding, Error> {
+    if generated_policy::SOURCE_PROFILE != "allowit-stellar-transfer-v1"
+        || generated_policy::SOURCE_PROFILE_VERSION != 1
+        || generated_policy::ADMITTED_OPERATION != "stellar::sep41_transfer"
+        || BytesN::from_array(env, &generated_policy::ARGUMENT_SCHEMA_HASH)
+            != env
+                .crypto()
+                .sha256(&Bytes::from_slice(env, ARGUMENT_SCHEMA_DESCRIPTOR))
+                .to_bytes()
+    {
+        return Err(Error::InvalidState);
+    }
+    let policy_instance = env
+        .storage()
+        .instance()
+        .get(&Key::PolicyInstance)
+        .ok_or(Error::InvalidState)?;
+    let Some(Executable::Wasm(module_digest)) = env.current_contract_address().executable() else {
+        return Err(Error::InvalidState);
+    };
+    Ok(PolicyBinding {
+        policy_instance,
+        module_digest,
+        source_digest: BytesN::from_array(env, &generated_policy::SOURCE_HASH),
+        argument_schema_digest: BytesN::from_array(env, &generated_policy::ARGUMENT_SCHEMA_HASH),
+        entrypoint: Symbol::new(env, "_execute"),
+    })
+}
 
 fn load(env: &Env) -> Result<State, Error> {
     let s: State = env
@@ -133,6 +193,20 @@ fn validate_grant(env: &Env, grant: &Grant) -> Result<(), Error> {
     Ok(())
 }
 
+fn policy_token(env: &Env, asset: &Address) -> String {
+    // Asset::Native has the exact four-byte XDR discriminant zero. Its SAC
+    // address is network-derived; an issued asset merely named "native" differs.
+    let native = env
+        .deployer()
+        .with_stellar_asset(Bytes::from_array(env, &[0; 4]))
+        .deployed_address();
+    if asset == &native {
+        String::from_str(env, "XLM")
+    } else {
+        token::Client::new(env, asset).symbol()
+    }
+}
+
 fn move_tokens(env: &Env, asset: &Address, recipient: &Address, amount: i128) -> Result<(), Error> {
     if amount <= 0 {
         return Err(Error::InvalidAmount);
@@ -160,8 +234,18 @@ fn move_tokens(env: &Env, asset: &Address, recipient: &Address, amount: i128) ->
 
 #[contractimpl]
 impl Odc {
-    pub fn __constructor(env: Env, owner: Address, agent: Address, engine: Address, grant: Grant) {
+    pub fn __constructor(
+        env: Env,
+        owner: Address,
+        agent: Address,
+        engine: Address,
+        grant: Grant,
+        policy_instance: BytesN<32>,
+    ) {
         owner.require_auth();
+        if policy_instance == BytesN::from_array(&env, &[0; 32]) {
+            soroban_sdk::panic_with_error!(&env, Error::InvalidState);
+        }
         if let Err(error) = validate_roles(&env, &owner, &agent, &engine) {
             soroban_sdk::panic_with_error!(&env, error);
         }
@@ -173,6 +257,9 @@ impl Odc {
         if let Err(error) = validate_grant(&env, &grant) {
             soroban_sdk::panic_with_error!(&env, error);
         }
+        env.storage()
+            .instance()
+            .set(&Key::PolicyInstance, &policy_instance);
         store(
             &env,
             &State {
@@ -196,9 +283,47 @@ impl Odc {
         load(&env)
     }
 
-    pub fn transfer(env: Env, request: TransferRequest) -> Result<(), Error> {
+    /// Immutable installed native module and argument schema for the generated policy wrapper.
+    pub fn policy_binding(env: Env) -> Result<PolicyBinding, Error> {
+        binding(&env)
+    }
+
+    /// Generated transport wrapper around the statically compiled private owner policy.
+    /// The admitted native operation is stellar::sep41_transfer, not a second wallet API.
+    pub fn execute(env: Env, execution: ExecutionRequest) -> Result<TransferReceipt, Error> {
         let mut s = load(&env)?;
         s.agent.require_auth();
+        // Authentication covers the complete invocation before canonical arguments are decoded.
+        let installed = binding(&env)?;
+        let invocation = &execution.invocation;
+        if execution.policy_instance != installed.policy_instance
+            || execution.operation_id == BytesN::from_array(&env, &[0; 32])
+            || invocation.module_digest != installed.module_digest
+            || invocation.entrypoint != installed.entrypoint
+            || invocation.argument_schema_digest != installed.argument_schema_digest
+            || invocation.arguments.len() > MAX_ARGUMENT_BYTES
+        {
+            return Err(Error::InvalidInvocation);
+        }
+        let arguments = Sep41TransferArgs::from_xdr(&env, &invocation.arguments)
+            .map_err(|_| Error::InvalidInvocation)?;
+        if arguments.clone().to_xdr(&env) != invocation.arguments
+            || arguments.token != s.grant.asset
+            || arguments.from != env.current_contract_address()
+        {
+            return Err(Error::InvalidInvocation);
+        }
+        let operation_key = Key::Operation(execution.operation_id.clone());
+        if env.storage().persistent().has(&operation_key) {
+            return Err(Error::Replay);
+        }
+        let request = TransferRequest {
+            recipient: arguments.to.clone(),
+            amount: arguments.amount,
+            nonce: execution.nonce,
+            revision: execution.revision,
+            expires_at: execution.expires_at,
+        };
         if s.paused {
             return Err(Error::Paused);
         }
@@ -206,7 +331,10 @@ impl Odc {
             return Err(Error::StaleRequest);
         }
         let now = env.ledger().timestamp();
-        if request.expires_at <= now || s.grant.expires_at <= now {
+        if request.expires_at <= now
+            || s.grant.expires_at <= now
+            || request.expires_at > s.grant.expires_at
+        {
             return Err(Error::Expired);
         }
         if request.amount <= 0 {
@@ -238,6 +366,21 @@ impl Odc {
         {
             return Err(Error::BudgetExceeded);
         }
+        let policy_context = PolicyContext {
+            asset: s.grant.asset.clone(),
+            recipient: request.recipient.clone(),
+            token: policy_token(&env, &s.grant.asset),
+            decimals: 7,
+            amount: request.amount,
+            spent_daily,
+            spent_total: s.spent_total,
+            calls: s.calls,
+            now,
+            spent_day: day,
+        };
+        if !generated_policy::execute(&policy_context) {
+            return Err(Error::PolicyDenied);
+        }
         let context = EngineContext {
             wallet: env.current_contract_address(),
             agent: s.agent.clone(),
@@ -264,7 +407,21 @@ impl Odc {
         s.nonce = next_nonce;
         store(&env, &s);
         move_tokens(&env, &s.grant.asset, &request.recipient, request.amount)?;
-        Ok(())
+        let receipt = TransferReceipt {
+            operation_id: execution.operation_id,
+            token: s.grant.asset,
+            from: env.current_contract_address(),
+            to: request.recipient,
+            amount: request.amount,
+            nonce: request.nonce,
+            revision: request.revision,
+        };
+        env.storage().persistent().set(&operation_key, &receipt);
+        let ttl = env.storage().max_ttl();
+        env.storage()
+            .persistent()
+            .extend_ttl(&operation_key, ttl / 2, ttl);
+        Ok(receipt)
     }
 
     pub fn set_grant(env: Env, grant: Grant, expected_revision: u64) -> Result<(), Error> {
