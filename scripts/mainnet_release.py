@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""Prepare bounded Stellar release transactions and simulate ODC E2E checks. Never sign or submit."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import time
+from types import SimpleNamespace
+from urllib.request import Request, urlopen
+
+from stellar_sdk import Account, Address, Asset, Network, TransactionBuilder, TransactionEnvelope, scval, xdr
+import contract_admin as ca
+import wallet_admin as wa
+
+ROOT = Path(__file__).resolve().parents[1]
+RPC = {"mainnet": "https://mainnet.sorobanrpc.com", "testnet": "https://soroban-testnet.stellar.org"}
+STAGES = ("upload-engine", "upload-parent", "upload-odc", "deploy-parent", "deploy-odc", "fund", "execute")
+NAMES = {"engine": "allowit_wallet_engine.wasm", "parent": "allowit_engine_parent.wasm", "odc": "allowit_odc.wasm"}
+READ_METHODS = {"getNetwork", "getLatestLedger", "getLedgerEntries", "simulateTransaction", "getTransaction"}
+DEFAULT_REVISION = "304bbd61dd211f516d7449716a980fe02fd87194"
+DEFAULT_HASHES = {"engine": "b12dc7b7c410370196abdaa06744c2f1a6dbe0b45493776e3ec5247a3d4c7b88", "parent": "21f1068255df67f179a49f19129af4775927399b2ef0f215418101d8091615f6", "odc": "2bac1c45cedae74dcb604f33aae85de11ba39dba64e265b288fc54334ca26a83"}
+SCHEMA = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)"
+
+
+# Bind every delegated CLI operation to the same endpoint and passphrase as direct RPC reads.
+_ORIGINAL_CLI_RUN = ca.cli_run
+
+def network_cli(args, input_data=None):
+    args = list(args)
+    if "--network" not in args:
+        raise ValueError("CLI operations require an explicit network")
+    index = args.index("--network")
+    network = args[index + 1]
+    args[index:index + 2] = ["--rpc-url", RPC[network], "--network-passphrase", wa.PASSPHRASE[network]]
+    return _ORIGINAL_CLI_RUN(args, input_data=input_data)
+
+ca.cli_run = network_cli
+
+
+def digest(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def integer(value, minimum=1, maximum=2**63 - 1):
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError("Expected a bounded integer")
+    return value
+
+
+def write_new(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x") as output:
+        json.dump(value, output, indent=2)
+        output.write("\n")
+
+
+def rpc(network, method, params=None):
+    if method not in READ_METHODS:
+        raise ValueError("Only read and simulation RPC methods are admitted")
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}).encode()
+    request = Request(RPC[network], data=body, headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=40) as response:
+        result = json.load(response)
+    if "error" in result:
+        raise ValueError("RPC request failed: " + json.dumps(result["error"]))
+    return result["result"]
+
+
+def check_network(network):
+    actual = rpc(network, "getNetwork")
+    if actual["passphrase"] != wa.PASSPHRASE[network]:
+        raise ValueError("RPC network passphrase does not match the plan")
+    return actual
+
+
+def load_plan(path):
+    path = Path(path).resolve()
+    plan = json.loads(path.read_text())
+    fields = {"schema", "network", "network_passphrase", "source_revision", "codegen_revision", "policy_source_digest", "artifact_manifest", "artifacts", "owner", "admin", "admin_members", "agent", "recipient", "forbidden_recipient", "policy_instance", "grant", "fund_stroops", "payment_stroops", "fee_caps_stroops", "total_fee_cap_stroops"}
+    if set(plan) != fields or plan["schema"] != 1:
+        raise ValueError("Plan fields must match schema 1 exactly")
+    network = plan["network"]
+    if network not in RPC or plan["network_passphrase"] != wa.PASSPHRASE[network]:
+        raise ValueError("Select the exact Stellar network and passphrase")
+    if not re.fullmatch(r"[0-9a-f]{40}", plan["source_revision"]):
+        raise ValueError("Pin the complete contract source revision")
+    if plan["source_revision"] != DEFAULT_REVISION:
+        raise ValueError("This smoke tool admits only the reviewed default contract revision")
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() != plan["source_revision"]:
+        # Tooling commits may follow the contract revision, but every build source must match it.
+        subprocess.run(["git", "merge-base", "--is-ancestor", plan["source_revision"], "HEAD"], cwd=ROOT, check=True)
+    codegen = json.loads((ROOT / "scripts/policy-codegen.json").read_text())
+    if plan["codegen_revision"] != codegen["revision"]:
+        raise ValueError("Compiler revision differs from the contract build pin")
+    policy = ROOT / "crates/odc/policy/policy.rs"
+    if plan["policy_source_digest"] != digest(policy.read_bytes()):
+        raise ValueError("Policy source differs from the plan")
+    manifest_path = Path(plan["artifact_manifest"])
+    if not manifest_path.is_absolute():
+        manifest_path = path.parent / manifest_path
+    manifest = json.loads(manifest_path.read_text())
+    manifest_revision = manifest["git_revision"]
+    if not re.fullmatch(r"[0-9a-f]{40}", manifest_revision):
+        raise ValueError("Manifest must pin a complete source revision")
+    subprocess.run(["git", "merge-base", "--is-ancestor", plan["source_revision"], manifest_revision], cwd=ROOT, check=True, capture_output=True)
+    subprocess.run(["git", "merge-base", "--is-ancestor", manifest_revision, "HEAD"], cwd=ROOT, check=True, capture_output=True)
+    for entry in manifest["sources"]:
+        relative = entry["path"]
+        if Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise ValueError("Manifest source path escapes the repository")
+        committed = subprocess.check_output(["git", "show", plan["source_revision"] + ":" + relative], cwd=ROOT)
+        if digest(committed) != entry["sha256"] or digest((ROOT / relative).read_bytes()) != entry["sha256"]:
+            raise ValueError("Build source differs from the pinned revision: " + relative)
+    for name in ("owner", "admin", "agent", "recipient", "forbidden_recipient"):
+        ca.account(plan[name])
+    if len({plan[k] for k in ("owner", "admin", "agent", "recipient", "forbidden_recipient")}) != 5:
+        raise ValueError("Use separate owner, admin, agent and recipient accounts")
+    members = plan["admin_members"]
+    if not isinstance(members, list) or len(members) != 3 or len(set(members)) != 3:
+        raise ValueError("Pin exactly three distinct admin members")
+    for member in members:
+        ca.account(member)
+    if set(members) & {plan["owner"], plan["agent"]}:
+        raise ValueError("Admin members must differ from custody owner and agent")
+    ca.code_hash(plan["policy_instance"])
+    if int(plan["policy_instance"], 16) == 0:
+        raise ValueError("Policy identity must be nonzero")
+    grant = ca.grant(plan["grant"])
+    native = Asset.native().contract_id(wa.PASSPHRASE[network])
+    if grant["asset"] != native or grant["recipients"] != [plan["recipient"]]:
+        raise ValueError("Release smoke tests require native XLM and one pinned recipient")
+    integer(plan["payment_stroops"])
+    integer(plan["fund_stroops"])
+    if not plan["payment_stroops"] <= plan["fund_stroops"] <= grant["total_limit"]:
+        raise ValueError("Payment, funding and grant total caps are inconsistent")
+    if plan["payment_stroops"] > grant["per_transfer"]:
+        raise ValueError("Smoke payment exceeds the per-transfer limit")
+    caps = plan["fee_caps_stroops"]
+    if set(caps) != set(STAGES):
+        raise ValueError("Set one fee cap for every release stage")
+    for value in caps.values():
+        integer(value, 100, 2**32 - 1)
+    if sum(caps.values()) > integer(plan["total_fee_cap_stroops"]):
+        raise ValueError("Stage fee caps exceed the aggregate release fee cap")
+    if set(plan["artifacts"]) != set(NAMES):
+        raise ValueError("Pin engine, parent and ODC artifacts")
+    for name, artifact in plan["artifacts"].items():
+        if set(artifact) != {"path", "sha256"}:
+            raise ValueError("Artifact fields must be path and sha256")
+        artifact_path = Path(artifact["path"])
+        if not artifact_path.is_absolute():
+            artifact_path = path.parent / artifact_path
+        ca.code_hash(artifact["sha256"])
+        if artifact["sha256"] != DEFAULT_HASHES[name]:
+            raise ValueError("This smoke tool rejects custom and test-feature artifacts")
+        entries = {entry["name"]: entry for entry in manifest["artifacts"]}
+        if entries[NAMES[name]]["sha256"] != artifact["sha256"]:
+            raise ValueError("Artifact differs from the reviewed build manifest")
+        fixtures = (ROOT / "target/test-fixtures").glob("*.wasm")
+        if any(digest(f.read_bytes()) == artifact["sha256"] for f in fixtures):
+            raise ValueError("Test-feature artifacts cannot be deployed")
+        if digest(artifact_path.read_bytes()) != artifact["sha256"].lower():
+            raise ValueError("Artifact hash differs from plan: " + name)
+    if set(entry["path"] for entry in manifest["sources"]) != set(str(f.relative_to(ROOT)) for f in [ROOT / n for n in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")] + list((ROOT / "crates").rglob("*.rs")) + list((ROOT / "crates").rglob("Cargo.toml")) + [ROOT / "scripts" / n for n in ("policy-codegen.json", "build-contracts.sh", "check-policy-bindings.py", "verify-generated-policies.py", "upgrade-fixture.json", "build-upgrade-fixture.py")]):
+        raise ValueError("Manifest must include every contract build source")
+    return plan, digest(canonical(plan)), path.parent
+
+
+def artifact_path(plan, base, name):
+    value = Path(plan["artifacts"][name]["path"])
+    return str(value if value.is_absolute() else base / value)
+
+
+def read_contract(plan, contract, method):
+    return json.loads(ca.cli_run(["contract", "invoke", "--network", plan["network"], "--source-account", plan["owner"], "--id", ca.contract(contract), "--send=no", "--", method]))
+
+
+def wallet_state(plan, wallet, parent):
+    ca.contract(wallet)
+    ca.contract(parent)
+    for address, name in ((wallet, "odc"), (parent, "parent")):
+        actual = ca.cli_run(["contract", "info", "hash", "--network", plan["network"], "--id", address]).strip()
+        if actual != plan["artifacts"][name]["sha256"]:
+            raise ValueError("Deployed executable differs from the plan: " + name)
+    state = read_contract(plan, wallet, "state")
+    binding = read_contract(plan, wallet, "policy_binding")
+    engine = read_contract(plan, parent, "engine")
+    actual = ca.cli_run(["contract", "info", "hash", "--network", plan["network"], "--id", ca.contract(engine)]).strip()
+    if actual != plan["artifacts"]["engine"]["sha256"]:
+        raise ValueError("Resolved shared-engine executable differs from the plan")
+    parent_state = read_contract(plan, parent, "state")
+    if parent_state["upgrade_authority"] != plan["admin"] or state["engine"] != engine:
+        raise ValueError("Parent authority or selected engine differs from the plan")
+    expected_grant = plan["grant"]
+    actual_grant = dict(state["grant"])
+    for key in ("per_transfer", "daily_limit", "total_limit", "max_calls", "expires_at"):
+        actual_grant[key] = int(actual_grant[key])
+    if state["owner"] != plan["owner"] or state["agent"] != plan["agent"] or actual_grant != expected_grant:
+        raise ValueError("Wallet authority or grant differs from the plan")
+    if state["paused"]:
+        raise ValueError("Wallet is paused")
+    if binding["policy_instance"] != plan["policy_instance"] or binding["module_digest"] != plan["artifacts"]["odc"]["sha256"]:
+        raise ValueError("Wallet policy identity or executable differs from the plan")
+    if binding["source_digest"] != plan["policy_source_digest"]:
+        raise ValueError("Installed compiled policy differs from the plan")
+    if binding["entrypoint"] != "_execute" or binding["argument_schema_digest"] != digest(SCHEMA):
+        raise ValueError("Wallet does not use the admitted transfer ABI")
+    return state, binding
+
+
+def raw_invoke(plan, source, contract, method, arguments):
+    account = wa.fetch(plan["network"], source)
+    return TransactionBuilder(Account(source, int(account["sequence"])), wa.PASSPHRASE[plan["network"]], base_fee=100).add_time_bounds(0, int(time.time()) + 300).append_invoke_contract_function_op(contract, method, arguments).build().to_xdr()
+
+
+def execution(plan, wallet, state, binding, operation_id, case="positive"):
+    ca.code_hash(operation_id)
+    if int(operation_id, 16) == 0:
+        raise ValueError("Operation identity must be nonzero")
+    recipient = plan["forbidden_recipient"] if case == "denied-recipient" else plan["recipient"]
+    amount = plan["grant"]["per_transfer"] + 1 if case == "over-limit" else plan["payment_stroops"]
+    now = int(time.time())
+    expires = now - 1 if case == "expired" else min(now + 240, plan["grant"]["expires_at"])
+    if case != "expired" and expires <= now + 30:
+        raise ValueError("The grant must remain valid for at least 30 seconds")
+    arguments = scval.to_struct({"amount": scval.to_int128(amount), "from": scval.to_address(wallet), "to": scval.to_address(recipient), "token": scval.to_address(plan["grant"]["asset"])}).to_xdr_bytes()
+    request = scval.to_struct({
+        "policy_instance": scval.to_bytes(bytes.fromhex(plan["policy_instance"])),
+        "operation_id": scval.to_bytes(bytes.fromhex(operation_id)),
+        "nonce": scval.to_uint64(int(state["nonce"])),
+        "revision": scval.to_uint64(int(state["revision"]) + (1 if case == "stale-revision" else 0)),
+        "expires_at": scval.to_uint64(expires),
+        "invocation": scval.to_struct({"module_digest": scval.to_bytes(bytes.fromhex(binding["module_digest"])), "entrypoint": scval.to_symbol(binding["entrypoint"]), "argument_schema_digest": scval.to_bytes(bytes.fromhex(binding["argument_schema_digest"])), "arguments": scval.to_bytes(arguments)})})
+    return request
+
+
+def expected_receipt(plan, wallet, state, operation_id):
+    return {"operation_id": operation_id, "token": plan["grant"]["asset"], "from": wallet, "to": plan["recipient"], "amount": plan["payment_stroops"], "nonce": int(state["nonce"]), "revision": int(state["revision"])}
+
+
+def decode_receipt(value):
+    value = scval.from_struct(value)
+    return {key: scval.to_native(item) for key, item in value.items()}
+
+
+def receipt_json(value):
+    return {key: item.hex() if isinstance(item, bytes) else item.address if isinstance(item, Address) else item for key, item in value.items()}
+
+
+def packet_path(plan, base, stage):
+    return base / ("packets-" + digest(canonical(plan))) / (stage + ".json")
+
+
+def require_settled(plan, base, stage, address=None):
+    packet = json.loads(packet_path(plan, base, stage).read_text())
+    if packet["stage"] != stage or (address and packet.get("created_contract") != address):
+        raise ValueError("Deployment address differs from its original prepared packet")
+    if settle(plan, packet)["status"] != "success":
+        raise ValueError("Reconcile the original " + stage + " packet before the next stage")
+
+
+def balance(plan, address):
+    return int(json.loads(ca.cli_run(["contract", "invoke", "--network", plan["network"], "--source-account", plan["owner"], "--id", plan["grant"]["asset"], "--send=no", "--", "balance", "--id", address])))
+
+
+def prepare(plan, base, stage, parent=None, wallet=None, operation_id=None):
+    network = plan["network"]
+    wa.owner_only(wa.fetch(network, plan["owner"]))
+    wa.owner_only(wa.fetch(network, plan["agent"]))
+    wa.admin(wa.fetch(network, plan["admin"]), plan["admin_members"])
+    cap = plan["fee_caps_stroops"][stage]
+    source = plan["admin"] if stage == "deploy-parent" else plan["agent"] if stage == "execute" else plan["owner"]
+    expected = None
+    effects = None
+    index = STAGES.index(stage)
+    for dependency in STAGES[:index]:
+        require_settled(plan, base, dependency, parent if dependency == "deploy-parent" else wallet if dependency == "deploy-odc" else None)
+    if stage.startswith("upload-") or stage in ("deploy-parent", "deploy-odc"):
+        name = stage.removeprefix("upload-").removeprefix("deploy-")
+        options = SimpleNamespace(action="upload" if stage.startswith("upload-") else stage, network=network, allow_mainnet=True, source=source, wasm=artifact_path(plan, base, name), wasm_hash=plan["artifacts"][name]["sha256"], admin=plan["admin"], engine_wasm=plan["artifacts"]["engine"]["sha256"], owner=plan["owner"], agent=plan["agent"], engine=None, grant=json.dumps(plan["grant"]), policy_instance=plan["policy_instance"])
+        if stage == "deploy-parent":
+            wa.admin(wa.fetch(network, source), plan["admin_members"])
+        elif stage == "deploy-odc":
+            wa.owner_only(wa.fetch(network, source))
+            if not parent:
+                raise ValueError("ODC deployment requires --parent")
+            if read_contract(plan, parent, "state")["upgrade_authority"] != plan["admin"]:
+                raise ValueError("Parent authority differs from plan")
+            options.engine = read_contract(plan, parent, "engine")
+        raw = ca.cli_run(ca.command(options))
+        assembled = ca.prepare_xdr(raw, source, network, max_fee=cap, expected_wasm=options.wasm_hash if stage.startswith("deploy-") else None)
+    else:
+        if not wallet or not parent:
+            raise ValueError("Funding and execution require --wallet and --parent")
+        state, binding = wallet_state(plan, wallet, parent)
+        if stage == "fund":
+            wa.owner_only(wa.fetch(network, source))
+            if int(state["calls"]) or int(state["spent_total"]):
+                raise ValueError("Initial funding requires an unused release wallet")
+            initial_balance = balance(plan, wallet)
+            if initial_balance != 0:
+                raise ValueError("Initial funding requires a zero native-XLM ODC balance")
+            effects = {"fund_wallet": wallet, "wallet_balance": initial_balance, "amount": plan["fund_stroops"]}
+            raw = raw_invoke(plan, source, plan["grant"]["asset"], "transfer", [scval.to_address(source), scval.to_address(wallet), scval.to_int128(plan["fund_stroops"])])
+        else:
+            if not operation_id:
+                raise ValueError("Execution requires --operation-id")
+            raw = raw_invoke(plan, source, wallet, "execute", [execution(plan, wallet, state, binding, operation_id)])
+            expected = expected_receipt(plan, wallet, state, operation_id)
+            effects = {"wallet": wallet, "wallet_balance": balance(plan, wallet), "recipient_balance": balance(plan, plan["recipient"]), "calls": int(state["calls"]), "spent_total": int(state["spent_total"])}
+        assembled = ca.prepare_xdr(raw, source, network, max_fee=cap)
+    envelope = TransactionEnvelope.from_xdr(assembled, wa.PASSPHRASE[network])
+    result = {"stage": stage, "network": network, "source": source, "transaction_hash": envelope.hash_hex(), "unsigned_xdr": assembled, "fee_bid_stroops": envelope.transaction.fee, "expires_at": envelope.transaction.preconditions.time_bounds.max_time, "expected_receipt": expected, "expected_effects": effects}
+    host = envelope.transaction.operations[0].host_function
+    if stage.startswith("deploy-"):
+        result["created_contract"] = Address.from_xdr_sc_address(ca.deployment_address(host.create_contract_v2, network)).address
+    return result
+
+
+def simulate_cases(plan, parent, wallet, operation_id, replay_id=None):
+    state, binding = wallet_state(plan, wallet, parent)
+    cases = {"positive": None, "denied-recipient": 9, "over-limit": 10, "stale-revision": 5, "expired": 7}
+    if replay_id:
+        ca.code_hash(replay_id)
+        cases["replay"] = 19
+    results = {}
+    for case, code in cases.items():
+        selected_id = replay_id if case == "replay" else operation_id
+        raw = raw_invoke(plan, plan["agent"], wallet, "execute", [execution(plan, wallet, state, binding, selected_id, case)])
+        response = rpc(plan["network"], "simulateTransaction", {"transaction": raw})
+        if code is None:
+            if "error" in response:
+                raise ValueError("Positive E2E simulation failed: " + str(response["error"]))
+            receipt = receipt_json(decode_receipt(xdr.SCVal.from_xdr(response["results"][0]["xdr"])))
+            if receipt != expected_receipt(plan, wallet, state, selected_id):
+                raise ValueError("Positive simulation returned a different receipt")
+            if int(response["minResourceFee"]) + 100 > plan["fee_caps_stroops"]["execute"]:
+                raise ValueError("Positive simulation exceeds the execution fee cap")
+        else:
+            error = response.get("error", "")
+            if not re.search(r"Error\(Contract, #" + str(code) + r"\)", error):
+                raise ValueError("Expected contract error " + str(code) + " for " + case + ": " + error)
+        results[case] = response
+    return {"wallet": wallet, "state": state, "policy_binding": binding, "cases": results, "scope": "Unsigned RPC simulations only; no effects settled"}
+
+
+def settle(plan, prepared):
+    if prepared["network"] != plan["network"] or prepared["plan_digest"] != digest(canonical(plan)):
+        raise ValueError("Prepared transaction belongs to another plan")
+    envelope = TransactionEnvelope.from_xdr(prepared["unsigned_xdr"], wa.PASSPHRASE[plan["network"]])
+    if envelope.hash_hex() != prepared["transaction_hash"]:
+        raise ValueError("Prepared transaction hash differs from its bytes")
+    result = rpc(plan["network"], "getTransaction", {"hash": envelope.hash_hex()})
+    if result["status"] not in ("SUCCESS", "FAILED"):
+        return {"status": "unresolved", "transaction_hash": envelope.hash_hex(), "action": "Keep the original packet. Do not sign a replacement or release reservations.", "rpc": result}
+    if result["status"] != "SUCCESS":
+        return {"status": "failed", "transaction_hash": envelope.hash_hex(), "rpc": result}
+    settled = TransactionEnvelope.from_xdr(result["envelopeXdr"], wa.PASSPHRASE[plan["network"]])
+    if settled.hash_hex() != envelope.hash_hex():
+        raise ValueError("Settled transaction differs from the prepared packet")
+    if prepared.get("expected_receipt"):
+        meta = xdr.TransactionMeta.from_xdr(result["resultMetaXdr"])
+        soroban = meta.v4.soroban_meta if meta.v == 4 else meta.v3.soroban_meta if meta.v == 3 else None
+        if soroban is None:
+            raise ValueError("Successful execution lacks Soroban return metadata")
+        actual = receipt_json(decode_receipt(soroban.return_value))
+        if actual != prepared["expected_receipt"]:
+            raise ValueError("Settled receipt differs from the approved transfer")
+    charged = xdr.TransactionResult.from_xdr(result["resultXdr"]).fee_charged.int64
+    if charged < 0 or charged > envelope.transaction.fee or charged > plan["fee_caps_stroops"][prepared["stage"]]:
+        raise ValueError("Charged fee exceeds the reviewed stage packet")
+    if (prepared.get("expected_effects") or {}).get("fund_wallet"):
+        before = prepared["expected_effects"]
+        if balance(plan, before["fund_wallet"]) != before["wallet_balance"] + before["amount"]:
+            raise ValueError("Settled funding balance differs from the exact approved principal")
+    elif prepared.get("expected_effects"):
+        before = prepared["expected_effects"]
+        state = read_contract(plan, before["wallet"], "state")
+        amount = plan["payment_stroops"]
+        if (balance(plan, before["wallet"]) != before["wallet_balance"] - amount or balance(plan, plan["recipient"]) != before["recipient_balance"] + amount or int(state["calls"]) != before["calls"] + 1 or int(state["spent_total"]) != before["spent_total"] + amount):
+            raise ValueError("Current balances or counters differ from the exact smoke payment. Reconcile concurrent activity")
+    return {"status": "success", "transaction_hash": envelope.hash_hex(), "fee_charged_stroops": charged, "rpc": result}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("action", choices=("check", "preflight", "prepare", "simulate-e2e", "settle"))
+    p.add_argument("--plan", type=Path, required=True)
+    p.add_argument("--allow-mainnet", action="store_true", help="Permit mainnet reads and unsigned preparation only")
+    p.add_argument("--allow-payload-export", action="store_true", help="Explicitly permit private Wasm and transaction payload export to the selected network RPC")
+    p.add_argument("--stage", choices=STAGES)
+    p.add_argument("--parent")
+    p.add_argument("--wallet")
+    p.add_argument("--operation-id")
+    p.add_argument("--replay-id", help="Previously settled operation identity for replay simulation")
+    p.add_argument("--prepared", type=Path)
+    p.add_argument("--output", type=Path, required=True)
+    args = p.parse_args()
+    if args.output.exists():
+        p.error("Output already exists. Preserve the original packet and reconcile it first.")
+    plan, plan_hash, base = load_plan(args.plan)
+    if plan["network"] == "mainnet" and not args.allow_mainnet:
+        p.error("Mainnet access requires --allow-mainnet")
+    if args.action in ("prepare", "simulate-e2e") and not args.allow_payload_export:
+        p.error("This action exports private payloads. Obtain export approval, then use --allow-payload-export")
+    if args.action == "prepare":
+        required_path = packet_path(plan, base, str(args.stage))
+        if args.output.resolve() != required_path.resolve():
+            p.error("Use the unique stage packet path: " + str(required_path))
+    network = None if args.action == "check" else check_network(plan["network"])
+    if args.action == "check":
+        result = {"scope": "Offline plan, artifact and source checks only", "packet_directory": str(base / ("packets-" + plan_hash))}
+    elif args.action == "preflight":
+        owner = wa.fetch(plan["network"], plan["owner"])
+        wa.owner_only(owner)
+        wa.owner_only(wa.fetch(plan["network"], plan["agent"]))
+        wa.admin(wa.fetch(plan["network"], plan["admin"]), plan["admin_members"])
+        result = {"network": network, "owner_sequence": owner["sequence"], "funding_cap_stroops": plan["fund_stroops"], "aggregate_fee_cap_stroops": plan["total_fee_cap_stroops"], "scope": "Public inputs and exact current signer profiles checked; no deployment acceptance"}
+    elif args.action == "prepare":
+        if not args.stage:
+            p.error("Preparation requires --stage")
+        result = prepare(plan, base, args.stage, args.parent, args.wallet, args.operation_id)
+    elif args.action == "simulate-e2e":
+        if not args.parent or not args.wallet or not args.operation_id:
+            p.error("E2E simulation requires --parent, --wallet and --operation-id")
+        require_settled(plan, base, "deploy-parent", args.parent)
+        require_settled(plan, base, "deploy-odc", args.wallet)
+        result = simulate_cases(plan, args.parent, args.wallet, args.operation_id, args.replay_id)
+    else:
+        if not args.prepared:
+            p.error("Settlement checks require --prepared")
+        result = settle(plan, json.loads(args.prepared.read_text()))
+    result["plan_digest"] = plan_hash
+    write_new(args.output, result)
+    print(json.dumps({"output": str(args.output), "plan_digest": plan_hash, "status": result.get("status", "prepared" if args.action == "prepare" else "checked")}))
+    if args.action == "settle" and result["status"] != "success":
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, KeyError, TypeError, argparse.ArgumentTypeError, subprocess.CalledProcessError) as error:
+        raise SystemExit(str(error)) from None

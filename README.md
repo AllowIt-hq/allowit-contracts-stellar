@@ -4,7 +4,7 @@
 
 Owner pause, recovery, grant/agent/engine changes, ownership handoff and ODC code upgrades never call the engine. Spending counters survive configuration changes. General calls, token approvals and external contract-account signing are unsupported. Fund the ODC with a direct SAC transfer.
 
-[Architecture](docs/architecture.md) · [Setup and administration](docs/admin.md)
+[Architecture](docs/architecture.md) · [Setup and administration](docs/admin.md) · [Mainnet preparation](docs/mainnet.md)
 
 ## Build and test
 

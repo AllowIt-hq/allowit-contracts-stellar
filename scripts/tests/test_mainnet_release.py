@@ -1,0 +1,146 @@
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import mainnet_release as release
+from stellar_sdk import Keypair, Asset, scval, Account, TransactionBuilder, Network, xdr
+
+
+class ReleaseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        keys = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 9)]
+        self.plan = dict(schema=1, network='mainnet', network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
+            source_revision=release.DEFAULT_REVISION, codegen_revision=json.loads((release.ROOT/'scripts/policy-codegen.json').read_text())['revision'],
+            policy_source_digest=release.digest((release.ROOT/'crates/odc/policy/policy.rs').read_bytes()), artifact_manifest='manifest.json',
+            owner=keys[0], admin=keys[1], agent=keys[2], recipient=keys[3], forbidden_recipient=keys[4], admin_members=keys[5:8], policy_instance='01'*32,
+            grant=dict(asset=Asset.native().contract_id(Network.PUBLIC_NETWORK_PASSPHRASE), recipients=[keys[3]], per_transfer=10000, daily_limit=20000, total_limit=20000, max_calls=2, expires_at=2000000000),
+            fund_stroops=20000, payment_stroops=10000, fee_caps_stroops=dict.fromkeys(release.STAGES, 100000000), total_fee_cap_stroops=700000000, artifacts={})
+        files = [release.ROOT/n for n in ('Cargo.toml','Cargo.lock','rust-toolchain.toml')]
+        files += list((release.ROOT/'crates').rglob('*.rs')) + list((release.ROOT/'crates').rglob('Cargo.toml'))
+        files += [release.ROOT/'scripts'/n for n in ('policy-codegen.json','build-contracts.sh','check-policy-bindings.py','verify-generated-policies.py','upgrade-fixture.json','build-upgrade-fixture.py')]
+        manifest = dict(git_revision=release.DEFAULT_REVISION, sources=[dict(path=str(f.relative_to(release.ROOT)),sha256=release.digest(f.read_bytes())) for f in files], artifacts=[])
+        hashes = {}
+        for name, filename in release.NAMES.items():
+            data = ('fake-wasm-'+name).encode()
+            (self.base/filename).write_bytes(data)
+            hashes[name] = release.digest(data)
+            self.plan['artifacts'][name] = dict(path=filename,sha256=hashes[name])
+            manifest['artifacts'].append(dict(name=filename,sha256=hashes[name]))
+        self.hashes = hashes
+        (self.base/'manifest.json').write_text(json.dumps(manifest))
+        self.path = self.base/'plan.json'
+
+    def load(self):
+        self.path.write_text(json.dumps(self.plan))
+        with patch.object(release,'DEFAULT_HASHES',self.hashes):
+            return release.load_plan(self.path)
+
+    def test_offline_valid_plan_and_stable_digest(self):
+        with patch.object(release, 'urlopen', side_effect=AssertionError('network forbidden')):
+            plan, digest, base = self.load()
+            self.assertEqual(digest, release.digest(release.canonical(plan)))
+            self.assertEqual(base, self.base.resolve())
+
+    def test_reject_artifact_mutation(self):
+        (self.base/release.NAMES['odc']).write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError,'hash differs'): self.load()
+
+    def test_reject_compiler_drift(self):
+        self.plan['codegen_revision']='00'*20
+        with self.assertRaisesRegex(ValueError,'Compiler revision'): self.load()
+
+    def test_reject_fee_aggregate(self):
+        self.plan['total_fee_cap_stroops']=100
+        with self.assertRaisesRegex(ValueError,'aggregate'): self.load()
+
+    def test_reject_funding_above_grant(self):
+        self.plan['fund_stroops']=20001
+        with self.assertRaisesRegex(ValueError,'inconsistent'): self.load()
+
+    def test_reject_network_and_signer_overlap(self):
+        self.plan['network_passphrase']=Network.TESTNET_NETWORK_PASSPHRASE
+        with self.assertRaisesRegex(ValueError,'passphrase'): self.load()
+        self.plan['network_passphrase']=Network.PUBLIC_NETWORK_PASSPHRASE
+        self.plan['admin_members'][0]=self.plan['owner']
+        with self.assertRaisesRegex(ValueError,'differ'): self.load()
+
+    def test_receipt_uses_plain_addresses(self):
+        expected = release.expected_receipt(self.plan,self.plan['grant']['asset'],dict(nonce=0,revision=0),'ab'*32)
+        value = scval.to_struct({k: scval.to_address(v) if k in ('from','to','token') else scval.to_bytes(bytes.fromhex(v)) if k=='operation_id' else scval.to_int128(v) if k=='amount' else scval.to_uint64(v) for k,v in expected.items()})
+        self.assertEqual(release.receipt_json(release.decode_receipt(value)),expected)
+
+    def packet(self):
+        tx = TransactionBuilder(Account(self.plan['owner'],1),Network.PUBLIC_NETWORK_PASSPHRASE,100).add_time_bounds(0,2000000000).append_invoke_contract_function_op(self.plan['grant']['asset'],'balance',[scval.to_address(self.plan['recipient'])]).build()
+        return dict(network='mainnet',plan_digest=release.digest(release.canonical(self.plan)),unsigned_xdr=tx.to_xdr(),transaction_hash=tx.hash_hex(),stage='fund')
+
+    def test_uncertain_settlement_never_becomes_failure(self):
+        for status in ('NOT_FOUND','PENDING','UNKNOWN'):
+            with patch.object(release,'rpc',return_value=dict(status=status)):
+                self.assertEqual(release.settle(self.plan,self.packet())['status'],'unresolved')
+
+    def test_settlement_rejects_changed_plan(self):
+        packet=self.packet();packet['plan_digest']='00'*32
+        with self.assertRaisesRegex(ValueError,'another plan'):release.settle(self.plan,packet)
+
+    def test_output_cannot_replace_original(self):
+        path=self.base/'packet.json';release.write_new(path,{'hash':'original'})
+        with self.assertRaises(FileExistsError):release.write_new(path,{'hash':'replacement'})
+        self.assertEqual(json.loads(path.read_text()),{'hash':'original'})
+
+    def test_execute_prepare_records_principal_and_original_effects(self):
+        state = dict(nonce=0,revision=0,calls=0,spent_total=0)
+        binding = dict(module_digest='aa'*32,entrypoint='_execute',argument_schema_digest=release.digest(release.SCHEMA))
+        packet=self.packet()
+        with patch.object(release.wa,'fetch',return_value={}), patch.object(release.wa,'owner_only'), patch.object(release.wa,'admin'), patch.object(release,'require_settled'), patch.object(release,'wallet_state',return_value=(state,binding)), patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']), patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']), patch.object(release,'balance',side_effect=[20000,50]):
+            result=release.prepare(self.plan,self.base,'execute',parent=self.plan['grant']['asset'],wallet=self.plan['grant']['asset'],operation_id='ab'*32)
+        self.assertEqual(result['expected_receipt']['amount'],10000)
+        self.assertEqual(result['expected_effects']['recipient_balance'],50)
+        self.assertEqual(result['transaction_hash'],packet['transaction_hash'])
+
+    def test_successful_v4_receipt_and_exact_effects(self):
+        packet=self.packet()
+        expected=release.expected_receipt(self.plan,self.plan['grant']['asset'],dict(nonce=0,revision=0),'ab'*32)
+        value=scval.to_struct({k:scval.to_address(v) if k in ('from','to','token') else scval.to_bytes(bytes.fromhex(v)) if k=='operation_id' else scval.to_int128(v) if k=='amount' else scval.to_uint64(v) for k,v in expected.items()})
+        packet.update(expected_receipt=expected,expected_effects=dict(wallet=self.plan['grant']['asset'],wallet_balance=20000,recipient_balance=50,calls=0,spent_total=0))
+        meta=SimpleNamespace(v=4,v4=SimpleNamespace(soroban_meta=SimpleNamespace(return_value=value)))
+        response=dict(status='SUCCESS',envelopeXdr=packet['unsigned_xdr'],resultMetaXdr='mock',resultXdr=xdr.TransactionResult(xdr.Int64(100),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr())
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,spent_total=10000)), patch.object(release,'balance',side_effect=[10000,10050]):
+            self.assertEqual(release.settle(self.plan,packet)['status'],'success')
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,spent_total=10000)), patch.object(release,'balance',side_effect=[9999]):
+            with self.assertRaisesRegex(ValueError,'balances or counters'):release.settle(self.plan,packet)
+
+    def test_funding_settlement_checks_exact_principal_and_fee(self):
+        packet=self.packet()
+        packet['expected_effects']=dict(fund_wallet=self.plan['grant']['asset'],wallet_balance=0,amount=20000)
+        response=dict(status='SUCCESS',envelopeXdr=packet['unsigned_xdr'],resultXdr=xdr.TransactionResult(xdr.Int64(100),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr())
+        with patch.object(release,'rpc',return_value=response),patch.object(release,'balance',return_value=20000):
+            self.assertEqual(release.settle(self.plan,packet)['fee_charged_stroops'],100)
+        with patch.object(release,'rpc',return_value=response),patch.object(release,'balance',return_value=20001):
+            with self.assertRaisesRegex(ValueError,'funding balance'):release.settle(self.plan,packet)
+        response['resultXdr']=xdr.TransactionResult(xdr.Int64(101),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr()
+        with patch.object(release,'rpc',return_value=response):
+            with self.assertRaisesRegex(ValueError,'Charged fee'):release.settle(self.plan,packet)
+
+    def test_cli_uses_explicit_rpc_and_passphrase(self):
+        with patch.object(release, '_ORIGINAL_CLI_RUN', return_value='ok') as run:
+            self.assertEqual(release.network_cli(['contract','info','hash','--network','mainnet','--id','PUBLIC']), 'ok')
+        command = run.call_args.args[0]
+        self.assertNotIn('--network', command)
+        self.assertIn(release.RPC['mainnet'], command)
+        self.assertIn(Network.PUBLIC_NETWORK_PASSPHRASE, command)
+
+    def test_transaction_write_rpc_is_never_admitted(self):
+        with self.assertRaisesRegex(ValueError,'Only read'): release.rpc('mainnet','sendTransaction',{})
+
+
+if __name__=='__main__': unittest.main()

@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "network": "mainnet",
+  "network_passphrase": "Public Global Stellar Network ; September 2015",
+  "source_revision": "304bbd61dd211f516d7449716a980fe02fd87194",
+  "codegen_revision": "b50f6e483c04532f0b38f732b96d0d950465d17b",
+  "policy_source_digest": "3645a27c3c3e1829cb17223d15de1d71fa978261ba738c1806a8e6780daa4554",
+  "artifact_manifest": "manifest.json",
+  "artifacts": {
+    "engine": {
+      "path": "REPLACE_ARTIFACT_DIR/allowit_wallet_engine.wasm",
+      "sha256": "b12dc7b7c410370196abdaa06744c2f1a6dbe0b45493776e3ec5247a3d4c7b88"
+    },
+    "parent": {
+      "path": "REPLACE_ARTIFACT_DIR/allowit_engine_parent.wasm",
+      "sha256": "21f1068255df67f179a49f19129af4775927399b2ef0f215418101d8091615f6"
+    },
+    "odc": {
+      "path": "REPLACE_ARTIFACT_DIR/allowit_odc.wasm",
+      "sha256": "2bac1c45cedae74dcb604f33aae85de11ba39dba64e265b288fc54334ca26a83"
+    }
+  },
+  "owner": "REPLACE_OWNER_G_ADDRESS",
+  "admin": "REPLACE_ADMIN_G_ADDRESS",
+  "admin_members": [
+    "REPLACE_MEMBER_1",
+    "REPLACE_MEMBER_2",
+    "REPLACE_MEMBER_3"
+  ],
+  "agent": "REPLACE_AGENT_G_ADDRESS",
+  "recipient": "REPLACE_RECIPIENT_G_ADDRESS",
+  "forbidden_recipient": "REPLACE_FORBIDDEN_G_ADDRESS",
+  "policy_instance": "REPLACE_NONZERO_64_HEX",
+  "grant": {
+    "asset": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
+    "recipients": [
+      "REPLACE_RECIPIENT_G_ADDRESS"
+    ],
+    "per_transfer": 10000,
+    "daily_limit": 20000,
+    "total_limit": 20000,
+    "max_calls": 2,
+    "expires_at": 0
+  },
+  "fund_stroops": 20000,
+  "payment_stroops": 10000,
+  "fee_caps_stroops": {
+    "upload-engine": 60000000,
+    "upload-parent": 80000000,
+    "upload-odc": 260000000,
+    "deploy-parent": 40000000,
+    "deploy-odc": 40000000,
+    "fund": 10000000,
+    "execute": 10000000
+  },
+  "total_fee_cap_stroops": 500000000
+}
