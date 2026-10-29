@@ -85,7 +85,7 @@ cannot use that path. Native transaction sequencing and Soroban authorization no
 of an owner's signed authorization. No automatic shared checker participates in owner operations.
 
 Wallet release/layout, owner deployment sequence and parent administration version are distinct.
-Unknown stored formats reject. Simple, Common and Custom share the version-1 layout. Tier changes must install matching rules and source digest; delegated admission validates the active tier after an upgrade. For an incompatible layout, the owner must select reviewed code that reads the retained layout and performs the explicit migration. Installing code that cannot read that layout can disable owner recovery and upgrades. Pausing alone does not prevent this. Contract upgrades require explicit owner authorization.
+Unknown stored formats reject. Simple, Common and Custom share the version-1 layout. Tier changes must install matching rules and source digest. Deployments with a different code hash defer tier parameter validation to delegated admission; unchanged-code redeployments validate immediately. For an incompatible layout, the owner must select reviewed code that reads the retained layout and performs the explicit migration. Installing code that cannot read that layout can disable owner recovery and upgrades. Pausing alone does not prevent this. Contract upgrades require explicit owner authorization.
 
 ## Classic Stellar accounts
 

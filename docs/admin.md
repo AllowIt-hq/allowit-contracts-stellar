@@ -70,7 +70,7 @@ The Custom sample's source digest must match its compiled source.
 Grant JSON maps names to canonical base64 SCVal XDR. The tool converts these exact values to the
 pinned CLI's tagged native JSON without guessing types. For example, generate a U64 limit with
 `stellar_sdk.scval.to_uint64(100000).to_xdr()` or bytes with `scval.to_bytes(value).to_xdr()`.
-No names, limits or recipients are mandatory. Only selected policy rules interpret their keys.
+Each selected Common rule requires its documented Grant parameter. Configuration changes and same-code redeployments reject missing or malformed values. Code changes defer the new tier validation to delegated admission.
 Duplicate JSON keys and noncanonical value encodings reject. Fund the wallet only with its
 installed asset. `recover` transfers only that asset.
 
@@ -82,7 +82,7 @@ A deployment argument contains exactly `deployment_version`, `owner`, `agent`, `
 `source_digest`, `rules`, `grant`, `x402_enabled`, and `wasm_hash`. The target version is current plus
 one. Use null for unchanged code. Deployment preserves pause and spent data. A changed owner must
 also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
-False disables x402 without changing direct two-role execution authorization.
+False disables x402 without changing direct two-role execution authorization. Classic signer rotation and `shutdown-wallet` do not revoke raw-key x402 delegation. The contract wallet owner must disable x402, pause, or replace the agent/server address through `deploy_policy`.
 
 Owner passthrough uses `invoke(contract, function, args, auth)`. Prepare this exact call with the
 native CLI and inspect every nested authorization entry. This general owner operation is outside
