@@ -21,9 +21,9 @@ ODC = {
 }
 
 PARENT = {
-    "upgrade_engine": {"new_hash", "expected_revision"},
-    "upgrade_parent": {"new_hash", "expected_revision"},
-    "set_admin": {"new_admin", "expected_revision"},
+    "upgrade_engine": {"new_hash", "version"},
+    "upgrade_parent": {"new_hash", "version"},
+    "set_admin": {"owner", "version"},
 }
 
 
@@ -124,15 +124,15 @@ def checked_args(method, values, family):
         elif key == "deployment_version":
             if type(value) is not int or not 0 < value < 2**64:
                 raise ValueError("Invalid deployment version")
-        elif key == "expected_revision" or key == "amount":
-            if type(value) is not int or (value < 0 if key == "expected_revision" else value <= 0) or value > (2**64 - 1 if key == "expected_revision" else 2**127 - 1):
+        elif key == "version" or key == "amount":
+            if type(value) is not int or (value < 0 if key == "version" else value <= 0) or value > (2**64 - 1 if key == "version" else 2**127 - 1):
                 raise ValueError("Invalid integer " + key)
         elif key in ("new_wasm_hash", "new_hash"):
             code_hash(value)
         elif key == "paused":
             if type(value) is not bool:
                 raise ValueError("paused must be boolean")
-        elif key in ("new_owner", "agent", "new_admin"):
+        elif key in ("new_owner", "agent", "owner"):
             account(value)
         elif key == "engine":
             contract(value)
@@ -265,8 +265,8 @@ def command(args):
     if args.action.startswith("deploy-"):
         pinned_wasm(args.wasm, args.wasm_hash)
         if args.action == "deploy-parent":
-            values = {"admin": address(args.admin), "engine_wasm": code_hash(args.engine_wasm)}
-            if args.source != args.admin:
+            values = {"owner": address(args.owner), "engine_wasm": code_hash(args.engine_wasm)}
+            if args.source != args.owner:
                 raise ValueError("Parent deployment source must be its native admin account")
         else:
             values = {"owner": account(args.owner), "agent": account(args.agent), "engine": contract(args.engine), "asset": contract(args.asset), "grant": grant(public_json(args.grant)), "policy_instance": code_hash(args.policy_instance)}
@@ -297,7 +297,7 @@ def main():
     p.add_argument("--network", choices=["testnet", "mainnet"], default="testnet")
     p.add_argument("--allow-mainnet", action="store_true")
     p.add_argument("--source", required=True, type=account)
-    for flag in ("wasm", "wasm-hash", "admin", "engine-wasm", "owner", "agent", "engine", "asset", "grant", "policy-instance", "contract", "method"):
+    for flag in ("wasm", "wasm-hash", "engine-wasm", "owner", "agent", "engine", "asset", "grant", "policy-instance", "contract", "method"):
         p.add_argument("--" + flag)
     p.add_argument("--family", choices=["odc", "parent"], default="odc")
     p.add_argument("--member", action="append", default=[], type=account, help="Exactly three public members of the native parent admin")
@@ -309,7 +309,7 @@ def main():
     if args.action == "deploy-parent" or args.action == "admin" and args.family == "parent":
         verify_admin(fetch(args.network, args.source), args.member)
         if args.action == "admin" and args.method == "set_admin":
-            verify_admin(fetch(args.network, public_json(args.arguments)["new_admin"]), args.candidate_member)
+            verify_admin(fetch(args.network, public_json(args.arguments)["owner"]), args.candidate_member)
     if args.action == "deploy-odc" or args.action == "admin" and args.family == "odc":
         owner_only(fetch(args.network, args.source))
 
@@ -317,7 +317,7 @@ def main():
         state_args = ["contract", "invoke", "--id", args.contract, "--network", args.network,
                       "--source-account", args.source, "--send=no", "--", "state"]
         state = json.loads(cli_run(state_args))
-        authority = state["owner" if args.family == "odc" else "upgrade_authority"]
+        authority = state["owner"]
         if args.family == "odc":
             values = public_json(args.arguments)
             if args.method == "deploy_policy":
@@ -331,8 +331,8 @@ def main():
             raise ValueError("Source is not the contract's current owner/admin")
         values = public_json(args.arguments)
         if args.family == "parent":
-            if values["expected_revision"] != state["revision"]:
-                raise ValueError("Expected revision does not match current state")
+            if values["version"] != state["version"]:
+                raise ValueError("Expected version does not match current state")
         elif args.method != "recover":
             target = values["deployment"]["deployment_version"] if args.method == "deploy_policy" else values["deployment_version"]
             if target != state["deployment_version"] + 1:
@@ -340,7 +340,7 @@ def main():
     output = cli_run(prepared)
     candidate = None
     if args.action == "admin" and args.method == "set_admin":
-        candidate = public_json(args.arguments)["new_admin"]
+        candidate = public_json(args.arguments)["owner"]
     elif args.action == "admin" and args.method == "deploy_policy":
         next_owner = public_json(args.arguments)["deployment"]["owner"]
         if next_owner != authority:

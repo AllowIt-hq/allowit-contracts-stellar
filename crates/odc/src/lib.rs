@@ -14,6 +14,7 @@ use soroban_sdk::{
     xdr::{FromXdr, ToXdr},
 };
 
+mod persistent;
 mod policy_storage;
 use policy_storage::NativePolicyStorage;
 
@@ -176,7 +177,6 @@ fn x402_config(env: &Env, agent: &Address) -> Result<X402Config, Error> {
     if config.agent != *agent {
         return Err(Error::InvalidActor);
     }
-    agent_public_key(env, agent)?;
     let fields = soroban_sdk::Map::<Symbol, soroban_sdk::Val>::try_from_val(env, &raw)
         .map_err(|_| Error::InvalidState)?;
     if fields.len() != 2 {
@@ -255,7 +255,10 @@ fn binding(env: &Env) -> Result<PolicyBinding, Error> {
     })
 }
 
-fn load(env: &Env) -> Result<State, Error> {
+fn load(env: &Env, initial: Option<State>) -> Result<State, Error> {
+    if let Some(state) = initial {
+        store(env, &state);
+    }
     let raw: soroban_sdk::Val = env
         .storage()
         .instance()
@@ -275,9 +278,6 @@ fn load(env: &Env) -> Result<State, Error> {
 
 fn store(env: &Env, state: &State) {
     env.storage().instance().set(&0u32, state);
-    env.storage()
-        .instance()
-        .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
 }
 
 fn commit_deployment(env: &Env, s: &mut State, deployment_version: u64) -> Result<(), Error> {
@@ -290,7 +290,7 @@ fn commit_deployment(env: &Env, s: &mut State, deployment_version: u64) -> Resul
 }
 
 fn owner_state(env: &Env) -> Result<State, Error> {
-    let s = load(env)?;
+    let s = load(env, None)?;
     s.owner.require_auth();
     Ok(s)
 }
@@ -329,12 +329,6 @@ fn policy_token(env: &Env, asset: &Address) -> String {
 }
 
 fn move_tokens(env: &Env, asset: &Address, recipient: &Address, amount: i128) -> Result<(), Error> {
-    if amount <= 0 {
-        return Err(Error::InvalidAmount);
-    }
-    if recipient == &env.current_contract_address() {
-        return Err(Error::InvalidRecipient);
-    }
     let client = token::Client::new(env, asset);
     let from = env.current_contract_address();
     let before_from = client.balance(&from);
@@ -359,8 +353,8 @@ fn admit(
     env: &Env,
     execution: ExecutionRequest,
     token_label: String,
+    mut s: State,
 ) -> Result<TransferReceipt, Error> {
-    let mut s = load(env)?;
     // Authentication covers the complete invocation before canonical arguments are decoded.
     let installed = binding(env)?;
     let invocation = &execution.invocation;
@@ -440,7 +434,7 @@ fn admit(
         env,
         policy_instance: installed.policy_instance,
     };
-    let initial_spent = storage.snapshot().map_err(|_| Error::InvalidState)?;
+    let initial_spent = storage.load().map_err(|_| Error::InvalidState)?;
     let state = EngineState {
         grant: s.grant.clone(),
         spent: initial_spent.clone().unwrap_or_else(|| Grant::new(env)),
@@ -463,12 +457,7 @@ fn admit(
         nonce: request.nonce,
         deployment_version: request.deployment_version,
     };
-    env.storage().persistent().set(&operation_key, &receipt);
-    let ttl = env.storage().max_ttl();
-    env.storage()
-        .persistent()
-        .extend_ttl(&operation_key, ttl / 2, ttl);
-    Ok(receipt)
+    Ok(persistent::load(env, &operation_key, Some(&receipt)).unwrap())
 }
 
 #[contractimpl]
@@ -513,9 +502,9 @@ impl Odc {
         env.storage()
             .instance()
             .set(&Key::PolicyInstance, &policy_instance);
-        store(
+        load(
             &env,
-            &State {
+            Some(State {
                 contract_version: CONTRACT_VERSION,
                 owner,
                 agent,
@@ -525,8 +514,9 @@ impl Odc {
                 nonce: 0,
                 deployment_version: 0,
                 paused: false,
-            },
-        );
+            }),
+        )
+        .unwrap();
     }
 
     /// Read wallet state after validating its contract release and exact stored layout.
@@ -537,7 +527,7 @@ impl Odc {
     /// # Returns
     /// Returns protected configuration and execution ordering without reading spent or invoking the engine.
     pub fn state(env: Env) -> Result<State, Error> {
-        load(&env)
+        load(&env, None)
     }
 
     /// Read installed policy identities and the executing contract release.
@@ -562,7 +552,7 @@ impl Odc {
     pub fn policy_spent(
         env: Env,
     ) -> Result<Option<soroban_sdk::Map<String, soroban_sdk::Val>>, Error> {
-        load(&env)?;
+        load(&env, None)?;
         let policy_instance = env
             .storage()
             .instance()
@@ -572,7 +562,7 @@ impl Odc {
             env: &env,
             policy_instance,
         }
-        .snapshot()
+        .load()
         .map_err(|_| Error::InvalidState)
     }
 
@@ -585,9 +575,9 @@ impl Odc {
     /// # Returns
     /// Returns the committed transfer receipt. Effects, consumption and replay records roll back together on failure.
     pub fn execute(env: Env, execution: ExecutionRequest) -> Result<TransferReceipt, Error> {
-        let s = load(&env)?;
+        let s = load(&env, None)?;
         s.agent.require_auth();
-        let receipt = admit(&env, execution, policy_token(&env, &s.asset))?;
+        let receipt = admit(&env, execution, policy_token(&env, &s.asset), s)?;
         move_tokens(&env, &receipt.token, &receipt.to, receipt.amount)?;
         Ok(receipt)
     }
@@ -635,7 +625,8 @@ impl Odc {
         s.agent = deployment.agent;
         s.engine = deployment.engine;
         s.grant = deployment.grant;
-        commit_deployment(&env, &mut s, deployment.deployment_version)?;
+        s.deployment_version = deployment.deployment_version;
+        store(&env, &s);
         if let Some(hash) = deployment.wasm_hash {
             env.deployer()
                 .update_current_contract(soroban_sdk::ContractExecutable::Wasm(hash));
@@ -672,6 +663,12 @@ impl Odc {
     /// Returns success after exact balance-effect checks. It has no caller version fence and does not change execution ordering or policy spent.
     pub fn recover(env: Env, recipient: Address, amount: i128) -> Result<(), Error> {
         let s = owner_state(&env)?;
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if recipient == env.current_contract_address() {
+            return Err(Error::InvalidRecipient);
+        }
         move_tokens(&env, &s.asset, &recipient, amount)
     }
 
@@ -712,9 +709,9 @@ impl CustomAccountInterface for Odc {
         authorization: X402Authorization,
         contexts: Vec<Context>,
     ) -> Result<(), Error> {
-        let s = load(&env)?;
+        let s = load(&env, None)?;
         let config = x402_config(&env, &s.agent)?;
-        if config.agent != s.agent || contexts.len() != 1 {
+        if contexts.len() != 1 {
             return Err(Error::InvalidActor);
         }
         let Context::Contract(context) = contexts.get(0).ok_or(Error::InvalidInvocation)? else {
@@ -760,7 +757,7 @@ impl CustomAccountInterface for Odc {
         );
         // No token callbacks here: SAC.transfer is already active. SAC identity was
         // admitted at installation; its native implementation enforces exact effects.
-        admit(&env, authorization.execution, config.token)?;
+        admit(&env, authorization.execution, config.token, s)?;
         Ok(())
     }
 }

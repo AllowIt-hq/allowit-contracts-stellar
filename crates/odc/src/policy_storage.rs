@@ -19,20 +19,15 @@ impl NativePolicyStorage<'_> {
     }
 
     /// Read the full raw map. Existing empty data remains distinct from true absence.
-    pub(crate) fn snapshot(&self) -> Result<Option<Spent>, ()> {
+    pub(crate) fn load(&self) -> Result<Option<Spent>, ()> {
         let key = self.key();
-        let Some(raw) = self.env.storage().persistent().get::<_, Val>(&key) else {
+        let Some(raw) = super::persistent::load::<_, Val>(self.env, &key, None) else {
             return Ok(None);
         };
         let map = Spent::try_from_val(self.env, &raw).map_err(|_| ())?;
         if !allowit_wallet_protocol::named_values_valid(self.env, &map) {
             return Err(());
         }
-        let ttl = self.env.storage().max_ttl();
-        self.env
-            .storage()
-            .persistent()
-            .extend_ttl(&key, ttl / 2, ttl);
         Ok(Some(map))
     }
 
@@ -44,12 +39,11 @@ impl NativePolicyStorage<'_> {
             return false;
         }
         let key = self.key();
-        self.env.storage().persistent().set(&key, final_spent);
-        let ttl = self.env.storage().max_ttl();
-        self.env
-            .storage()
-            .persistent()
-            .extend_ttl(&key, ttl / 2, ttl);
+        if initial.is_none() {
+            super::persistent::load(self.env, &key, Some(final_spent));
+        } else {
+            self.env.storage().persistent().set(&key, final_spent);
+        }
         true
     }
 }
@@ -76,7 +70,7 @@ mod tests {
                 env: &env,
                 policy_instance: instance,
             }
-            .snapshot()
+            .load()
             .unwrap()
         }
         pub fn put(
@@ -89,7 +83,7 @@ mod tests {
                 env: &env,
                 policy_instance: instance,
             };
-            let initial = storage.snapshot().unwrap();
+            let initial = storage.load().unwrap();
             let changed = storage.commit(&initial, &value);
             if fail {
                 return Err(Failure::Denied);
@@ -147,6 +141,29 @@ mod tests {
         assert_eq!(value(&env, &c.get(&a).unwrap()), 9);
     }
     #[test]
+    fn initial_and_changed_spent_keep_full_persistent_lifetime() {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        let env = Env::default();
+        let wallet = env.register(Harness, ());
+        let instance = BytesN::from_array(&env, &[1; 32]);
+        let key = Key::Spent(instance.clone());
+        let c = HarnessClient::new(&env, &wallet);
+        let max = env.storage().max_ttl();
+        assert!(c.put(&instance, &map(&env, 1), &false));
+        assert_eq!(
+            env.as_contract(&wallet, || env.storage().persistent().get_ttl(&key)),
+            max
+        );
+        env.ledger()
+            .with_mut(|ledger| ledger.sequence_number += max / 2 + 1);
+        assert!(c.put(&instance, &map(&env, 2), &false));
+        assert_eq!(
+            env.as_contract(&wallet, || env.storage().persistent().get_ttl(&key)),
+            max
+        );
+        assert_eq!(value(&env, &c.get(&instance).unwrap()), 2);
+    }
+    #[test]
     fn invalid_native_object_is_not_absence() {
         let env = Env::default();
         let wallet = env.register(Harness, ());
@@ -160,7 +177,7 @@ mod tests {
                     env: &env,
                     policy_instance: a
                 }
-                .snapshot()
+                .load()
                 .is_err()
             );
         });

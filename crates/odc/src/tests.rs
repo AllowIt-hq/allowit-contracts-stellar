@@ -361,7 +361,7 @@ impl Fixture {
                 env: &self.env,
                 policy_instance: instance,
             };
-            let before = storage.snapshot().unwrap();
+            let before = storage.load().unwrap();
             storage.commit(&before, map);
         });
     }
@@ -1812,10 +1812,10 @@ fn engine_proposals_do_not_write_and_only_the_selected_final_map_commits() {
             env: &f.env,
             policy_instance: instance,
         };
-        assert_eq!(storage.snapshot(), Ok(None));
+        assert_eq!(storage.load(), Ok(None));
         // Returning the earlier map deliberately discards an unused proposal; there is no hidden merge.
         assert!(!storage.commit(&None, &initial));
-        assert_eq!(storage.snapshot(), Ok(None));
+        assert_eq!(storage.load(), Ok(None));
     });
     assert_eq!(c.policy_spent(), None);
     assert_eq!(c.state().nonce, 0);
@@ -1908,4 +1908,36 @@ fn grant_named_keys_are_string_utf8_and_unrelated_raw_values_are_preserved() {
     assert!(
         allowit_wallet_protocol::PolicyValue::from_raw(&f.env, &opaque.into_val(&f.env)).is_err()
     );
+}
+
+#[test]
+fn state_load_renews_constructor_lifetime_and_receipts_keep_persistent_lifetime() {
+    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
+    for compiled in [false, true] {
+        let f = Fixture::new(compiled);
+        assert_eq!(
+            f.env
+                .as_contract(&f.odc, || f.env.storage().instance().get_ttl()),
+            TTL_EXTEND
+        );
+        f.env
+            .ledger()
+            .with_mut(|ledger| ledger.sequence_number += TTL_THRESHOLD + 1);
+        f.client().state();
+        assert_eq!(
+            f.env
+                .as_contract(&f.odc, || f.env.storage().instance().get_ttl()),
+            TTL_EXTEND
+        );
+        let request = f.request(1);
+        let execution = f.client().envelope(&request);
+        let key = Key::Operation(execution.operation_id.clone());
+        f.client().execute(&execution);
+        assert_eq!(
+            f.env
+                .as_contract(&f.odc, || f.env.storage().persistent().get_ttl(&key)),
+            f.env.storage().max_ttl()
+        );
+        assert_eq!(f.client().try_execute(&execution), Err(Ok(Error::Replay)));
+    }
 }
