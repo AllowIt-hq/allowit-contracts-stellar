@@ -6,8 +6,11 @@ use allowit_wallet_protocol::{
     TransferReceipt, TransferRequest,
 };
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, Executable, String, Symbol, contract, contracterror, contractimpl,
-    contracttype, token,
+    Address, Bytes, BytesN, Env, Executable, String, Symbol, TryFromVal, Vec,
+    auth::{Context, CustomAccountInterface},
+    contract, contracterror, contractimpl, contracttype,
+    crypto::Hash,
+    token,
     xdr::{FromXdr, ToXdr},
 };
 
@@ -80,6 +83,23 @@ pub enum Error {
 enum Key {
     PolicyInstance,
     Operation(BytesN<32>),
+    X402Config,
+}
+
+/// An owner-delegated raw Ed25519 key. Native account thresholds do not revoke it.
+#[contracttype]
+#[derive(Clone)]
+pub struct X402Config {
+    pub agent: Address,
+    pub public_key: BytesN<32>,
+    pub token: String,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct X402Authorization {
+    pub execution: ExecutionRequest,
+    pub signature: BytesN<64>,
 }
 
 #[contract]
@@ -232,6 +252,144 @@ fn move_tokens(env: &Env, asset: &Address, recipient: &Address, amount: i128) ->
     Ok(())
 }
 
+// Both authorization routes consume identical policy, grant and replay state.
+// Hook writes roll back with the enclosing SAC transfer if that transfer fails.
+fn admit(
+    env: &Env,
+    execution: ExecutionRequest,
+    token_label: String,
+) -> Result<TransferReceipt, Error> {
+    let mut s = load(env)?;
+    // Authentication covers the complete invocation before canonical arguments are decoded.
+    let installed = binding(env)?;
+    let invocation = &execution.invocation;
+    if execution.policy_instance != installed.policy_instance
+        || execution.operation_id == BytesN::from_array(env, &[0; 32])
+        || invocation.module_digest != installed.module_digest
+        || invocation.entrypoint != installed.entrypoint
+        || invocation.argument_schema_digest != installed.argument_schema_digest
+        || invocation.arguments.len() > MAX_ARGUMENT_BYTES
+    {
+        return Err(Error::InvalidInvocation);
+    }
+    let arguments = Sep41TransferArgs::from_xdr(env, &invocation.arguments)
+        .map_err(|_| Error::InvalidInvocation)?;
+    if arguments.clone().to_xdr(env) != invocation.arguments
+        || arguments.token != s.grant.asset
+        || arguments.from != env.current_contract_address()
+    {
+        return Err(Error::InvalidInvocation);
+    }
+    let operation_key = Key::Operation(execution.operation_id.clone());
+    if env.storage().persistent().has(&operation_key) {
+        return Err(Error::Replay);
+    }
+    let request = TransferRequest {
+        recipient: arguments.to.clone(),
+        amount: arguments.amount,
+        nonce: execution.nonce,
+        revision: execution.revision,
+        expires_at: execution.expires_at,
+    };
+    if s.paused {
+        return Err(Error::Paused);
+    }
+    if request.nonce != s.nonce || request.revision != s.revision {
+        return Err(Error::StaleRequest);
+    }
+    let now = env.ledger().timestamp();
+    if request.expires_at <= now
+        || s.grant.expires_at <= now
+        || request.expires_at > s.grant.expires_at
+    {
+        return Err(Error::Expired);
+    }
+    if request.amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+    if !s.grant.recipients.contains(&request.recipient)
+        || request.recipient == env.current_contract_address()
+    {
+        return Err(Error::InvalidRecipient);
+    }
+    let day = now / DAY;
+    if day < s.spent_day {
+        return Err(Error::ClockRegression);
+    }
+    let spent_daily = if day == s.spent_day { s.spent_daily } else { 0 };
+    let next_daily = spent_daily
+        .checked_add(request.amount)
+        .ok_or(Error::Overflow)?;
+    let next_total = s
+        .spent_total
+        .checked_add(request.amount)
+        .ok_or(Error::Overflow)?;
+    let next_calls = s.calls.checked_add(1).ok_or(Error::Overflow)?;
+    let next_nonce = s.nonce.checked_add(1).ok_or(Error::Overflow)?;
+    if request.amount > s.grant.per_transfer
+        || next_daily > s.grant.daily_limit
+        || next_total > s.grant.total_limit
+        || next_calls > s.grant.max_calls
+    {
+        return Err(Error::BudgetExceeded);
+    }
+    let policy_context = PolicyContext {
+        asset: s.grant.asset.clone(),
+        recipient: request.recipient.clone(),
+        token: token_label,
+        decimals: 7,
+        amount: request.amount,
+        spent_daily,
+        spent_total: s.spent_total,
+        calls: s.calls,
+        now,
+        spent_day: day,
+    };
+    if !generated_policy::execute(&policy_context) {
+        return Err(Error::PolicyDenied);
+    }
+    let context = EngineContext {
+        wallet: env.current_contract_address(),
+        agent: s.agent.clone(),
+        asset: s.grant.asset.clone(),
+        request: request.clone(),
+        grant: s.grant.clone(),
+        spent_daily,
+        spent_total: s.spent_total,
+        calls: s.calls,
+        now,
+    };
+    if !matches!(
+        EngineClient::new(env, &s.engine).try_evaluate(&context),
+        Ok(Ok(true))
+    ) {
+        return Err(Error::EngineDenied);
+    }
+    // Commit local counters before the effect; host rollback restores them if
+    // the SAC transfer or exact balance-effect check fails.
+    s.spent_daily = next_daily;
+    s.spent_day = day;
+    s.spent_total = next_total;
+    s.calls = next_calls;
+    s.nonce = next_nonce;
+    store(env, &s);
+    let receipt = TransferReceipt {
+        operation_id: execution.operation_id,
+        token: s.grant.asset,
+        from: env.current_contract_address(),
+        to: request.recipient,
+        amount: request.amount,
+        nonce: request.nonce,
+        revision: request.revision,
+    };
+    env.storage().persistent().set(&operation_key, &receipt);
+    let ttl = env.storage().max_ttl();
+    env.storage()
+        .persistent()
+        .extend_ttl(&operation_key, ttl / 2, ttl);
+    Ok(receipt)
+}
+
 #[contractimpl]
 impl Odc {
     pub fn __constructor(
@@ -291,137 +449,40 @@ impl Odc {
     /// Generated transport wrapper around the statically compiled private owner policy.
     /// The admitted native operation is stellar::sep41_transfer, not a second wallet API.
     pub fn execute(env: Env, execution: ExecutionRequest) -> Result<TransferReceipt, Error> {
-        let mut s = load(&env)?;
+        let s = load(&env)?;
         s.agent.require_auth();
-        // Authentication covers the complete invocation before canonical arguments are decoded.
-        let installed = binding(&env)?;
-        let invocation = &execution.invocation;
-        if execution.policy_instance != installed.policy_instance
-            || execution.operation_id == BytesN::from_array(&env, &[0; 32])
-            || invocation.module_digest != installed.module_digest
-            || invocation.entrypoint != installed.entrypoint
-            || invocation.argument_schema_digest != installed.argument_schema_digest
-            || invocation.arguments.len() > MAX_ARGUMENT_BYTES
-        {
-            return Err(Error::InvalidInvocation);
-        }
-        let arguments = Sep41TransferArgs::from_xdr(&env, &invocation.arguments)
-            .map_err(|_| Error::InvalidInvocation)?;
-        if arguments.clone().to_xdr(&env) != invocation.arguments
-            || arguments.token != s.grant.asset
-            || arguments.from != env.current_contract_address()
-        {
-            return Err(Error::InvalidInvocation);
-        }
-        let operation_key = Key::Operation(execution.operation_id.clone());
-        if env.storage().persistent().has(&operation_key) {
-            return Err(Error::Replay);
-        }
-        let request = TransferRequest {
-            recipient: arguments.to.clone(),
-            amount: arguments.amount,
-            nonce: execution.nonce,
-            revision: execution.revision,
-            expires_at: execution.expires_at,
-        };
-        if s.paused {
-            return Err(Error::Paused);
-        }
-        if request.nonce != s.nonce || request.revision != s.revision {
-            return Err(Error::StaleRequest);
-        }
-        let now = env.ledger().timestamp();
-        if request.expires_at <= now
-            || s.grant.expires_at <= now
-            || request.expires_at > s.grant.expires_at
-        {
-            return Err(Error::Expired);
-        }
-        if request.amount <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-        if !s.grant.recipients.contains(&request.recipient)
-            || request.recipient == env.current_contract_address()
-        {
-            return Err(Error::InvalidRecipient);
-        }
-        let day = now / DAY;
-        if day < s.spent_day {
-            return Err(Error::ClockRegression);
-        }
-        let spent_daily = if day == s.spent_day { s.spent_daily } else { 0 };
-        let next_daily = spent_daily
-            .checked_add(request.amount)
-            .ok_or(Error::Overflow)?;
-        let next_total = s
-            .spent_total
-            .checked_add(request.amount)
-            .ok_or(Error::Overflow)?;
-        let next_calls = s.calls.checked_add(1).ok_or(Error::Overflow)?;
-        let next_nonce = s.nonce.checked_add(1).ok_or(Error::Overflow)?;
-        if request.amount > s.grant.per_transfer
-            || next_daily > s.grant.daily_limit
-            || next_total > s.grant.total_limit
-            || next_calls > s.grant.max_calls
-        {
-            return Err(Error::BudgetExceeded);
-        }
-        let policy_context = PolicyContext {
-            asset: s.grant.asset.clone(),
-            recipient: request.recipient.clone(),
-            token: policy_token(&env, &s.grant.asset),
-            decimals: 7,
-            amount: request.amount,
-            spent_daily,
-            spent_total: s.spent_total,
-            calls: s.calls,
-            now,
-            spent_day: day,
-        };
-        if !generated_policy::execute(&policy_context) {
-            return Err(Error::PolicyDenied);
-        }
-        let context = EngineContext {
-            wallet: env.current_contract_address(),
-            agent: s.agent.clone(),
-            asset: s.grant.asset.clone(),
-            request: request.clone(),
-            grant: s.grant.clone(),
-            spent_daily,
-            spent_total: s.spent_total,
-            calls: s.calls,
-            now,
-        };
-        if !matches!(
-            EngineClient::new(&env, &s.engine).try_evaluate(&context),
-            Ok(Ok(true))
-        ) {
-            return Err(Error::EngineDenied);
-        }
-        // Commit local counters before the effect; host rollback restores them if
-        // the SAC transfer or exact balance-effect check fails.
-        s.spent_daily = next_daily;
-        s.spent_day = day;
-        s.spent_total = next_total;
-        s.calls = next_calls;
-        s.nonce = next_nonce;
-        store(&env, &s);
-        move_tokens(&env, &s.grant.asset, &request.recipient, request.amount)?;
-        let receipt = TransferReceipt {
-            operation_id: execution.operation_id,
-            token: s.grant.asset,
-            from: env.current_contract_address(),
-            to: request.recipient,
-            amount: request.amount,
-            nonce: request.nonce,
-            revision: request.revision,
-        };
-        env.storage().persistent().set(&operation_key, &receipt);
-        let ttl = env.storage().max_ttl();
-        env.storage()
-            .persistent()
-            .extend_ttl(&operation_key, ttl / 2, ttl);
+        let receipt = admit(&env, execution, policy_token(&env, &s.grant.asset))?;
+        move_tokens(&env, &receipt.token, &receipt.to, receipt.amount)?;
         Ok(receipt)
+    }
+
+    /// Enable or revoke the exact x402 transfer path. Native signer changes alone do not revoke it.
+    pub fn set_x402_signer(
+        env: Env,
+        public_key: Option<BytesN<32>>,
+        expected_revision: u64,
+    ) -> Result<(), Error> {
+        let mut s = owner_state(&env, expected_revision)?;
+        if let Some(public_key) = public_key {
+            // ScVal::Address(ScAddress::Account(PublicKey::Ed25519(key))).
+            let mut encoded = Bytes::from_slice(&env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0]);
+            encoded.append(&public_key.clone().into());
+            let agent = Address::from_xdr(&env, &encoded).map_err(|_| Error::InvalidActor)?;
+            if agent != s.agent {
+                return Err(Error::InvalidActor);
+            }
+            let config = X402Config {
+                agent,
+                public_key,
+                token: policy_token(&env, &s.grant.asset),
+            };
+            env.storage().instance().set(&Key::X402Config, &config);
+        } else {
+            env.storage().instance().remove(&Key::X402Config);
+        }
+        changed(&mut s)?;
+        store(&env, &s);
+        Ok(())
     }
 
     pub fn set_grant(env: Env, grant: Grant, expected_revision: u64) -> Result<(), Error> {
@@ -430,6 +491,7 @@ impl Odc {
             return Err(Error::UnsupportedAsset);
         }
         validate_grant(&env, &grant)?;
+        env.storage().instance().remove(&Key::X402Config);
         s.grant = grant;
         changed(&mut s)?;
         store(&env, &s);
@@ -448,6 +510,7 @@ impl Odc {
     pub fn set_agent(env: Env, agent: Address, expected_revision: u64) -> Result<(), Error> {
         let mut s = owner_state(&env, expected_revision)?;
         validate_roles(&env, &s.owner, &agent, &s.engine)?;
+        env.storage().instance().remove(&Key::X402Config);
         s.agent = agent;
         changed(&mut s)?;
         store(&env, &s);
@@ -512,3 +575,71 @@ impl Odc {
 
 #[cfg(test)]
 mod tests;
+
+#[contractimpl]
+impl CustomAccountInterface for Odc {
+    type Signature = X402Authorization;
+    type Error = Error;
+
+    fn __check_auth(
+        env: Env,
+        signature_payload: Hash<32>,
+        authorization: X402Authorization,
+        contexts: Vec<Context>,
+    ) -> Result<(), Error> {
+        let s = load(&env)?;
+        let config: X402Config = env
+            .storage()
+            .instance()
+            .get(&Key::X402Config)
+            .ok_or(Error::UnsupportedOperation)?;
+        if config.agent != s.agent || contexts.len() != 1 {
+            return Err(Error::InvalidActor);
+        }
+        let Context::Contract(context) = contexts.get(0).ok_or(Error::InvalidInvocation)? else {
+            return Err(Error::UnsupportedOperation);
+        };
+        if context.contract != s.grant.asset
+            || context.fn_name != Symbol::new(&env, "transfer")
+            || context.args.len() != 3
+        {
+            return Err(Error::UnsupportedOperation);
+        }
+        let from = Address::try_from_val(&env, &context.args.get(0).unwrap())
+            .map_err(|_| Error::InvalidInvocation)?;
+        let to = Address::try_from_val(&env, &context.args.get(1).unwrap())
+            .map_err(|_| Error::InvalidInvocation)?;
+        let amount = i128::try_from_val(&env, &context.args.get(2).unwrap())
+            .map_err(|_| Error::InvalidInvocation)?;
+        if authorization.execution.invocation.arguments.len() > MAX_ARGUMENT_BYTES {
+            return Err(Error::InvalidInvocation);
+        }
+        let args = Sep41TransferArgs::from_xdr(&env, &authorization.execution.invocation.arguments)
+            .map_err(|_| Error::InvalidInvocation)?;
+        if from != env.current_contract_address()
+            || args.from != from
+            || args.token != context.contract
+            || args.to != to
+            || args.amount != amount
+        {
+            return Err(Error::InvalidInvocation);
+        }
+        let digest = env.crypto().sha256(
+            &(
+                Symbol::new(&env, "allowit_x402_v1"),
+                signature_payload.to_bytes(),
+                authorization.execution.clone(),
+            )
+                .to_xdr(&env),
+        );
+        env.crypto().ed25519_verify(
+            &config.public_key,
+            &digest.to_bytes().into(),
+            &authorization.signature,
+        );
+        // No token callbacks here: SAC.transfer is already active. SAC identity was
+        // admitted at installation; its native implementation enforces exact effects.
+        admit(&env, authorization.execution, config.token)?;
+        Ok(())
+    }
+}

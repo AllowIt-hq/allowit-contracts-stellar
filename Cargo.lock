@@ -33,6 +33,7 @@ name = "allowit-odc"
 version = "0.1.0"
 dependencies = [
  "allowit-wallet-protocol",
+ "ed25519-dalek",
  "soroban-sdk",
 ]
 

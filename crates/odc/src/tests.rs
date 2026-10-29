@@ -4,7 +4,7 @@ use super::*;
 use core::ops::Deref;
 
 use soroban_sdk::{
-    IntoVal, contract, contractimpl,
+    IntoVal, TryIntoVal, contract, contractimpl,
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::StellarAssetClient,
     vec,
@@ -1346,4 +1346,398 @@ fn actual_previous_odc_state_upgrade_retains_independent_owner_recovery() {
     assert_eq!(recovered.revision, expected.revision + 1);
     assert_eq!(token::Client::new(env, &f.asset).balance(&f.owner), 20);
     assert_eq!(token::Client::new(env, &f.asset).balance(&wallet), 970);
+}
+
+// Real signatures and real host authorization exercise the token -> ODC hook.
+fn x402_setup_compiled(compiled: bool) -> (Fixture, ed25519_dalek::SigningKey) {
+    let f = Fixture::new(compiled);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let pubkey = BytesN::from_array(&f.env, &key.verifying_key().to_bytes());
+    let mut encoded = Bytes::from_slice(&f.env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0]);
+    encoded.append(&pubkey.clone().into());
+    let agent = Address::from_xdr(&f.env, &encoded).unwrap();
+    let c = OdcClient::new(&f.env, &f.odc);
+    c.set_agent(&agent, &c.state().revision);
+    c.set_x402_signer(&Some(pubkey), &c.state().revision);
+    (f, key)
+}
+
+fn x402_signed(
+    f: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    execution: ExecutionRequest,
+    payload: &BytesN<32>,
+) -> X402Authorization {
+    use ed25519_dalek::Signer;
+    let digest = f.env.crypto().sha256(
+        &(
+            Symbol::new(&f.env, "allowit_x402_v1"),
+            payload.clone(),
+            execution.clone(),
+        )
+            .to_xdr(&f.env),
+    );
+    X402Authorization {
+        execution,
+        signature: BytesN::from_array(&f.env, &key.sign(&digest.to_array()).to_bytes()),
+    }
+}
+
+fn x402_context(f: &Fixture, amount: i128) -> Vec<Context> {
+    vec![
+        &f.env,
+        Context::Contract(soroban_sdk::auth::ContractContext {
+            contract: f.asset.clone(),
+            fn_name: Symbol::new(&f.env, "transfer"),
+            args: (f.odc.clone(), f.recipient.clone(), amount).into_val(&f.env),
+        }),
+    ]
+}
+
+#[test]
+fn x402_signed_admission_shares_budget_and_replay_with_execute() {
+    let (f, key) = x402_setup_compiled(false);
+    let payload = BytesN::from_array(&f.env, &[42; 32]);
+    let request = f.request(100);
+    let execution = f.client().envelope(&request);
+    let sig = x402_signed(&f, &key, execution.clone(), &payload);
+    assert_eq!(
+        f.env.try_invoke_contract_check_auth::<Error>(
+            &f.odc,
+            &payload,
+            sig.into_val(&f.env),
+            &x402_context(&f, 100)
+        ),
+        Ok(())
+    );
+    assert_eq!(f.client().state().spent_total, 100);
+    assert_eq!(f.client().state().nonce, 1);
+    assert!(
+        OdcClient::new(&f.env, &f.odc)
+            .try_execute(&execution)
+            .is_err()
+    );
+    let next = f.client().envelope(&f.request(100));
+    let sig = x402_signed(&f, &key, next, &payload);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                sig.into_val(&f.env),
+                &x402_context(&f, 100)
+            )
+            .is_err()
+    );
+    assert_eq!(f.client().state().spent_total, 100);
+}
+
+#[test]
+fn x402_rejects_mutation_context_and_revocation() {
+    let (f, key) = x402_setup_compiled(false);
+    let payload = BytesN::from_array(&f.env, &[42; 32]);
+    let execution = f.client().envelope(&f.request(50));
+    let sig = x402_signed(&f, &key, execution.clone(), &payload);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                sig.clone().into_val(&f.env),
+                &x402_context(&f, 51)
+            )
+            .is_err()
+    );
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                sig.clone().into_val(&f.env),
+                &vec![&f.env]
+            )
+            .is_err()
+    );
+    let altered = BytesN::from_array(&f.env, &[43; 32]);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &altered,
+                sig.clone().into_val(&f.env),
+                &x402_context(&f, 50)
+            )
+            .is_err()
+    );
+    let c = OdcClient::new(&f.env, &f.odc);
+    c.set_grant(&c.state().grant, &c.state().revision);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                sig.into_val(&f.env),
+                &x402_context(&f, 50)
+            )
+            .is_err()
+    );
+    assert_eq!(c.state().spent_total, 0);
+}
+
+fn x402_host_entry(
+    f: &Fixture,
+    key: &ed25519_dalek::SigningKey,
+    amount: i128,
+    nonce: i64,
+) -> soroban_sdk::xdr::SorobanAuthorizationEntry {
+    use soroban_sdk::xdr::{self, WriteXdr};
+    let invocation: xdr::SorobanAuthorizedInvocation = (&MockAuthInvoke {
+        contract: &f.asset,
+        fn_name: "transfer",
+        args: (f.odc.clone(), f.recipient.clone(), amount).into_val(&f.env),
+        sub_invokes: &[],
+    })
+        .into();
+    let preimage =
+        xdr::HashIdPreimage::SorobanAuthorization(xdr::HashIdPreimageSorobanAuthorization {
+            network_id: xdr::Hash(f.env.ledger().network_id().to_array()),
+            nonce,
+            signature_expiration_ledger: 100,
+            invocation: invocation.clone(),
+        });
+    let payload = f
+        .env
+        .crypto()
+        .sha256(&Bytes::from_slice(
+            &f.env,
+            &preimage.to_xdr(xdr::Limits::none()).unwrap(),
+        ))
+        .to_bytes();
+    let authorization = x402_signed(f, key, f.client().envelope(&f.request(amount)), &payload);
+    let signature_val: soroban_sdk::Val = authorization.into_val(&f.env);
+    xdr::SorobanAuthorizationEntry {
+        credentials: xdr::SorobanCredentials::Address(xdr::SorobanAddressCredentials {
+            address: (&f.odc).into(),
+            nonce,
+            signature_expiration_ledger: 100,
+            signature: signature_val.try_into_val(&f.env).unwrap(),
+        }),
+        root_invocation: invocation,
+    }
+}
+
+#[test]
+fn x402_real_token_hook_transfers_and_rolls_back_failed_token_effect() {
+    x402_actual_effect(false);
+    x402_actual_effect(true);
+}
+
+fn x402_actual_effect(compiled: bool) {
+    let (f, key) = x402_setup_compiled(compiled);
+    let auth = x402_host_entry(&f, &key, 50, 7);
+    f.env.set_auths(&[auth]);
+    token::Client::new(&f.env, &f.asset).transfer(&f.odc, &f.recipient, &50);
+    assert_eq!(f.balance(&f.recipient), 50);
+    assert_eq!(f.client().state().spent_total, 50);
+    assert_eq!(f.client().state().calls, 1);
+    // Native StellarAsset failure occurs after authorization (frozen recipient).
+    f.env.mock_all_auths();
+    StellarAssetClient::new(&f.env, &f.asset).set_authorized(&f.recipient, &false);
+    let auth = x402_host_entry(&f, &key, 50, 8);
+    f.env.set_auths(&[auth]);
+    assert!(
+        token::Client::new(&f.env, &f.asset)
+            .try_transfer(&f.odc, &f.recipient, &50)
+            .is_err()
+    );
+    assert_eq!(f.client().state().spent_total, 50);
+    assert_eq!(f.client().state().calls, 1);
+    assert_eq!(f.balance(&f.recipient), 50);
+}
+
+#[test]
+fn x402_rejects_signed_invalid_requests_and_engine_veto() {
+    let (f, key) = x402_setup_compiled(false);
+    let payload = BytesN::from_array(&f.env, &[42; 32]);
+    let valid = f.client().envelope(&f.request(50));
+    let mut cases = std::vec::Vec::new();
+    let mut bad = valid.clone();
+    bad.nonce += 1;
+    cases.push(bad);
+    let mut bad = valid.clone();
+    bad.revision += 1;
+    cases.push(bad);
+    let mut bad = valid.clone();
+    bad.expires_at = f.env.ledger().timestamp();
+    cases.push(bad);
+    let mut bad = valid.clone();
+    bad.policy_instance = BytesN::from_array(&f.env, &[9; 32]);
+    cases.push(bad);
+    let mut bad = valid.clone();
+    bad.operation_id = BytesN::from_array(&f.env, &[0; 32]);
+    cases.push(bad);
+    let mut bad = valid.clone();
+    bad.invocation.module_digest = BytesN::from_array(&f.env, &[9; 32]);
+    cases.push(bad);
+    let mut bad = valid.clone();
+    bad.invocation.argument_schema_digest = BytesN::from_array(&f.env, &[9; 32]);
+    cases.push(bad);
+    let mut bad = valid.clone();
+    bad.invocation.entrypoint = Symbol::new(&f.env, "other");
+    cases.push(bad);
+    for execution in cases {
+        let sig = x402_signed(&f, &key, execution, &payload);
+        assert!(
+            f.env
+                .try_invoke_contract_check_auth::<Error>(
+                    &f.odc,
+                    &payload,
+                    sig.into_val(&f.env),
+                    &x402_context(&f, 50)
+                )
+                .is_err()
+        );
+        assert_eq!(f.client().state().spent_total, 0);
+    }
+    let wrong = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+    let sig = x402_signed(&f, &wrong, valid.clone(), &payload);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                sig.into_val(&f.env),
+                &x402_context(&f, 50)
+            )
+            .is_err()
+    );
+    let c = OdcClient::new(&f.env, &f.odc);
+    for engine in [f.env.register(Deny, ()), f.env.register(Trap, ())] {
+        c.set_engine(&engine, &c.state().revision);
+        let sig = x402_signed(&f, &key, f.client().envelope(&f.request(50)), &payload);
+        assert!(
+            f.env
+                .try_invoke_contract_check_auth::<Error>(
+                    &f.odc,
+                    &payload,
+                    sig.into_val(&f.env),
+                    &x402_context(&f, 50)
+                )
+                .is_err()
+        );
+        assert_eq!(c.state().spent_total, 0);
+    }
+}
+
+#[test]
+fn x402_context_and_owner_revocation_matrix() {
+    let (f, key) = x402_setup_compiled(false);
+    let payload = BytesN::from_array(&f.env, &[42; 32]);
+    let valid = f.client().envelope(&f.request(50));
+    let signature = x402_signed(&f, &key, valid.clone(), &payload);
+    let Context::Contract(context) = x402_context(&f, 50).get(0).unwrap() else {
+        panic!()
+    };
+    let mut contexts = std::vec::Vec::new();
+    let mut bad = context.clone();
+    bad.contract = f.engine.clone();
+    contexts.push(vec![&f.env, Context::Contract(bad)]);
+    let mut bad = context.clone();
+    bad.fn_name = Symbol::new(&f.env, "approve");
+    contexts.push(vec![&f.env, Context::Contract(bad)]);
+    let mut bad = context.clone();
+    bad.args.pop_back();
+    contexts.push(vec![&f.env, Context::Contract(bad)]);
+    let mut bad = context.clone();
+    bad.args.set(0, f.owner.clone().into_val(&f.env));
+    contexts.push(vec![&f.env, Context::Contract(bad)]);
+    contexts.push(vec![
+        &f.env,
+        Context::Contract(context.clone()),
+        Context::Contract(context),
+    ]);
+    for context in contexts {
+        assert!(
+            f.env
+                .try_invoke_contract_check_auth::<Error>(
+                    &f.odc,
+                    &payload,
+                    signature.clone().into_val(&f.env),
+                    &context
+                )
+                .is_err()
+        );
+    }
+    let mut changed_signature = signature.clone();
+    changed_signature.execution.nonce += 1;
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                changed_signature.into_val(&f.env),
+                &x402_context(&f, 50)
+            )
+            .is_err()
+    );
+    let c = OdcClient::new(&f.env, &f.odc);
+    c.set_x402_signer(&None, &c.state().revision);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                signature.clone().into_val(&f.env),
+                &x402_context(&f, 50)
+            )
+            .is_err()
+    );
+    c.set_x402_signer(
+        &Some(BytesN::from_array(&f.env, &key.verifying_key().to_bytes())),
+        &c.state().revision,
+    );
+    c.set_agent(&c.state().agent, &c.state().revision);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                signature.into_val(&f.env),
+                &x402_context(&f, 50)
+            )
+            .is_err()
+    );
+    assert_eq!(c.state().calls, 0);
+}
+
+#[test]
+fn x402_execute_then_hook_replay_and_shared_daily_budget() {
+    let (f, key) = x402_setup_compiled(false);
+    let payload = BytesN::from_array(&f.env, &[42; 32]);
+    let execution = f.client().envelope(&f.request(100));
+    OdcClient::new(&f.env, &f.odc).execute(&execution);
+    let sig = x402_signed(&f, &key, execution, &payload);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                sig.into_val(&f.env),
+                &x402_context(&f, 100)
+            )
+            .is_err()
+    );
+    let sig = x402_signed(&f, &key, f.client().envelope(&f.request(100)), &payload);
+    assert!(
+        f.env
+            .try_invoke_contract_check_auth::<Error>(
+                &f.odc,
+                &payload,
+                sig.into_val(&f.env),
+                &x402_context(&f, 100)
+            )
+            .is_err()
+    );
+    assert_eq!(f.client().state().spent_total, 100);
+    assert_eq!(f.balance(&f.recipient), 100);
 }

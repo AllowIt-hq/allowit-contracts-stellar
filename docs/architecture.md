@@ -44,10 +44,20 @@ The local kernel must enforce:
 
 General contract calls default to disabled. Enable only owner-allowlisted operations with locally bounded effects. Policy configuration constrains permitted arguments. Each execution binds exact arguments within those constraints. The baseline rejects token approvals, persistent allowances and uncontrolled token pulls.
 
-The ODC constructs the request from authenticated arguments and its own state. Engine approval binds that request and configuration. The engine returns an approval boolean, not commands, accounting deltas or expanded local policy. Missing approval, malformed responses, engine traps, archival and resource exhaustion reject agent execution. The ODC exposes no external `__check_auth` hook. Raw agent-signed token or dApp authorization rejects. The engine receives no ODC spending authorization.
+The ODC constructs the request from authenticated arguments and its own state. Engine approval binds that request and configuration. The engine returns an approval boolean, not commands, accounting deltas or expanded local policy. Missing approval, malformed responses, engine traps, archival and resource exhaustion reject agent execution. The owner can enable a constrained `__check_auth` hook for standard Stellar x402. It accepts one exact installed-SAC transfer and shares compiled policy, grant, engine, counters and replay checks with `execute`. Arbitrary token and dApp authorization rejects. The engine receives no ODC spending authorization.
 
-The ODC authorizes an exact direct SAC transfer, checks sender debits and recipient credits, and updates its counters atomically. Incoming funds cannot conceal outgoing spending through a net balance comparison. Reject effects that the local kernel cannot verify. A failed call or effect mismatch reverts accounting and execution.
+The `execute` route authorizes an exact direct SAC transfer and checks sender debit and recipient credit. The x402 hook uses cached admitted SAC metadata without token callbacks, and trusts native SAC transfer semantics for effects. Both routes update the same counters atomically with the transfer. Incoming funds cannot conceal outgoing spending through a net balance comparison. Reject effects that the local kernel cannot verify. A failed call or effect mismatch reverts accounting and execution.
 
 A compromised engine can approve every request that already fits the local delegation. It can therefore consume all delegated capacity. It cannot prove compliance with an arbitrary owner-authored predicate that only the engine evaluates. Enforce every restriction that must survive engine compromise inside the owner-controlled ODC kernel. Otherwise, explicitly accept engine trust for that restriction. Owner-kernel bug fixes require owner upgrades. Shared engine fixes can take effect immediately, but cannot repair kernel bugs. Engine approval never substitutes for local containment.
 
 Issuer clawback or freeze, malicious admitted tokens or targets, owner-key compromise, fees, network availability and TTL restoration remain separate risks.
+
+## x402 signer delegation
+
+The owner enables or disables x402 with `set_x402_signer(public_key, expected_revision)`.
+This delegates a raw Ed25519 key matching the configured G-account agent. Native threshold changes
+do not revoke that key. Owner revocation or an agent or grant change disables the path.
+Existing storage layout remains unchanged. Separate configuration stores the signer and admitted asset label.
+The authorization signature binds the host payload and full canonical execution request under `allowit_x402_v1`.
+The host binds network, authorization nonce, ledger expiry and invocation tree. The kernel additionally
+checks local request expiry, policy/module/schema, operation ID, nonce and configuration revision.

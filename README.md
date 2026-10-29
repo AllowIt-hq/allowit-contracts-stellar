@@ -2,7 +2,7 @@
 
 `allowit-odc` is an owner-controlled SAC transfer wallet. The public `execute(...)` wrapper authenticates the installed module, private entrypoint, schema and canonical arguments. It then calls the statically compiled owner policy. It checks recipient permissions, per-transfer/daily/lifetime caps, call count, expiry, nonce and revision locally. Amounts use exact native `i128` units. The shared `allowit-wallet-engine` returns only a veto decision. `allowit-engine-parent` manages its shared executable and separate upgrade authority.
 
-Owner pause, recovery, grant/agent/engine changes, ownership handoff and ODC code upgrades never call the engine. Spending counters survive configuration changes. General calls, token approvals and external contract-account signing are unsupported. Fund the ODC with a direct SAC transfer.
+Owner pause, recovery, grant/agent/engine changes, ownership handoff and ODC code upgrades never call the engine. Spending counters survive configuration changes. General calls, token approvals and arbitrary contract-account signing are unsupported. The owner can enable exact SAC transfer authorization for standard Stellar x402. Fund the ODC with a direct SAC transfer.
 
 [Architecture](docs/architecture.md) · [Setup and administration](docs/admin.md)
 
@@ -38,4 +38,20 @@ The generator checks the unchanged private `_execute(...)` source. It rejects op
 
 `policy_binding()` reports the logical policy ID, actual wallet executable digest, compiled source digest, private entrypoint and argument-schema digest. The SDK maps its existing typed `ExecutionRequest` to this native wire profile and preserves its operation ID. Canonical argument bytes encode `stellar::sep41_transfer(token, from, to, amount)` with native `i128` units. The kernel requires its installed asset and its own address as source. It rejects unknown selectors, modules, schemas, extra arguments and reused operation IDs.
 
-Each call authenticates the agent before decoding arguments. The generated private policy, local owner grant and shared-engine veto all apply. Effects, counters, nonce and receipt commit atomically. Configuration changes preserve consumption and replay records. The generated `execute` wrapper is the only automated spending entrypoint.
+Each spending path authenticates the agent and binds exact canonical arguments. The generated private policy, local owner grant and shared-engine veto all apply. Effects, counters, nonce and receipt commit atomically. Configuration changes preserve consumption and replay records. The generated `execute` wrapper and owner-enabled constrained `__check_auth` hook share automated spending checks.
+
+## Standard x402 authorization
+
+The owner enables or revokes the constrained path with `set_x402_signer(public_key, expected_revision)`.
+The Ed25519 key must identify the configured G-account agent. This explicitly delegates that raw key.
+Native account threshold changes do not revoke it. Disable it explicitly or replace the agent.
+Changing the grant or agent clears this configuration. Existing wallets start with the path disabled.
+
+`__check_auth` accepts one exact installed-SAC `transfer(wallet, recipient, amount)` context.
+Its `X402Authorization` contains the canonical `ExecutionRequest` and a 64-byte agent signature.
+The signature covers SHA-256 of the XDR tuple `(Symbol("allowit_x402_v1"), host_signature_payload, execution)`.
+The host payload already binds the network, authorization nonce, ledger expiry and invocation tree.
+Both spending paths enforce the compiled policy, grant, engine veto, counters and operation replay state.
+The hook uses cached admitted asset metadata and never calls the active SAC. Native SAC behavior enforces
+transfer effects. A failed enclosing transfer rolls back authorization accounting atomically.
+Owner recovery and administration remain independent of this path and the engine.
