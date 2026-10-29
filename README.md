@@ -1,8 +1,8 @@
 # AllowIt native Stellar contracts
 
-`allowit-odc` is an owner-controlled SAC transfer wallet. The public `execute(...)` wrapper authenticates the installed module, private entrypoint, schema and canonical arguments. It then calls the statically compiled owner policy. It checks recipient permissions, per-transfer/daily/lifetime caps, call count, expiry, nonce and revision locally. Amounts use exact native `i128` units. The shared `allowit-wallet-engine` returns only a veto decision. `allowit-engine-parent` manages its shared executable and separate upgrade authority.
+`allowit-odc` is an owner-controlled SAC transfer wallet. The public `execute(...)` wrapper authenticates the installed module, private entrypoint, schema and canonical arguments. It then calls the statically compiled owner policy. It checks recipient permissions, per-transfer/daily/lifetime caps, call count, expiry, nonce and policy version locally. Amounts use exact native `i128` units. The shared `allowit-wallet-engine` returns only a veto decision. `allowit-engine-parent` manages its shared executable and separate upgrade authority.
 
-Owner pause, recovery, grant/agent/engine changes, ownership handoff and ODC code upgrades never call the engine. Spending counters survive configuration changes. General calls, token approvals and arbitrary contract-account signing are unsupported. The owner can enable exact SAC transfer authorization for standard Stellar x402. Fund the ODC with a direct SAC transfer.
+Owner policy deployments, pause and recovery never call the engine. Spending counters survive configuration changes. General calls, token approvals and arbitrary contract-account signing are unsupported. The owner can enable exact SAC transfer authorization for standard Stellar x402. Fund the ODC with a direct SAC transfer.
 
 [Architecture](docs/architecture.md) · [Setup and administration](docs/admin.md)
 
@@ -42,10 +42,11 @@ Each spending path authenticates the agent and binds exact canonical arguments. 
 
 ## Standard x402 authorization
 
-The owner enables or revokes the constrained path with `set_x402_signer(public_key, expected_revision)`.
+The owner selects or revokes the constrained signer in a complete `deploy_policy(deployment)` packet.
 The Ed25519 key must identify the configured G-account agent. This explicitly delegates that raw key.
 Native account threshold changes do not revoke it. Disable it explicitly or replace the agent.
-Changing the grant or agent clears this configuration. Existing wallets start with the path disabled.
+A grant or agent change requires `x402_signer: None`. A later deployment can delegate a matching key.
+New wallets start with the path disabled.
 
 `__check_auth` accepts one exact installed-SAC `transfer(wallet, recipient, amount)` context.
 Its `X402Authorization` contains the canonical `ExecutionRequest` and a 64-byte agent signature.
@@ -55,3 +56,17 @@ Both spending paths enforce the compiled policy, grant, engine veto, counters an
 The hook uses cached admitted asset metadata and never calls the active SAC. Native SAC behavior enforces
 transfer effects. A failed enclosing transfer rolls back authorization accounting atomically.
 Owner recovery and administration remain independent of this path and the engine.
+
+## Versioned owner policy deployment
+
+`deploy_policy` accepts `PolicyDeployment`: `policy_version`, `owner`, `agent`, `engine`, `grant`,
+`paused`, `x402_signer` and optional `wasm_hash`. The target version must equal the active version plus one.
+Owner, grant, agent, engine, pause, delegated key and kernel changes use this same signed deployment path.
+A changed owner also authorizes the exact packet. The asset remains fixed. Accounting and replay records survive.
+
+`set_pause(paused, policy_version)` uses the same next-version ordering without an engine call.
+`recover(recipient, amount)` authenticates the owner and moves funds without a configuration version or version increment.
+Agent execution binds the active `policy_version`, so an owner deployment invalidates earlier preparations.
+`policy_binding().interface_version` identifies wire interface 2 independently of the stored state format.
+The reader converts known V1 `revision` state into the same policy-version value without resetting funds or counters.
+The private shared-engine wire keeps `revision` as an alias of that single value.

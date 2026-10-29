@@ -32,7 +32,7 @@ mod generated_policy;
 compile_error!("Select only one test policy fixture");
 
 const DAY: u64 = 86_400;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const TTL_THRESHOLD: u32 = 100_000;
 const TTL_EXTEND: u32 = 200_000;
 
@@ -49,8 +49,38 @@ pub struct State {
     pub spent_total: i128,
     pub calls: u64,
     pub nonce: u64,
+    pub policy_version: u64,
+    pub paused: bool,
+}
+
+#[contracttype]
+#[derive(Clone)]
+struct LegacyState {
+    pub version: u32,
+    pub owner: Address,
+    pub agent: Address,
+    pub engine: Address,
+    pub grant: Grant,
+    pub spent_daily: i128,
+    pub spent_day: u64,
+    pub spent_total: i128,
+    pub calls: u64,
+    pub nonce: u64,
     pub revision: u64,
     pub paused: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyDeployment {
+    pub policy_version: u64,
+    pub owner: Address,
+    pub agent: Address,
+    pub engine: Address,
+    pub grant: Grant,
+    pub paused: bool,
+    pub x402_signer: Option<BytesN<32>>,
+    pub wasm_hash: Option<BytesN<32>>,
 }
 
 #[contracterror]
@@ -126,6 +156,7 @@ fn binding(env: &Env) -> Result<PolicyBinding, Error> {
         return Err(Error::InvalidState);
     };
     Ok(PolicyBinding {
+        interface_version: VERSION,
         policy_instance,
         module_digest,
         source_digest: BytesN::from_array(env, &generated_policy::SOURCE_HASH),
@@ -135,11 +166,36 @@ fn binding(env: &Env) -> Result<PolicyBinding, Error> {
 }
 
 fn load(env: &Env) -> Result<State, Error> {
-    let s: State = env
+    let raw: soroban_sdk::Val = env
         .storage()
         .instance()
         .get(&0u32)
         .ok_or(Error::InvalidState)?;
+    let s = if let Ok(state) = State::try_from_val(env, &raw) {
+        if state.version != VERSION {
+            return Err(Error::InvalidState);
+        }
+        state
+    } else {
+        let old = LegacyState::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
+        if old.version != 1 {
+            return Err(Error::InvalidState);
+        }
+        State {
+            version: VERSION,
+            owner: old.owner,
+            agent: old.agent,
+            engine: old.engine,
+            grant: old.grant,
+            spent_daily: old.spent_daily,
+            spent_day: old.spent_day,
+            spent_total: old.spent_total,
+            calls: old.calls,
+            nonce: old.nonce,
+            policy_version: old.revision,
+            paused: old.paused,
+        }
+    };
     if s.version != VERSION {
         return Err(Error::InvalidState);
     }
@@ -156,17 +212,18 @@ fn store(env: &Env, state: &State) {
         .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
 }
 
-fn changed(s: &mut State) -> Result<(), Error> {
-    s.revision = s.revision.checked_add(1).ok_or(Error::Overflow)?;
+fn commit_deployment(env: &Env, s: &mut State, policy_version: u64) -> Result<(), Error> {
+    if s.policy_version.checked_add(1).ok_or(Error::Overflow)? != policy_version {
+        return Err(Error::StaleRequest);
+    }
+    s.policy_version = policy_version;
+    store(env, s);
     Ok(())
 }
 
-fn owner_state(env: &Env, expected_revision: u64) -> Result<State, Error> {
+fn owner_state(env: &Env) -> Result<State, Error> {
     let s = load(env)?;
     s.owner.require_auth();
-    if s.revision != expected_revision {
-        return Err(Error::StaleRequest);
-    }
     Ok(s)
 }
 
@@ -288,13 +345,13 @@ fn admit(
         recipient: arguments.to.clone(),
         amount: arguments.amount,
         nonce: execution.nonce,
-        revision: execution.revision,
+        revision: execution.policy_version,
         expires_at: execution.expires_at,
     };
     if s.paused {
         return Err(Error::Paused);
     }
-    if request.nonce != s.nonce || request.revision != s.revision {
+    if request.nonce != s.nonce || request.revision != s.policy_version {
         return Err(Error::StaleRequest);
     }
     let now = env.ledger().timestamp();
@@ -380,7 +437,7 @@ fn admit(
         to: request.recipient,
         amount: request.amount,
         nonce: request.nonce,
-        revision: request.revision,
+        policy_version: request.revision,
     };
     env.storage().persistent().set(&operation_key, &receipt);
     let ttl = env.storage().max_ttl();
@@ -431,7 +488,7 @@ impl Odc {
                 spent_total: 0,
                 calls: 0,
                 nonce: 0,
-                revision: 0,
+                policy_version: 0,
                 paused: false,
             },
         );
@@ -456,116 +513,72 @@ impl Odc {
         Ok(receipt)
     }
 
-    /// Enable or revoke the exact x402 transfer path. Native signer changes alone do not revoke it.
-    pub fn set_x402_signer(
-        env: Env,
-        public_key: Option<BytesN<32>>,
-        expected_revision: u64,
-    ) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
-        if let Some(public_key) = public_key {
-            // ScVal::Address(ScAddress::Account(PublicKey::Ed25519(key))).
+    /// Apply one complete owner-approved policy deployment at the next version.
+    pub fn deploy_policy(env: Env, deployment: PolicyDeployment) -> Result<(), Error> {
+        let mut s = owner_state(&env)?;
+        if s.policy_version.checked_add(1).ok_or(Error::Overflow)? != deployment.policy_version {
+            return Err(Error::StaleRequest);
+        }
+        validate_roles(
+            &env,
+            &deployment.owner,
+            &deployment.agent,
+            &deployment.engine,
+        )?;
+        if deployment.grant.asset != s.grant.asset {
+            return Err(Error::UnsupportedAsset);
+        }
+        validate_grant(&env, &deployment.grant)?;
+        if deployment.owner != s.owner {
+            deployment.owner.require_auth();
+        }
+        if (deployment.agent != s.agent || deployment.grant != s.grant)
+            && deployment.x402_signer.is_some()
+        {
+            return Err(Error::InvalidActor);
+        }
+        if let Some(public_key) = deployment.x402_signer {
             let mut encoded = Bytes::from_slice(&env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0]);
             encoded.append(&public_key.clone().into());
             let agent = Address::from_xdr(&env, &encoded).map_err(|_| Error::InvalidActor)?;
-            if agent != s.agent {
+            if agent != deployment.agent {
                 return Err(Error::InvalidActor);
             }
-            let config = X402Config {
-                agent,
-                public_key,
-                token: policy_token(&env, &s.grant.asset),
-            };
-            env.storage().instance().set(&Key::X402Config, &config);
+            env.storage().instance().set(
+                &Key::X402Config,
+                &X402Config {
+                    agent,
+                    public_key,
+                    token: policy_token(&env, &s.grant.asset),
+                },
+            );
         } else {
             env.storage().instance().remove(&Key::X402Config);
         }
-        changed(&mut s)?;
-        store(&env, &s);
-        Ok(())
-    }
-
-    pub fn set_grant(env: Env, grant: Grant, expected_revision: u64) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
-        if grant.asset != s.grant.asset {
-            return Err(Error::UnsupportedAsset);
+        s.owner = deployment.owner;
+        s.agent = deployment.agent;
+        s.engine = deployment.engine;
+        s.grant = deployment.grant;
+        s.paused = deployment.paused;
+        commit_deployment(&env, &mut s, deployment.policy_version)?;
+        if let Some(hash) = deployment.wasm_hash {
+            env.deployer()
+                .update_current_contract(soroban_sdk::ContractExecutable::Wasm(hash));
         }
-        validate_grant(&env, &grant)?;
-        env.storage().instance().remove(&Key::X402Config);
-        s.grant = grant;
-        changed(&mut s)?;
-        store(&env, &s);
         Ok(())
     }
 
-    pub fn set_engine(env: Env, engine: Address, expected_revision: u64) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
-        validate_roles(&env, &s.owner, &s.agent, &engine)?;
-        s.engine = engine;
-        changed(&mut s)?;
-        store(&env, &s);
-        Ok(())
-    }
-
-    pub fn set_agent(env: Env, agent: Address, expected_revision: u64) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
-        validate_roles(&env, &s.owner, &agent, &s.engine)?;
-        env.storage().instance().remove(&Key::X402Config);
-        s.agent = agent;
-        changed(&mut s)?;
-        store(&env, &s);
-        Ok(())
-    }
-
-    pub fn set_paused(env: Env, paused: bool, expected_revision: u64) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
+    /// Pause changes use the same next-policy-version sequence as deployments.
+    pub fn set_pause(env: Env, paused: bool, policy_version: u64) -> Result<(), Error> {
+        let mut s = owner_state(&env)?;
         s.paused = paused;
-        changed(&mut s)?;
-        store(&env, &s);
-        Ok(())
-    }
-
-    pub fn transfer_owner(
-        env: Env,
-        new_owner: Address,
-        expected_revision: u64,
-    ) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
-        if new_owner == s.owner {
-            return Err(Error::InvalidActor);
-        }
-        validate_roles(&env, &new_owner, &s.agent, &s.engine)?;
-        new_owner.require_auth();
-        s.owner = new_owner;
-        changed(&mut s)?;
-        store(&env, &s);
-        Ok(())
-    }
-
-    pub fn upgrade(
-        env: Env,
-        new_wasm_hash: BytesN<32>,
-        expected_revision: u64,
-    ) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
-        changed(&mut s)?;
-        store(&env, &s);
-        env.deployer()
-            .update_current_contract(soroban_sdk::ContractExecutable::Wasm(new_wasm_hash));
-        Ok(())
+        commit_deployment(&env, &mut s, policy_version)
     }
 
     // A separate `recover_funds` ABI is unnecessary once `__check_auth` admits
     // owner-authorized token calls. The SDK delegates recovery to the Stellar rail vendor.
-    pub fn recover(
-        env: Env,
-        recipient: Address,
-        amount: i128,
-        expected_revision: u64,
-    ) -> Result<(), Error> {
-        let mut s = owner_state(&env, expected_revision)?;
-        changed(&mut s)?;
-        store(&env, &s);
+    pub fn recover(env: Env, recipient: Address, amount: i128) -> Result<(), Error> {
+        let s = owner_state(&env)?;
         move_tokens(&env, &s.grant.asset, &recipient, amount)
     }
 

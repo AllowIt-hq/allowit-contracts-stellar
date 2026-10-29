@@ -1,4 +1,5 @@
 {
   "repository": "https://github.com/AllowIt-hq/allowit-contracts-stellar.git",
-  "revision": "9bad3aafd86e4ddb5432ba2e55abab8b83f7cf6b"
+  "revision": "9bad3aafd86e4ddb5432ba2e55abab8b83f7cf6b",
+  "policy_bound_revision": "07e0b0e9724cda11248c06b3404b0770b5be2be5"
 }

@@ -14,14 +14,11 @@ from wallet_admin import admin as verify_admin, fetch, owner_only, PASSPHRASE
 
 # No transfers, token approvals, general calls or arbitrary method dispatch.
 ODC = {
-    "set_grant": {"grant", "expected_revision"},
-    "set_engine": {"engine", "expected_revision"},
-    "set_agent": {"agent", "expected_revision"},
-    "set_paused": {"paused", "expected_revision"},
-    "transfer_owner": {"new_owner", "expected_revision"},
-    "upgrade": {"new_wasm_hash", "expected_revision"},
-    "recover": {"recipient", "amount", "expected_revision"},
+    "deploy_policy": {"deployment"},
+    "set_pause": {"paused", "policy_version"},
+    "recover": {"recipient", "amount"},
 }
+
 PARENT = {
     "upgrade_engine": {"new_hash", "expected_revision"},
     "upgrade_parent": {"new_hash", "expected_revision"},
@@ -85,12 +82,34 @@ def grant(value):
     return value
 
 
+def deployment(value):
+    fields = {"policy_version", "owner", "agent", "engine", "grant", "paused", "x402_signer", "wasm_hash"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("Deployment fields must exactly match the ODC ABI")
+    if type(value["policy_version"]) is not int or not 0 < value["policy_version"] < 2**64:
+        raise ValueError("Invalid policy version")
+    for role in ("owner", "agent", "engine"):
+        address(value[role])
+    grant(value["grant"])
+    if type(value["paused"]) is not bool:
+        raise ValueError("paused must be boolean")
+    for name in ("x402_signer", "wasm_hash"):
+        if value[name] is not None:
+            code_hash(value[name])
+    return value
+
+
 def checked_args(method, values, family):
     expected = (ODC if family == "odc" else PARENT)[method]
     if not isinstance(values, dict) or set(values) != expected:
         raise ValueError("Arguments must exactly match " + ", ".join(sorted(expected)))
     for key, value in values.items():
-        if key == "expected_revision" or key == "amount":
+        if key == "deployment":
+            deployment(value)
+        elif key == "policy_version":
+            if type(value) is not int or not 0 < value < 2**64:
+                raise ValueError("Invalid policy version")
+        elif key == "expected_revision" or key == "amount":
             if type(value) is not int or (value < 0 if key == "expected_revision" else value <= 0) or value > (2**64 - 1 if key == "expected_revision" else 2**127 - 1):
                 raise ValueError("Invalid integer " + key)
         elif key in ("new_wasm_hash", "new_hash"):
@@ -112,7 +131,11 @@ def checked_args(method, values, family):
 def serialize(values):
     args = []
     for key, value in values.items():
-        if key == "grant":
+        if key == "deployment":
+            value = copy.deepcopy(value)
+            for amount in ("per_transfer", "daily_limit", "total_limit"):
+                value["grant"][amount] = str(value["grant"][amount])
+        elif key == "grant":
             value = dict(value)
             for amount in ("per_transfer", "daily_limit", "total_limit"):
                 value[amount] = str(value[amount])
@@ -277,8 +300,7 @@ def main():
             verify_admin(fetch(args.network, json.loads(args.arguments)["new_admin"]), args.candidate_member)
     if args.action == "deploy-odc" or args.action == "admin" and args.family == "odc":
         owner_only(fetch(args.network, args.source))
-        if args.action == "admin" and args.method == "transfer_owner":
-            owner_only(fetch(args.network, json.loads(args.arguments)["new_owner"]))
+
     if args.action == "admin":
         state_args = ["contract", "invoke", "--id", args.contract, "--network", args.network,
                       "--source-account", args.source, "--send=no", "--", "state"]
@@ -286,20 +308,31 @@ def main():
         authority = state["owner" if args.family == "odc" else "upgrade_authority"]
         if args.family == "odc":
             values = json.loads(args.arguments)
-            roles = {"owner": state["owner"], "agent": state["agent"], "engine": state["engine"]}
-            for method, field, argument in (("set_agent", "agent", "agent"), ("set_engine", "engine", "engine"), ("transfer_owner", "owner", "new_owner")):
-                if args.method == method:
-                    roles[field] = values[argument]
-            if len(set(roles.values())) != 3 or args.contract in roles.values():
-                raise ValueError("Owner, agent, engine and ODC must be distinct")
+            if args.method == "deploy_policy":
+                policy = values["deployment"]
+                roles = {key: policy[key] for key in ("owner", "agent", "engine")}
+                if len(set(roles.values())) != 3 or args.contract in roles.values():
+                    raise ValueError("Owner, agent, engine and ODC must be distinct")
+                if roles["owner"] != state["owner"]:
+                    owner_only(fetch(args.network, account(roles["owner"])))
         if args.source != authority:
             raise ValueError("Source is not the contract's current owner/admin")
-        if json.loads(args.arguments)["expected_revision"] != state["revision"]:
-            raise ValueError("Expected revision does not match current state")
+        values = json.loads(args.arguments)
+        if args.family == "parent":
+            if values["expected_revision"] != state["revision"]:
+                raise ValueError("Expected revision does not match current state")
+        elif args.method != "recover":
+            target = values["deployment"]["policy_version"] if args.method == "deploy_policy" else values["policy_version"]
+            if target != state["policy_version"] + 1:
+                raise ValueError("Policy deployment must use the next version")
     output = cli_run(prepared)
     candidate = None
-    if args.action == "admin" and args.method in ("set_admin", "transfer_owner"):
-        candidate = json.loads(args.arguments)["new_admin" if args.method == "set_admin" else "new_owner"]
+    if args.action == "admin" and args.method == "set_admin":
+        candidate = json.loads(args.arguments)["new_admin"]
+    elif args.action == "admin" and args.method == "deploy_policy":
+        next_owner = json.loads(args.arguments)["deployment"]["owner"]
+        if next_owner != authority:
+            candidate = next_owner
     print(output if args.action == "read" else prepare_xdr(output, args.source, args.network, max_fee=args.max_fee, candidate=candidate, expected_wasm=args.wasm_hash if args.action.startswith("deploy-") else None))
 
 

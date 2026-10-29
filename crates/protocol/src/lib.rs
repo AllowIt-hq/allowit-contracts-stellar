@@ -21,6 +21,8 @@ pub struct Grant {
 /// Internal normalized transfer passed to the veto engine. It is not a public wallet entrypoint.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+// The revision field is a wire-compatible alias of the wallet policy_version.
+// It is not a separate counter.
 pub struct TransferRequest {
     pub recipient: Address,
     pub amount: i128,
@@ -50,14 +52,14 @@ pub struct PolicyInvocation {
 }
 
 /// The SDK maps OperationRef.policy_instance and OperationRef.nonce without changing them.
-/// The monotonic native nonce and configuration revision come from authenticated custody state.
+/// The monotonic native nonce and policy version come from authenticated custody state.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
     pub policy_instance: BytesN<32>,
     pub operation_id: BytesN<32>,
     pub nonce: u64,
-    pub revision: u64,
+    pub policy_version: u64,
     pub expires_at: u64,
     pub invocation: PolicyInvocation,
 }
@@ -65,6 +67,7 @@ pub struct ExecutionRequest {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyBinding {
+    pub interface_version: u32,
     pub policy_instance: BytesN<32>,
     pub module_digest: BytesN<32>,
     pub source_digest: BytesN<32>,
@@ -81,7 +84,7 @@ pub struct TransferReceipt {
     pub to: Address,
     pub amount: i128,
     pub nonce: u64,
-    pub revision: u64,
+    pub policy_version: u64,
 }
 
 /// Authenticated observations consumed by statically compiled owner policy.
