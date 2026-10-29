@@ -11,7 +11,7 @@ Shared checker upgrades belong to a separate parent and grant no wallet custody 
 Classic G-address accounts can use agent-and-server multisig without a Soroban custody contract.
 They still require classic reserves, and they cannot execute custom onchain policy code.
 
-[Architecture and authoring](docs/architecture.md) · [Engine parent](docs/engine-parent.md) · [Setup and administration](docs/admin.md)
+[Architecture and authoring](docs/architecture.md) · [Engine parent](docs/engine-parent.md) · [Setup and administration](docs/admin.md) · [Mainnet preparation](docs/mainnet.md)
 
 ## Build and test
 
