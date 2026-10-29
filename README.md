@@ -1,25 +1,21 @@
-# AllowIt native Stellar contracts
+# AllowIt Stellar policy wallets
 
-`allowit-odc` is an owner-controlled wallet for one immutable native SAC. Its kernel authenticates the
-agent and exact transfer, checks pause, expiry, deployment version, execution nonce and replay, and
-verifies native effects. Authored policy chooses its validation and returns the final named `Spent`
-map. `Grant` is owner-signed named configuration, with no mandatory limit or recipient keys.
+Three owner-controlled contract implementations share custody and administration mixins:
 
-`allowit-policy-rules` supplies the same canonical rules to bundled policy code and the shared
-`allowit-wallet-engine`. Placement is selected before deployment and recorded in the compiler
-manifest. There is no runtime fallback. A shared check returns a decision and proposed spent data,
-with no authority over owner configuration, code or token authorization.
+- `SimplePolicyEngine` requires agent and server approval for delegated transfers. The server checks the authored policy offchain.
+- `CommonPolicyEngine` adds an explicit owner-selected list of canonical local policy checks.
+- `CustomPolicy` compiles bespoke local policy into its own contract and reuses the same wallet mixins.
 
-Owner deployment, pause and recovery do not call the engine or read spent data. The owner can
-explicitly enable standard x402 authorization for one exact installed-SAC transfer. General calls,
-allowances and arbitrary account signing are outside this transfer ABI.
+The owner controls wallet upgrades, configuration, pause, recovery and exact passthrough calls.
+Shared checker upgrades belong to a separate parent and grant no wallet custody authority.
+Classic G-address accounts can use agent-and-server multisig without a Soroban custody contract.
+They still require classic reserves, and they cannot execute custom onchain policy code.
 
-[Architecture and authoring](docs/architecture.md) · [Setup and administration](docs/admin.md)
+[Architecture and authoring](docs/architecture.md) · [Engine parent](docs/engine-parent.md) · [Setup and administration](docs/admin.md)
 
 ## Build and test
 
-Use Rust 1.98.0, Soroban SDK 28.0.0 and [Stellar CLI](https://developers.stellar.org/docs/tools/cli/stellar-cli)
-28.1.0. The CLI processes contract specs during the Wasm build.
+Use Rust 1.98.0, Soroban SDK 28.0.0 and [Stellar CLI](https://developers.stellar.org/docs/tools/cli/stellar-cli) 28.1.0.
 
 ```sh
 python3 scripts/check-policy.py
@@ -29,11 +25,9 @@ python3 -m unittest discover -s scripts/tests -v
 python3 scripts/artifacts.py --output PATH
 ```
 
-The build reproduces generated policy modules at the immutable SDK revision in
+The build reproduces the CustomPolicy sample at the immutable SDK revision in
 `scripts/policy-codegen.json`. `ALLOWIT_SDK_PATH` can select a clean checkout at that revision.
-Otherwise, it fetches an isolated compiler checkout. Regenerate authored policy changes with the
-pinned SDK's `stellar-native` command before building.
-
-The `policy/` directory contains separate portable source fixtures. The deployable custody ABI is
-in `crates/protocol/`, and the exact rule parameter contracts are documented in `crates/rules/`.
+Otherwise, the verifier fetches an isolated compiler checkout. Authored sample source is in
+`crates/custom-policy/policy/`; the custody mixins are in `crates/policy-wallet/`.
+The canonical rule parameter contracts are documented in `crates/rules/`.
 Save signed bytes before broadcast and reconcile the original transaction hash after uncertainty.

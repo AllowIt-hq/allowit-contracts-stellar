@@ -7,15 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)"
-PAIRS = (
-    ("policy.rs", "generated_policy.rs"),
-    ("recipient-policy.rs", "generated_recipient_policy.rs"),
-    ("financial-policy.rs", "test_generated_financial_policy.rs"),
-    ("bool-policy.rs", "test_generated_bool_policy.rs"),
-    ("xlm-policy.rs", "generated_xlm_policy.rs"),
-    ("state-policy.rs", "generated_state_policy.rs"),
-    ("local-state-policy.rs", "generated_local_state_policy.rs"),
-)
+PAIRS = (("policy.rs", "generated_policy.rs"),)
 
 
 def binding(text, name):
@@ -29,8 +21,8 @@ def binding(text, name):
 
 
 for source, generated in PAIRS:
-    source_path = ROOT / "crates/odc/policy" / source
-    generated_path = ROOT / "crates/odc/src" / generated
+    source_path = ROOT / "crates/custom-policy/policy" / source
+    generated_path = ROOT / "crates/custom-policy/src" / generated
     text = generated_path.read_text()
     if binding(text, "SOURCE_HASH") != hashlib.sha256(source_path.read_bytes()).digest():
         raise SystemExit("Generated policy source binding is stale: " + generated)

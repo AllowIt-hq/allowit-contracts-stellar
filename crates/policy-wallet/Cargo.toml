@@ -1,0 +1,17 @@
+[package]
+name = "allowit-policy-wallet"
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+allowit-wallet-protocol = { path = "../protocol" }
+allowit-policy-rules = { path = "../rules" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+ed25519-dalek = "=2.2.0"
