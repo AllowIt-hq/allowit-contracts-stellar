@@ -3,10 +3,10 @@ use super::*;
 use allowit_wallet_protocol::PolicyInvocation;
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
-    contract, contractimpl,
+    IntoVal, TryIntoVal, contract, contractimpl,
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::StellarAssetClient,
-    vec, IntoVal, TryIntoVal,
+    vec,
 };
 mod native {
     crate::policy_wallet!(Harness, crate::Common);
@@ -446,9 +446,11 @@ fn real_x402_requires_both_signatures_and_commits_with_native_effects() {
         assert_eq!(f.balance(), 990);
         assert_eq!(f.client().state().nonce, 1);
         f.env.set_auths(&[f.host_entry(e.clone(), 10, 2)]);
-        assert!(token::Client::new(&f.env, &f.asset)
-            .try_transfer(&f.wallet, &f.recipient, &10)
-            .is_err());
+        assert!(
+            token::Client::new(&f.env, &f.asset)
+                .try_transfer(&f.wallet, &f.recipient, &10)
+                .is_err()
+        );
         assert_eq!(f.balance(), 990);
         let mut bad = f.host_entry(f.execution(10), 10, 3);
         if let soroban_sdk::xdr::SorobanCredentials::Address(ref mut credential) = bad.credentials {
@@ -459,9 +461,11 @@ fn real_x402_requires_both_signatures_and_commits_with_native_effects() {
             credential.signature = raw.try_into_val(&f.env).unwrap();
         }
         f.env.set_auths(&[bad]);
-        assert!(token::Client::new(&f.env, &f.asset)
-            .try_transfer(&f.wallet, &f.recipient, &10)
-            .is_err());
+        assert!(
+            token::Client::new(&f.env, &f.asset)
+                .try_transfer(&f.wallet, &f.recipient, &10)
+                .is_err()
+        );
         assert_eq!(f.balance(), 990);
     }
 }
@@ -470,9 +474,11 @@ fn failed_native_transfer_rolls_back_spent_nonce_and_operation_marker() {
     let f = Fixture::new(SIMPLE, true);
     let e = f.execution(2_000);
     f.env.set_auths(&[f.host_entry(e.clone(), 2_000, 1)]);
-    assert!(token::Client::new(&f.env, &f.asset)
-        .try_transfer(&f.wallet, &f.recipient, &2_000)
-        .is_err());
+    assert!(
+        token::Client::new(&f.env, &f.asset)
+            .try_transfer(&f.wallet, &f.recipient, &2_000)
+            .is_err()
+    );
     assert_eq!(f.client().state().nonce, 0);
     assert_eq!(f.balance(), 1_000);
     f.env.mock_all_auths();
@@ -521,10 +527,11 @@ fn owner_passthrough_supports_exact_nested_auth_without_agent_access() {
     )
         .into_val(&f.env);
     f.auth(&[&f.agent, &f.server], "invoke", owner_args.clone());
-    assert!(f
-        .client()
-        .try_invoke(&forwarder, &function, &args, &auth)
-        .is_err());
+    assert!(
+        f.client()
+            .try_invoke(&forwarder, &function, &args, &auth)
+            .is_err()
+    );
     f.auth(&[&f.owner], "invoke", owner_args);
     f.client().invoke(&forwarder, &function, &args, &auth);
     assert_eq!(f.balance(), 800);
@@ -548,10 +555,11 @@ fn owner_passthrough_supports_exact_nested_auth_without_agent_access() {
         )
             .into_val(&f.env),
     );
-    assert!(f
-        .client()
-        .try_invoke(&forwarder, &function, &changed, &auth)
-        .is_err());
+    assert!(
+        f.client()
+            .try_invoke(&forwarder, &function, &changed, &auth)
+            .is_err()
+    );
     assert_eq!(f.balance(), 800);
 }
 #[test]
@@ -653,7 +661,7 @@ fn custom_source_and_unknown_storage_layout_reject() {
 
 #[test]
 fn constructor_state_reads_and_operation_receipts_maintain_full_lifetimes() {
-    use soroban_sdk::testutils::{storage::Persistent as _, Deployer as _};
+    use soroban_sdk::testutils::{Deployer as _, storage::Persistent as _};
     let f = Fixture::new(COMMON, false);
     let max = f.env.storage().max_ttl();
     assert_eq!(f.env.deployer().get_contract_instance_ttl(&f.wallet), max);
@@ -700,9 +708,11 @@ fn ordinary_compiled_deployment_requires_owner_authorization() {
         x402_enabled: false,
     };
     f.env.mock_auths(&[]);
-    assert!(ConstructorClient::new(&f.env, &constructor)
-        .try_deploy(&wasm, &config)
-        .is_err());
+    assert!(
+        ConstructorClient::new(&f.env, &constructor)
+            .try_deploy(&wasm, &config)
+            .is_err()
+    );
 }
 
 fn transfer_context(f: &Fixture, amount: i128) -> Context {
@@ -877,9 +887,11 @@ fn issuer_burn_destinations_reject_in_direct_recovery_and_x402() {
             );
 
             f.env.set_auths(&[f.host_entry(e, 10, 1)]);
-            assert!(token::Client::new(&f.env, &f.asset)
-                .try_transfer(&f.wallet, &f.recipient, &10)
-                .is_err());
+            assert!(
+                token::Client::new(&f.env, &f.asset)
+                    .try_transfer(&f.wallet, &f.recipient, &10)
+                    .is_err()
+            );
         } else {
             f.auth(
                 &[&f.agent, &f.server],
@@ -983,9 +995,11 @@ fn native_master_weight_rotation_does_not_revoke_owner_enabled_raw_key_x402() {
     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
     f.client().deploy_policy(&p);
     f.env.set_auths(&[f.host_entry(f.execution(10), 10, 2)]);
-    assert!(token::Client::new(&f.env, &f.asset)
-        .try_transfer(&f.wallet, &f.recipient, &10)
-        .is_err());
+    assert!(
+        token::Client::new(&f.env, &f.asset)
+            .try_transfer(&f.wallet, &f.recipient, &10)
+            .is_err()
+    );
     assert_eq!(f.balance(), 990);
 }
 
