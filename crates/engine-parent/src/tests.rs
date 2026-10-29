@@ -1,9 +1,8 @@
 use super::*;
-use allowit_wallet_protocol::{EngineClient, EngineContext, Grant, TransferRequest};
+use allowit_wallet_protocol::{EngineClient, EngineRequest, EngineState, Grant, Spent};
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    vec,
 };
 
 const ENGINE_WASM: &[u8] =
@@ -54,34 +53,35 @@ impl Fixture {
         }]);
     }
 }
-fn context(env: &Env) -> EngineContext {
-    let asset = Address::generate(env);
-    let recipient = Address::generate(env);
-    EngineContext {
-        wallet: Address::generate(env),
-        agent: Address::generate(env),
-        asset: asset.clone(),
-        request: TransferRequest {
-            recipient: recipient.clone(),
+fn context(env: &Env) -> (EngineRequest, EngineState) {
+    let mut grant = Grant::new(env);
+    grant.set(String::from_str(env, "daily_limit"), 10u64.into_val(env));
+    (
+        EngineRequest {
+            wallet: Address::generate(env),
+            agent: Address::generate(env),
+            asset: Address::generate(env),
+            token: String::from_str(env, "USDC"),
+            decimals: 7,
+            recipient: Address::generate(env),
             amount: 1,
+            operation_id: BytesN::from_array(env, &[1; 32]),
             nonce: 0,
-            revision: 0,
+            deployment_version: 0,
             expires_at: 200,
+            now: 100,
         },
-        grant: Grant {
-            asset,
-            recipients: vec![env, recipient],
-            per_transfer: 2,
-            daily_limit: 10,
-            total_limit: 20,
-            max_calls: 5,
-            expires_at: 300,
+        EngineState {
+            grant,
+            spent: Spent::new(env),
         },
-        spent_daily: 0,
-        spent_total: 0,
-        calls: 0,
-        now: 100,
-    }
+    )
+}
+fn approved(env: &Env, engine: &Address) -> bool {
+    let (request, state) = context(env);
+    EngineClient::new(env, engine)
+        .daily_cap(&request, &state)
+        .approval
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn compiled_parent_deploys_compiled_external_reference_engine() {
     assert_eq!(state.upgrade_authority, f.admin);
     assert_eq!(state.revision, 0);
     assert_eq!(f.client().engine(), state.engine);
-    assert!(EngineClient::new(&f.env, &state.engine).evaluate(&context(&f.env)));
+    assert!(approved(&f.env, &state.engine));
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn missing_uploaded_code_rolls_back_parent_revision() {
     );
     assert!(f.client().try_upgrade_engine(&bad, &0).is_err());
     assert_eq!(f.client().state().revision, 0);
-    assert!(EngineClient::new(&f.env, &f.client().engine()).evaluate(&context(&f.env)));
+    assert!(approved(&f.env, &f.client().engine()));
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn compiled_parent_self_upgrade_preserves_state_and_admin_gate() {
     assert_eq!(after.engine, before.engine);
     assert_eq!(after.upgrade_authority, before.upgrade_authority);
     assert_eq!(after.revision, 1);
-    assert!(EngineClient::new(&f.env, &after.engine).evaluate(&context(&f.env)));
+    assert!(approved(&f.env, &after.engine));
 }
 
 #[test]
@@ -209,7 +209,11 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     let f = Fixture::new(true);
     let engine = f.client().engine();
     let context = context(&f.env);
-    assert!(EngineClient::new(&f.env, &engine).evaluate(&context));
+    assert!(
+        EngineClient::new(&f.env, &engine)
+            .daily_cap(&context.0, &context.1)
+            .approval
+    );
     let deny = f
         .env
         .deployer()
@@ -222,7 +226,11 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     );
     f.client().upgrade_engine(&deny, &0);
     assert_eq!(f.client().engine(), engine);
-    assert!(!EngineClient::new(&f.env, &engine).evaluate(&context));
+    assert!(
+        !EngineClient::new(&f.env, &engine)
+            .daily_cap(&context.0, &context.1)
+            .approval
+    );
     assert_eq!(f.client().state().revision, 1);
     // A later authorized release can restore the engine, preserving identity.
     f.auth(
@@ -231,7 +239,11 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
         (f.engine_hash.clone(), 1u64).into_val(&f.env),
     );
     f.client().upgrade_engine(&f.engine_hash, &1);
-    assert!(EngineClient::new(&f.env, &engine).evaluate(&context));
+    assert!(
+        EngineClient::new(&f.env, &engine)
+            .daily_cap(&context.0, &context.1)
+            .approval
+    );
     assert_eq!(f.client().state().revision, 2);
 }
 

@@ -32,6 +32,16 @@ dependencies = [
 name = "allowit-odc"
 version = "0.1.0"
 dependencies = [
+ "allowit-policy-rules",
+ "allowit-wallet-protocol",
+ "ed25519-dalek",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "allowit-policy-rules"
+version = "0.1.0"
+dependencies = [
  "allowit-wallet-protocol",
  "soroban-sdk",
 ]
@@ -40,6 +50,7 @@ dependencies = [
 name = "allowit-wallet-engine"
 version = "0.1.0"
 dependencies = [
+ "allowit-policy-rules",
  "allowit-wallet-protocol",
  "soroban-sdk",
 ]

@@ -16,6 +16,8 @@ PAIRS = (
     ("financial-policy.rs", "test_generated_financial_policy.rs"),
     ("bool-policy.rs", "test_generated_bool_policy.rs"),
     ("xlm-policy.rs", "generated_xlm_policy.rs"),
+    ("state-policy.rs", "generated_state_policy.rs"),
+    ("local-state-policy.rs", "generated_local_state_policy.rs"),
 )
 
 
@@ -37,7 +39,7 @@ def verify(sdk, revision):
                       "--bin", "allowit", "--", "stellar-native", str(source_path)], env=environment)
         if actual != expected:
             raise SystemExit("Generated policy output differs from its pinned compiler: " + generated)
-    print("PASS 5 generated policy modules reproduced at SDK " + revision)
+    print(f"PASS {len(PAIRS)} generated policy modules reproduced at SDK " + revision)
 
 
 parser = argparse.ArgumentParser(description=__doc__)
