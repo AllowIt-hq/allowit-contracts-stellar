@@ -555,6 +555,8 @@ impl Odc {
         Ok(())
     }
 
+    // A separate `recover_funds` ABI is unnecessary once `__check_auth` admits
+    // owner-authorized token calls. The SDK delegates recovery to the Stellar rail vendor.
     pub fn recover(
         env: Env,
         recipient: Address,
