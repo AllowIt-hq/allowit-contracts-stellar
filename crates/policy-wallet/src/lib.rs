@@ -227,13 +227,10 @@ fn token_label(env: &Env, asset: &Address) -> String {
 }
 // A transfer to a classic issuer burns its asset. Derive the immutable SAC identity
 // from the cached symbol and candidate issuer without reentering the active SAC.
-fn issuer_destination(env: &Env, state: &State, to: &Address) -> bool {
-    let Ok(issuer) = public_key(env, to) else {
-        return false;
-    };
+fn issuer_destination(env: &Env, state: &State, to: &Address) -> Result<bool, Error> {
     let len = state.token.len() as usize;
     if len == 0 || len > 48 {
-        return false;
+        return Err(Error::InvalidState);
     }
     let mut encoded = [0u8; 48];
     state.token.copy_into_slice(&mut encoded[..len]);
@@ -242,11 +239,11 @@ fn issuer_destination(env: &Env, state: &State, to: &Address) -> bool {
     let mut size = 0;
     while cursor < len {
         if size == 12 {
-            return false;
+            return Err(Error::InvalidState);
         }
         code[size] = if encoded[cursor] == b'\\' {
             if cursor + 3 >= len || encoded[cursor + 1] != b'x' {
-                return false;
+                return Err(Error::InvalidState);
             }
             let hex = |b| match b {
                 b'0'..=b'9' => Some(b - b'0'),
@@ -255,7 +252,7 @@ fn issuer_destination(env: &Env, state: &State, to: &Address) -> bool {
             };
             let (Some(high), Some(low)) = (hex(encoded[cursor + 2]), hex(encoded[cursor + 3]))
             else {
-                return false;
+                return Err(Error::InvalidState);
             };
             cursor += 4;
             high * 16 + low
@@ -268,11 +265,14 @@ fn issuer_destination(env: &Env, state: &State, to: &Address) -> bool {
     }
     // SEP-11 keeps at least five bytes for AlphaNum12, including escaped zeros.
     let (kind, width) = if size <= 4 { (1u32, 4) } else { (2u32, 12) };
+    let Ok(issuer) = public_key(env, to) else {
+        return Ok(false);
+    };
     let mut asset = Bytes::from_array(env, &kind.to_be_bytes());
     asset.append(&Bytes::from_slice(env, &code[..width]));
     asset.append(&Bytes::from_array(env, &[0; 4]));
     asset.append(&issuer.into());
-    env.deployer().with_stellar_asset(asset).deployed_address() == state.asset
+    Ok(env.deployer().with_stellar_asset(asset).deployed_address() == state.asset)
 }
 fn move_tokens(env: &Env, asset: &Address, to: &Address, amount: i128) -> Result<(), Error> {
     let client = token::Client::new(env, asset);
@@ -333,7 +333,7 @@ fn admit<P: Policy>(
     if args.amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if args.to == env.current_contract_address() || issuer_destination(env, &state, &args.to) {
+    if args.to == env.current_contract_address() || issuer_destination(env, &state, &args.to)? {
         return Err(Error::InvalidRecipient);
     }
     let nonce = state.nonce.checked_add(1).ok_or(Error::Overflow)?;
@@ -460,7 +460,9 @@ pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Resu
         x402_enabled: deployment.x402_enabled,
     };
     // A new bespoke executable validates its source on its next call. The owner binds its exact hash.
-    if deployment.wasm_hash.is_none() {
+    if deployment.wasm_hash.as_ref().is_none_or(|hash| {
+        env.current_contract_address().executable() == Some(Executable::Wasm(hash.clone()))
+    }) {
         validate::<P>(env, &config)?;
     } else {
         validate::<UpgradeConfig>(env, &config)?;
@@ -518,7 +520,7 @@ pub fn recover(env: &Env, recipient: Address, amount: i128) -> Result<(), Error>
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if recipient == env.current_contract_address() || issuer_destination(env, &state, &recipient) {
+    if recipient == env.current_contract_address() || issuer_destination(env, &state, &recipient)? {
         return Err(Error::InvalidRecipient);
     }
     move_tokens(env, &state.asset, &recipient, amount)
@@ -655,8 +657,10 @@ impl Policy for Common {
                 allowit_policy_rules::recipient(env.clone(), request.clone(), state)
             } else if rule == Symbol::new(env, "expiry") {
                 allowit_policy_rules::expiry(env.clone(), request.clone(), state)
-            } else {
+            } else if rule == Symbol::new(env, "token") {
                 allowit_policy_rules::token(env.clone(), request.clone(), state)
+            } else {
+                return Err(Error::InvalidGrant);
             }
             .map_err(|_| Error::PolicyDenied)?;
             if !result.approval {

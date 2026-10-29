@@ -59,13 +59,16 @@ pub fn validate_rule(
         }
     }
     if *rule == soroban_sdk::Symbol::new(env, "recipient") {
-        Vec::<Address>::try_from_val(
+        let recipients = Vec::<Val>::try_from_val(
             env,
             &grant
                 .get(key(env, "recipients"))
                 .ok_or(Error::InvalidParameter)?,
         )
         .map_err(|_| Error::InvalidParameter)?;
+        for recipient in recipients.iter() {
+            Address::try_from_val(env, &recipient).map_err(|_| Error::InvalidParameter)?;
+        }
     } else if *rule == soroban_sdk::Symbol::new(env, "token") {
         String::try_from_val(
             env,

@@ -3,10 +3,10 @@ use super::*;
 use allowit_wallet_protocol::PolicyInvocation;
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
-    IntoVal, TryIntoVal, contract, contractimpl,
+    contract, contractimpl,
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token::StellarAssetClient,
-    vec,
+    vec, IntoVal, TryIntoVal,
 };
 mod native {
     crate::policy_wallet!(Harness, crate::Common);
@@ -446,11 +446,9 @@ fn real_x402_requires_both_signatures_and_commits_with_native_effects() {
         assert_eq!(f.balance(), 990);
         assert_eq!(f.client().state().nonce, 1);
         f.env.set_auths(&[f.host_entry(e.clone(), 10, 2)]);
-        assert!(
-            token::Client::new(&f.env, &f.asset)
-                .try_transfer(&f.wallet, &f.recipient, &10)
-                .is_err()
-        );
+        assert!(token::Client::new(&f.env, &f.asset)
+            .try_transfer(&f.wallet, &f.recipient, &10)
+            .is_err());
         assert_eq!(f.balance(), 990);
         let mut bad = f.host_entry(f.execution(10), 10, 3);
         if let soroban_sdk::xdr::SorobanCredentials::Address(ref mut credential) = bad.credentials {
@@ -461,11 +459,9 @@ fn real_x402_requires_both_signatures_and_commits_with_native_effects() {
             credential.signature = raw.try_into_val(&f.env).unwrap();
         }
         f.env.set_auths(&[bad]);
-        assert!(
-            token::Client::new(&f.env, &f.asset)
-                .try_transfer(&f.wallet, &f.recipient, &10)
-                .is_err()
-        );
+        assert!(token::Client::new(&f.env, &f.asset)
+            .try_transfer(&f.wallet, &f.recipient, &10)
+            .is_err());
         assert_eq!(f.balance(), 990);
     }
 }
@@ -474,11 +470,9 @@ fn failed_native_transfer_rolls_back_spent_nonce_and_operation_marker() {
     let f = Fixture::new(SIMPLE, true);
     let e = f.execution(2_000);
     f.env.set_auths(&[f.host_entry(e.clone(), 2_000, 1)]);
-    assert!(
-        token::Client::new(&f.env, &f.asset)
-            .try_transfer(&f.wallet, &f.recipient, &2_000)
-            .is_err()
-    );
+    assert!(token::Client::new(&f.env, &f.asset)
+        .try_transfer(&f.wallet, &f.recipient, &2_000)
+        .is_err());
     assert_eq!(f.client().state().nonce, 0);
     assert_eq!(f.balance(), 1_000);
     f.env.mock_all_auths();
@@ -527,11 +521,10 @@ fn owner_passthrough_supports_exact_nested_auth_without_agent_access() {
     )
         .into_val(&f.env);
     f.auth(&[&f.agent, &f.server], "invoke", owner_args.clone());
-    assert!(
-        f.client()
-            .try_invoke(&forwarder, &function, &args, &auth)
-            .is_err()
-    );
+    assert!(f
+        .client()
+        .try_invoke(&forwarder, &function, &args, &auth)
+        .is_err());
     f.auth(&[&f.owner], "invoke", owner_args);
     f.client().invoke(&forwarder, &function, &args, &auth);
     assert_eq!(f.balance(), 800);
@@ -555,11 +548,10 @@ fn owner_passthrough_supports_exact_nested_auth_without_agent_access() {
         )
             .into_val(&f.env),
     );
-    assert!(
-        f.client()
-            .try_invoke(&forwarder, &function, &changed, &auth)
-            .is_err()
-    );
+    assert!(f
+        .client()
+        .try_invoke(&forwarder, &function, &changed, &auth)
+        .is_err());
     assert_eq!(f.balance(), 800);
 }
 #[test]
@@ -661,7 +653,7 @@ fn custom_source_and_unknown_storage_layout_reject() {
 
 #[test]
 fn constructor_state_reads_and_operation_receipts_maintain_full_lifetimes() {
-    use soroban_sdk::testutils::{Deployer as _, storage::Persistent as _};
+    use soroban_sdk::testutils::{storage::Persistent as _, Deployer as _};
     let f = Fixture::new(COMMON, false);
     let max = f.env.storage().max_ttl();
     assert_eq!(f.env.deployer().get_contract_instance_ttl(&f.wallet), max);
@@ -708,11 +700,9 @@ fn ordinary_compiled_deployment_requires_owner_authorization() {
         x402_enabled: false,
     };
     f.env.mock_auths(&[]);
-    assert!(
-        ConstructorClient::new(&f.env, &constructor)
-            .try_deploy(&wasm, &config)
-            .is_err()
-    );
+    assert!(ConstructorClient::new(&f.env, &constructor)
+        .try_deploy(&wasm, &config)
+        .is_err());
 }
 
 fn transfer_context(f: &Fixture, amount: i128) -> Context {
@@ -751,6 +741,7 @@ fn x402_context_signatures_pause_and_enablement_fail_closed() {
                 p.x402_enabled = false;
                 f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
                 f.client().deploy_policy(&p);
+                auth = f.authorization(f.execution(10), &payload);
             }
             8 => {
                 f.auth(&[&f.owner], "set_pause", (true, 1u64).into_val(&f.env));
@@ -766,16 +757,18 @@ fn x402_context_signatures_pause_and_enablement_fail_closed() {
         } else {
             vec![&f.env, context]
         };
-        assert!(
-            f.env
-                .try_invoke_contract_check_auth::<Error>(
-                    &f.wallet,
-                    &payload,
-                    auth.into_val(&f.env),
-                    &contexts
-                )
-                .is_err()
+        let result = f.env.try_invoke_contract_check_auth::<Error>(
+            &f.wallet,
+            &payload,
+            auth.into_val(&f.env),
+            &contexts,
         );
+        match case {
+            0 | 1 => assert_eq!(result, Err(Err(soroban_sdk::InvokeError::Abort))),
+            2 | 3 | 7 => assert_eq!(result, Err(Ok(Error::UnsupportedOperation))),
+            8 => assert_eq!(result, Err(Ok(Error::Paused))),
+            _ => assert_eq!(result, Err(Ok(Error::InvalidInvocation))),
+        }
         assert_eq!(f.balance(), 1000);
         assert_eq!(f.client().state().nonce, 0);
     }
@@ -824,6 +817,14 @@ fn upgraded_tiers_validate_retained_rules_and_owner_can_correct_configuration() 
             p.grant.remove(String::from_str(&f.env, "daily_limit"));
         }
         f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+        if target == COMMON {
+            assert_eq!(
+                f.client().try_deploy_policy(&p),
+                Err(Ok(Error::InvalidGrant))
+            );
+            f.transfer(10);
+            continue;
+        }
         f.client().deploy_policy(&p);
         let e = f.execution(10);
         f.auth(
@@ -864,12 +865,21 @@ fn issuer_burn_destinations_reject_in_direct_recovery_and_x402() {
             Address::from_string(&String::from_str(&f.env, name.rsplit(':').next().unwrap()));
         let e = f.execution(10);
         if enabled {
-            f.env.set_auths(&[f.host_entry(e, 10, 1)]);
-            assert!(
-                token::Client::new(&f.env, &f.asset)
-                    .try_transfer(&f.wallet, &f.recipient, &10)
-                    .is_err()
+            let payload = BytesN::from_array(&f.env, &[77; 32]);
+            assert_eq!(
+                f.env.try_invoke_contract_check_auth::<Error>(
+                    &f.wallet,
+                    &payload,
+                    f.authorization(e.clone(), &payload).into_val(&f.env),
+                    &vec![&f.env, transfer_context(&f, 10)]
+                ),
+                Err(Ok(Error::InvalidRecipient))
             );
+
+            f.env.set_auths(&[f.host_entry(e, 10, 1)]);
+            assert!(token::Client::new(&f.env, &f.asset)
+                .try_transfer(&f.wallet, &f.recipient, &10)
+                .is_err());
         } else {
             f.auth(
                 &[&f.agent, &f.server],
@@ -893,31 +903,48 @@ fn issuer_burn_destinations_reject_in_direct_recovery_and_x402() {
 }
 
 #[test]
-fn issuer_identity_decodes_sep11_escaped_and_twelve_byte_codes() {
+fn issuer_identity_decodes_real_sac_symbols_and_rejects_malformed_cache() {
     let f = Fixture::new(SIMPLE, true);
-    for (code, label) in [
-        (&[b'A', b':', b'\\', 0][..], r"A\x3a\x5c"),
-        (
-            &[b'X', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..],
-            r"X\x00\x00\x00\x00",
-        ),
+    let name = token::Client::new(&f.env, &f.asset).name();
+    let mut bytes = std::vec![0u8;name.len() as usize];
+    name.copy_into_slice(&mut bytes);
+    let text = std::str::from_utf8(&bytes).unwrap();
+    let issuer = Address::from_string(&String::from_str(&f.env, text.rsplit(':').next().unwrap()));
+    for code in [
+        &[b'A', 0, 0, 0][..],
+        &[b'A', b'B', b'C', b'D', b'E', 0, 0, 0, 0, 0, 0, 0][..],
+        b"ABCDEFGHIJKL",
     ] {
-        let mut state = f.client().state();
-        state.token = String::from_str(&f.env, label);
         let mut asset = Bytes::from_array(
             &f.env,
             &(if code.len() == 4 { 1u32 } else { 2u32 }).to_be_bytes(),
         );
         asset.append(&Bytes::from_slice(&f.env, code));
         asset.append(&Bytes::from_array(&f.env, &[0; 4]));
-        asset.append(&public_key(&f.env, &f.agent).unwrap().into());
-        state.asset = f
-            .env
-            .deployer()
-            .with_stellar_asset(asset)
-            .deployed_address();
-        assert!(issuer_destination(&f.env, &state, &f.agent));
-        assert!(!issuer_destination(&f.env, &state, &f.server));
+        asset.append(&public_key(&f.env, &issuer).unwrap().into());
+        let deployed = f.env.deployer().with_stellar_asset(asset).deploy();
+        let mut state = f.client().state();
+        state.asset = deployed.clone();
+        state.token = token::Client::new(&f.env, &deployed).symbol();
+        assert_eq!(issuer_destination(&f.env, &state, &issuer), Ok(true));
+        assert_eq!(issuer_destination(&f.env, &state, &f.server), Ok(false));
+    }
+    for malformed in ["", r"\xZZ", r"\q", "ABCDEFGHIJKLM"] {
+        let mut state = f.client().state();
+        state.token = String::from_str(&f.env, malformed);
+        f.env.as_contract(&f.wallet, || {
+            f.env.storage().instance().set(&STATE_KEY, &state)
+        });
+        let payload = BytesN::from_array(&f.env, &[4; 32]);
+        assert_eq!(
+            f.env.try_invoke_contract_check_auth::<Error>(
+                &f.wallet,
+                &payload,
+                f.authorization(f.execution(10), &payload).into_val(&f.env),
+                &vec![&f.env, transfer_context(&f, 10)]
+            ),
+            Err(Ok(Error::InvalidState))
+        );
     }
 }
 
@@ -956,11 +983,9 @@ fn native_master_weight_rotation_does_not_revoke_owner_enabled_raw_key_x402() {
     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
     f.client().deploy_policy(&p);
     f.env.set_auths(&[f.host_entry(f.execution(10), 10, 2)]);
-    assert!(
-        token::Client::new(&f.env, &f.asset)
-            .try_transfer(&f.wallet, &f.recipient, &10)
-            .is_err()
-    );
+    assert!(token::Client::new(&f.env, &f.asset)
+        .try_transfer(&f.wallet, &f.recipient, &10)
+        .is_err());
     assert_eq!(f.balance(), 990);
 }
 
@@ -987,4 +1012,43 @@ fn common_empty_rule_constructor_is_an_explicit_simple_configuration() {
     assert_eq!(f.balance(), 800);
     assert!(f.client().policy_spent().is_none());
     assert_eq!(f.client().state().nonce, 1);
+}
+
+#[test]
+fn common_rejects_non_address_recipient_elements_at_deployment() {
+    let f = Fixture::new(COMMON, false);
+    let invalid: [Val; 2] = [true.into_val(&f.env), 1u64.into_val(&f.env)];
+    for bad in invalid {
+        let mut p = f.deployment();
+        p.grant.set(
+            String::from_str(&f.env, "recipients"),
+            vec![&f.env, bad].into_val(&f.env),
+        );
+        f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+        assert_eq!(
+            f.client().try_deploy_policy(&p),
+            Err(Ok(Error::InvalidGrant))
+        );
+    }
+}
+
+#[test]
+fn replaced_agent_key_cannot_authorize_fresh_x402_execution() {
+    let f = Fixture::new(SIMPLE, true);
+    let mut p = f.deployment();
+    p.agent = address(&f.env, &SigningKey::from_bytes(&[99; 32]));
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&p);
+    let payload = BytesN::from_array(&f.env, &[4; 32]);
+    assert_eq!(
+        f.env.try_invoke_contract_check_auth::<Error>(
+            &f.wallet,
+            &payload,
+            f.authorization(f.execution(10), &payload).into_val(&f.env),
+            &vec![&f.env, transfer_context(&f, 10)]
+        ),
+        Err(Err(soroban_sdk::InvokeError::Abort))
+    );
+    assert_eq!(f.client().state().nonce, 0);
+    assert_eq!(f.balance(), 1000);
 }
