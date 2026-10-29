@@ -84,7 +84,7 @@ class RealCliEncoding(unittest.TestCase):
                     with self.subTest(action=action):
                         expected = hashlib.sha256(wasm.read_bytes()).hexdigest()
                         options = SimpleNamespace(action=action, network="testnet", allow_mainnet=False, source=account,
-                            wasm=str(wasm), wasm_hash=expected, admin=account, engine_wasm="11" * 32,
+                            wasm=str(wasm), wasm_hash=expected, engine_wasm="11" * 32,
                             owner=account, agent=recipient, engine=contract, asset=contract, grant=json.dumps(grant), policy_instance="11" * 32)
                         prepared = ca.command(options)
                         self.assertIn("--wasm", prepared)

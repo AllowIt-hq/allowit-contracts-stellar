@@ -297,9 +297,9 @@ class ContractAdmin(unittest.TestCase):
         with self.assertRaises(ValueError):
             ca.validate_auth(op)
         with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
-            ca.checked_args("set_admin", {"new_admin": contract, "expected_revision": 0}, "parent")
+            ca.checked_args("set_admin", {"owner": contract, "version": 0}, "parent")
         with self.assertRaises(ValueError):
-            ca.checked_args("recover", {"recipient": KEYS[1], "amount": 0, "expected_revision": 0}, "odc")
+            ca.checked_args("recover", {"recipient": KEYS[1], "amount": 0, "version": 0}, "odc")
 
     def test_cli_address_errors_do_not_echo_input(self):
         scripts = Path(__file__).resolve().parents[1]
@@ -328,13 +328,22 @@ class ContractAdmin(unittest.TestCase):
         args.allow_mainnet = True
         self.assertIn("--build-only", ca.command(args))
 
+    def test_parent_arguments_use_owner_and_version(self):
+        values = {"owner": KEYS[1], "version": 0}
+        self.assertEqual(ca.checked_args("set_admin", values, "parent"), values)
+        for old in ({"new_admin": KEYS[1], "expected_revision": 0},
+                    {"owner": KEYS[1], "version": -1},
+                    {"owner": KEYS[1], "version": 2**64}):
+            with self.assertRaises(ValueError):
+                ca.checked_args("set_admin", old, "parent")
+
     def test_deployment_requires_matching_local_wasm(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "contract.wasm"
             path.write_bytes(b"test-wasm")
             expected = hashlib.sha256(path.read_bytes()).hexdigest()
             options = SimpleNamespace(action="deploy-parent", network="testnet", allow_mainnet=False, source=KEYS[0],
-                wasm=str(path), wasm_hash=expected, admin=KEYS[0], engine_wasm="11" * 32)
+                wasm=str(path), wasm_hash=expected, owner=KEYS[0], engine_wasm="11" * 32)
             command = ca.command(options)
             self.assertIn("--wasm", command)
             self.assertNotIn("--wasm-hash", command)

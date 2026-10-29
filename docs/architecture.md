@@ -97,7 +97,7 @@ Keep owner authority independent of automated signers.
 
 `contract_version` identifies the supported custody release/layout; `engine_version` identifies the
 engine release. Both begin at 1. Exact Wasm hashes identify code. The engine parent orders its own
-administration with a separate revision and can replace shared engine code only. It cannot change
+administration with a separate version and can replace shared engine code only. It cannot change
 wallet code, Grant, authority or asset. Wallet code uses a direct owner-selected Wasm hash rather
 than a system-controlled executable reference. Owner paths never query the engine.
 

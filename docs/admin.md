@@ -44,7 +44,7 @@ reviewed source and placement manifest when preparing a policy executable.
 Use `contract_admin.py upload --source "$OWNER" --wasm PATH` separately for the engine, parent and
 policy wallet Wasm. Review, sign and submit prepared uploads manually, retaining each resulting hash.
 
-Prepare `deploy-parent --source "$ADMIN" --admin "$ADMIN" --engine-wasm HASH --wasm
+Prepare `deploy-parent --source "$ADMIN" --owner "$ADMIN" --engine-wasm HASH --wasm
  target/wasm32v1-none/release/allowit_engine_parent.wasm --wasm-hash PARENT_HASH`, with three
 `--member` values. The script verifies the native admin quorum, local Wasm and creation executable
 hash. The constructor creates the shared engine. Read its address with `read --contract
@@ -78,8 +78,7 @@ also authorize. An enabled x402 packet requires a G-agent, derives its key and r
 metadata atomically. A Grant or agent update can keep enablement when the owner explicitly signs true.
 
 `set_pause` takes `paused` and the next `deployment_version`. `recover` takes `recipient` and positive
-native `amount`, with no configuration version or usage update. Parent methods retain their separate
-`expected_revision`. Argument fields must match the chosen method. The tool admits native owner
+native `amount`, with no configuration version or usage update. Parent methods use their separate current `version`. `set_admin` takes the candidate `owner`. Argument fields must match the chosen method. The tool admits native owner
 accounts with only their active master signer and satisfiable thresholds. Parent `set_admin` checks
 its candidate's exact 2-of-3 membership. Other owner authorization schemes require their own adapter.
 
@@ -99,3 +98,6 @@ deployment and recovery do not read spent data or depend on shared engine availa
 Normal operations do not migrate state. An incompatible change uses this explicit maintenance
 sequence: pause, deploy and run a migration contract, deploy the new contract using the migrated
 state, then unpause. Compatible code updates retain the installed format and usage/replay records.
+
+The parent stores `owner`, `version` and `engine`. Wallet deployment and contract release versions remain separate.
+Older parent state uses different field names. Migrate that state explicitly before installing this parent executable on an existing address.
