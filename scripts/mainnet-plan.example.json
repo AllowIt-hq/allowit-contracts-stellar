@@ -2,22 +2,22 @@
   "schema": 1,
   "network": "mainnet",
   "network_passphrase": "Public Global Stellar Network ; September 2015",
-  "source_revision": "304bbd61dd211f516d7449716a980fe02fd87194",
-  "codegen_revision": "b50f6e483c04532f0b38f732b96d0d950465d17b",
-  "policy_source_digest": "3645a27c3c3e1829cb17223d15de1d71fa978261ba738c1806a8e6780daa4554",
+  "source_revision": "b5a5d4b13e9162dc9034df85442ea2251f65a845",
+  "codegen_revision": "9e57f935807da615bc1258f6b4b72fc40be64386",
+  "policy_source_digest": "1b7b60386dd3a0f9d4ea5bf2f5c4af05c7c80c0a5dd405d7f9bcedec0918c22b",
   "artifact_manifest": "manifest.json",
   "artifacts": {
     "engine": {
       "path": "REPLACE_ARTIFACT_DIR/allowit_wallet_engine.wasm",
-      "sha256": "b12dc7b7c410370196abdaa06744c2f1a6dbe0b45493776e3ec5247a3d4c7b88"
+      "sha256": "672b46a55d067d9d8b7dbea79c5e469bad8f697df6e13af25fb65ff6c47f3a2f"
     },
     "parent": {
       "path": "REPLACE_ARTIFACT_DIR/allowit_engine_parent.wasm",
-      "sha256": "21f1068255df67f179a49f19129af4775927399b2ef0f215418101d8091615f6"
+      "sha256": "64e9348a33cda21a3bd5e797c52defa1087bb33e1e45ef2a0a7084e8a0d632ff"
     },
-    "odc": {
-      "path": "REPLACE_ARTIFACT_DIR/allowit_odc.wasm",
-      "sha256": "2bac1c45cedae74dcb604f33aae85de11ba39dba64e265b288fc54334ca26a83"
+    "wallet": {
+      "path": "REPLACE_ARTIFACT_DIR/allowit_common_policy_engine.wasm",
+      "sha256": "8d369d50186d375eba47c8c21f16fbe184e30bc1bdd22e06e00db0c7b35dc7cc"
     }
   },
   "owner": "REPLACE_OWNER_G_ADDRESS",
@@ -32,7 +32,6 @@
   "forbidden_recipient": "REPLACE_FORBIDDEN_G_ADDRESS",
   "policy_instance": "REPLACE_NONZERO_64_HEX",
   "grant": {
-    "asset": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
     "recipients": [
       "REPLACE_RECIPIENT_G_ADDRESS"
     ],
@@ -47,11 +46,13 @@
   "fee_caps_stroops": {
     "upload-engine": 60000000,
     "upload-parent": 80000000,
-    "upload-odc": 260000000,
+    "upload-wallet": 260000000,
     "deploy-parent": 40000000,
-    "deploy-odc": 40000000,
+    "deploy-wallet": 40000000,
     "fund": 10000000,
     "execute": 10000000
   },
-  "total_fee_cap_stroops": 500000000
+  "total_fee_cap_stroops": 500000000,
+  "server": "REPLACE_SERVER_G_ADDRESS",
+  "asset": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
 }

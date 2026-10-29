@@ -1,4 +1,6 @@
 import hashlib
+import copy
+import time
 import importlib.util
 import json
 from pathlib import Path
@@ -10,7 +12,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mainnet_release as release
-from stellar_sdk import Keypair, Asset, scval, Account, TransactionBuilder, Network, xdr
+from stellar_sdk import Keypair, Asset, scval, Account, TransactionBuilder, Network, Address, TransactionEnvelope, xdr
 
 
 class ReleaseTests(unittest.TestCase):
@@ -18,16 +20,16 @@ class ReleaseTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
-        keys = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 9)]
+        keys = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 10)]
         self.plan = dict(schema=1, network='mainnet', network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
             source_revision=release.DEFAULT_REVISION, codegen_revision=json.loads((release.ROOT/'scripts/policy-codegen.json').read_text())['revision'],
-            policy_source_digest=release.digest((release.ROOT/'crates/odc/policy/policy.rs').read_bytes()), artifact_manifest='manifest.json',
-            owner=keys[0], admin=keys[1], agent=keys[2], recipient=keys[3], forbidden_recipient=keys[4], admin_members=keys[5:8], policy_instance='01'*32,
-            grant=dict(asset=Asset.native().contract_id(Network.PUBLIC_NETWORK_PASSPHRASE), recipients=[keys[3]], per_transfer=10000, daily_limit=20000, total_limit=20000, max_calls=2, expires_at=2000000000),
+            policy_source_digest=release.digest(release.SMOKE_SOURCE), artifact_manifest='manifest.json',
+            owner=keys[0], admin=keys[1], agent=keys[2], recipient=keys[3], forbidden_recipient=keys[4], admin_members=keys[5:8], server=keys[8], asset=Asset.native().contract_id(Network.PUBLIC_NETWORK_PASSPHRASE), policy_instance='01'*32,
+            grant=dict(recipients=[keys[3]], per_transfer=10000, daily_limit=20000, total_limit=20000, max_calls=2, expires_at=2000000000),
             fund_stroops=20000, payment_stroops=10000, fee_caps_stroops=dict.fromkeys(release.STAGES, 100000000), total_fee_cap_stroops=700000000, artifacts={})
         files = [release.ROOT/n for n in ('Cargo.toml','Cargo.lock','rust-toolchain.toml')]
         files += list((release.ROOT/'crates').rglob('*.rs')) + list((release.ROOT/'crates').rglob('Cargo.toml'))
-        files += [release.ROOT/'scripts'/n for n in ('policy-codegen.json','build-contracts.sh','check-policy-bindings.py','verify-generated-policies.py','upgrade-fixture.json','build-upgrade-fixture.py')]
+        files += [release.ROOT/'scripts'/n for n in ('policy-codegen.json','build-contracts.sh','check-policy-bindings.py','verify-generated-policies.py')]
         manifest = dict(git_revision=release.DEFAULT_REVISION, sources=[dict(path=str(f.relative_to(release.ROOT)),sha256=release.digest(f.read_bytes())) for f in files], artifacts=[])
         hashes = {}
         for name, filename in release.NAMES.items():
@@ -52,7 +54,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(base, self.base.resolve())
 
     def test_reject_artifact_mutation(self):
-        (self.base/release.NAMES['odc']).write_bytes(b'changed')
+        (self.base/release.NAMES['wallet']).write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError,'hash differs'): self.load()
 
     def test_reject_compiler_drift(self):
@@ -75,12 +77,12 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'differ'): self.load()
 
     def test_receipt_uses_plain_addresses(self):
-        expected = release.expected_receipt(self.plan,self.plan['grant']['asset'],dict(nonce=0,revision=0),'ab'*32)
+        expected = release.expected_receipt(self.plan,self.plan['asset'],dict(nonce=0,deployment_version=0),'ab'*32)
         value = scval.to_struct({k: scval.to_address(v) if k in ('from','to','token') else scval.to_bytes(bytes.fromhex(v)) if k=='operation_id' else scval.to_int128(v) if k=='amount' else scval.to_uint64(v) for k,v in expected.items()})
         self.assertEqual(release.receipt_json(release.decode_receipt(value)),expected)
 
     def packet(self):
-        tx = TransactionBuilder(Account(self.plan['owner'],1),Network.PUBLIC_NETWORK_PASSPHRASE,100).add_time_bounds(0,2000000000).append_invoke_contract_function_op(self.plan['grant']['asset'],'balance',[scval.to_address(self.plan['recipient'])]).build()
+        tx = TransactionBuilder(Account(self.plan['owner'],1),Network.PUBLIC_NETWORK_PASSPHRASE,100).add_time_bounds(0,2000000000).append_invoke_contract_function_op(self.plan['asset'],'balance',[scval.to_address(self.plan['recipient'])]).build()
         return dict(network='mainnet',plan_digest=release.digest(release.canonical(self.plan)),unsigned_xdr=tx.to_xdr(),transaction_hash=tx.hash_hex(),stage='fund')
 
     def test_uncertain_settlement_never_becomes_failure(self):
@@ -97,31 +99,22 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):release.write_new(path,{'hash':'replacement'})
         self.assertEqual(json.loads(path.read_text()),{'hash':'original'})
 
-    def test_execute_prepare_records_principal_and_original_effects(self):
-        state = dict(nonce=0,revision=0,calls=0,spent_total=0)
-        binding = dict(module_digest='aa'*32,entrypoint='_execute',argument_schema_digest=release.digest(release.SCHEMA))
-        packet=self.packet()
-        with patch.object(release.wa,'fetch',return_value={}), patch.object(release.wa,'owner_only'), patch.object(release.wa,'admin'), patch.object(release,'require_settled'), patch.object(release,'wallet_state',return_value=(state,binding)), patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']), patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']), patch.object(release,'balance',side_effect=[20000,50]):
-            result=release.prepare(self.plan,self.base,'execute',parent=self.plan['grant']['asset'],wallet=self.plan['grant']['asset'],operation_id='ab'*32)
-        self.assertEqual(result['expected_receipt']['amount'],10000)
-        self.assertEqual(result['expected_effects']['recipient_balance'],50)
-        self.assertEqual(result['transaction_hash'],packet['transaction_hash'])
 
     def test_successful_v4_receipt_and_exact_effects(self):
         packet=self.packet()
-        expected=release.expected_receipt(self.plan,self.plan['grant']['asset'],dict(nonce=0,revision=0),'ab'*32)
+        expected=release.expected_receipt(self.plan,self.plan['asset'],dict(nonce=0,deployment_version=0),'ab'*32)
         value=scval.to_struct({k:scval.to_address(v) if k in ('from','to','token') else scval.to_bytes(bytes.fromhex(v)) if k=='operation_id' else scval.to_int128(v) if k=='amount' else scval.to_uint64(v) for k,v in expected.items()})
-        packet.update(expected_receipt=expected,expected_effects=dict(wallet=self.plan['grant']['asset'],wallet_balance=20000,recipient_balance=50,calls=0,spent_total=0))
+        packet.update(expected_receipt=expected,expected_effects=dict(wallet=self.plan['asset'],wallet_balance=20000,recipient_balance=50,calls=0,spent_total=0))
         meta=SimpleNamespace(v=4,v4=SimpleNamespace(soroban_meta=SimpleNamespace(return_value=value)))
         response=dict(status='SUCCESS',envelopeXdr=packet['unsigned_xdr'],resultMetaXdr='mock',resultXdr=xdr.TransactionResult(xdr.Int64(100),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr())
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,spent_total=10000)), patch.object(release,'balance',side_effect=[10000,10050]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,total=10000)), patch.object(release,'balance',side_effect=[10000,10050]):
             self.assertEqual(release.settle(self.plan,packet)['status'],'success')
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,spent_total=10000)), patch.object(release,'balance',side_effect=[9999]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,total=10000)), patch.object(release,'balance',side_effect=[9999]):
             with self.assertRaisesRegex(ValueError,'balances or counters'):release.settle(self.plan,packet)
 
     def test_funding_settlement_checks_exact_principal_and_fee(self):
         packet=self.packet()
-        packet['expected_effects']=dict(fund_wallet=self.plan['grant']['asset'],wallet_balance=0,amount=20000)
+        packet['expected_effects']=dict(fund_wallet=self.plan['asset'],wallet_balance=0,amount=20000)
         response=dict(status='SUCCESS',envelopeXdr=packet['unsigned_xdr'],resultXdr=xdr.TransactionResult(xdr.Int64(100),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr())
         with patch.object(release,'rpc',return_value=response),patch.object(release,'balance',return_value=20000):
             self.assertEqual(release.settle(self.plan,packet)['fee_charged_stroops'],100)
@@ -141,6 +134,101 @@ class ReleaseTests(unittest.TestCase):
 
     def test_transaction_write_rpc_is_never_admitted(self):
         with self.assertRaisesRegex(ValueError,'Only read'): release.rpc('mainnet','sendTransaction',{})
+
+    def execution_packet(self):
+        wallet=self.plan['asset']
+        state=dict(nonce=0,deployment_version=0)
+        binding=dict(module_digest=self.hashes['wallet'],entrypoint='_execute',argument_schema_digest=release.digest(release.SCHEMA))
+        request=release.execution(self.plan,wallet,state,binding,'ab'*32)
+        tx=TransactionBuilder(Account(self.plan['agent'],1),Network.PUBLIC_NETWORK_PASSPHRASE,100).add_time_bounds(0,int(time.time())+300).append_invoke_contract_function_op(wallet,'execute',[request]).build()
+        root=xdr.SorobanAuthorizedInvocation(xdr.SorobanAuthorizedFunction(xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,contract_fn=tx.transaction.operations[0].host_function.invoke_contract),[])
+        source=xdr.SorobanAuthorizationEntry(xdr.SorobanCredentials(xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT),copy.deepcopy(root))
+        server=xdr.SorobanAuthorizationEntry(xdr.SorobanCredentials(xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_ADDRESS,address=xdr.SorobanAddressCredentials(Address(self.plan['server']).to_xdr_sc_address(),xdr.Int64(42),xdr.Uint32(150),scval.to_void())),root)
+        tx.transaction.operations[0].auth=[source,server]
+        packet=dict(stage='execute',network='mainnet',plan_digest=release.digest(release.canonical(self.plan)),signing_ready=False,parent=wallet,wallet=wallet,operation_id='ab'*32,unsigned_xdr=tx.to_xdr(),transaction_hash=tx.hash_hex(),server_authorization_xdr=server.to_xdr(),expected_receipt=release.expected_receipt(self.plan,wallet,state,'ab'*32),expected_effects=dict(wallet=wallet,wallet_balance=20000,recipient_balance=50,calls=0,spent_total=0))
+        signed=copy.deepcopy(server)
+        credentials=signed.credentials.address
+        payload=xdr.HashIDPreimage(xdr.EnvelopeType.ENVELOPE_TYPE_SOROBAN_AUTHORIZATION,soroban_authorization=xdr.HashIDPreimageSorobanAuthorization(xdr.Hash(Network(Network.PUBLIC_NETWORK_PASSPHRASE).network_id()),credentials.nonce,credentials.signature_expiration_ledger,signed.root_invocation))
+        key=Keypair.from_raw_ed25519_seed(bytes([9])*32)
+        credentials.signature=scval.to_vec([scval.to_struct(dict(public_key=scval.to_bytes(key.raw_public_key()),signature=scval.to_bytes(key.sign(hashlib.sha256(payload.to_xdr_bytes()).digest()))))])
+        return packet,signed,state,binding
+
+    def complete(self,packet,signed,state,binding,mutate=None):
+        def simulate(args,input_data=None):
+            self.assertEqual(args[-2:],['--auth-mode','enforce'])
+            tx=TransactionEnvelope.from_xdr(input_data,Network.PUBLIC_NETWORK_PASSPHRASE)
+            self.assertEqual(tx.signatures,[])
+            tx.transaction.fee+=123
+            tx.transaction.soroban_data=xdr.SorobanTransactionData(xdr.SorobanTransactionDataExt(0),xdr.SorobanResources(xdr.LedgerFootprint([],[]),xdr.Uint32(100),xdr.Uint32(0),xdr.Uint32(0)),xdr.Int64(123))
+            if mutate: mutate(tx)
+            return tx.to_xdr()
+        with patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.wa,'owner_only'),patch.object(release,'rpc',return_value={'sequence':100}),patch.object(release.ca,'cli_run',side_effect=simulate),patch.object(release,'read_contract',return_value={}),patch.object(release,'balance',side_effect=[20000,50]):
+            return release.complete_execute(self.plan,packet,signed.to_xdr())
+
+    def test_execute_prepare_retains_unsigned_server_request_and_original_effects(self):
+        packet,_,state,binding=self.execution_packet()
+        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']),patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']) as prepare,patch.object(release,'balance',side_effect=[20000,50]),patch.object(release,'read_contract',return_value={}),patch.object(release,'rpc',return_value={'sequence':100}):
+            result=release.prepare(self.plan,self.base,'execute',parent=self.plan['asset'],wallet=self.plan['asset'],operation_id='ab'*32)
+        self.assertFalse(result['signing_ready'])
+        self.assertEqual(result['expected_effects']['recipient_balance'],50)
+        self.assertEqual(result['expected_receipt']['amount'],10000)
+        self.assertEqual(prepare.call_args.kwargs['candidate'],self.plan['server'])
+        tx=TransactionEnvelope.from_xdr(result['unsigned_xdr'],Network.PUBLIC_NETWORK_PASSPHRASE)
+        self.assertEqual(tx.hash_hex(),result['transaction_hash'])
+        self.assertEqual(release.server_entry(tx,self.plan,signed=False).to_xdr(),result['server_authorization_xdr'])
+
+    def test_completion_rejects_changed_original_balance_snapshot(self):
+        packet,signed,state,binding=self.execution_packet()
+        packet['expected_effects']['wallet_balance']+=1
+        with self.assertRaisesRegex(ValueError,'balances or usage'):self.complete(packet,signed,state,binding)
+
+    def test_exact_server_authorization_is_verified_and_enforced_before_unsigned_agent_export(self):
+        packet,signed,state,binding=self.execution_packet()
+        result=self.complete(packet,signed,state,binding)
+        self.assertTrue(result['signing_ready'])
+        self.assertEqual(result['authorization_request_hash'],packet['transaction_hash'])
+        self.assertEqual(result['fee_bid_stroops'],223)
+        self.assertFalse(packet['signing_ready'])
+        tx=TransactionEnvelope.from_xdr(result['unsigned_xdr'],Network.PUBLIC_NETWORK_PASSPHRASE)
+        self.assertEqual(tx.signatures,[])
+        self.assertEqual(release.server_entry(tx,self.plan,signed=True),signed)
+
+    def test_server_entry_rejects_changed_scope_nonce_expiry_key_and_signature(self):
+        for field in ['nonce','expiry','scope','key','signature']:
+            with self.subTest(field=field):
+                packet,signed,state,binding=self.execution_packet()
+                cred=signed.credentials.address
+                if field=='nonce': cred.nonce=xdr.Int64(43)
+                elif field=='expiry': cred.signature_expiration_ledger=xdr.Uint32(151)
+                elif field=='scope': signed.root_invocation.function.contract_fn.function_name=xdr.SCSymbol(b'recover')
+                else:
+                    value=scval.to_native(cred.signature)[0]
+                    value['public_key' if field=='key' else 'signature']=bytes([0])*(32 if field=='key' else 64)
+                    cred.signature=scval.to_vec([scval.to_struct({k:scval.to_bytes(v) for k,v in value.items()})])
+                with self.assertRaises(ValueError):self.complete(packet,signed,state,binding)
+
+    def test_enforce_simulation_cannot_change_principal_authorization_or_exceed_cap(self):
+        for field in ['fee','auth','scope']:
+            with self.subTest(field=field):
+                packet,signed,state,binding=self.execution_packet()
+                def mutate(tx):
+                    if field=='fee':tx.transaction.fee=self.plan['fee_caps_stroops']['execute']+1
+                    elif field=='auth':tx.transaction.operations[0].auth=[]
+                    else:tx.transaction.operations[0].host_function.invoke_contract.function_name=xdr.SCSymbol(b'recover')
+                with self.assertRaises(ValueError):self.complete(packet,signed,state,binding,mutate)
+
+    def test_unsigned_server_request_is_never_a_settlement_packet(self):
+        packet,_,_,_=self.execution_packet()
+        with patch.object(release,'rpc',side_effect=AssertionError('must reject before network')):
+            with self.assertRaisesRegex(ValueError,'Complete'):release.settle(self.plan,packet)
+
+    def test_common_config_selects_all_smoke_rules_and_native_grant_types(self):
+        config=release.wallet_config(self.plan)
+        self.assertEqual(config['rules'],release.RULES)
+        self.assertEqual(config['server'],self.plan['server'])
+        self.assertFalse(config['x402_enabled'])
+        self.assertEqual(xdr.SCVal.from_xdr(config['grant']['per_transfer']).type,xdr.SCValType.SCV_I128)
+        self.assertEqual(xdr.SCVal.from_xdr(config['grant']['max_calls']).type,xdr.SCValType.SCV_U64)
 
 
 if __name__=='__main__': unittest.main()

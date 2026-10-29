@@ -1,51 +1,56 @@
 # Mainnet contract preparation
 
-`mainnet_release.py` prepares one bounded ODC smoke deployment. It never signs, submits, funds or retries transactions. Python dependencies and Stellar CLI versions follow [administration](admin.md). Use a private directory for plans and packets. Never place seeds in these files.
+`mainnet_release.py` prepares bounded, unsigned Stellar release packets. It never signs or broadcasts. Keep plans, authorization requests and packets in a private directory. Do not place keys or seeds in them. Python and CLI versions follow [administration](admin.md).
 
-The tool admits default contracts at `304bbd61dd211f516d7449716a980fe02fd87194` only. It checks every build-source digest, compiler pin, reviewed artifact manifest and the three default Wasm hashes. Custom policies and test-feature artifacts require a separately reviewed release. The default policy returns `Ok(())`. Owner grant limits and shared-engine veto still apply.
+The tool pins contract source `b5a5d4b13e9162dc9034df85442ea2251f65a845`, compiler source `9e57f935807da615bc1258f6b4b72fc40be64386`, every build input and the exact engine, parent and CommonPolicyEngine Wasm hashes. The smoke wallet explicitly selects recipient, transaction, daily, total, call and expiry rules. Its source digest identifies the literal six-rule policy in the tool. The separate parent manages a shared checker; it has no custody authority over this wallet.
 
-## Prepare the plan
+## Plan and accounts
 
-Build the selected revision with `scripts/build-contracts.sh`. Generate its manifest with `python scripts/artifacts.py --output /PRIVATE/manifest.json`. A tooling revision descended from the selected contract revision is admitted when every build-source digest still matches that contract revision. Copy [the plan template](../scripts/mainnet-plan.example.json) to that directory. Replace all `REPLACE` values. Use absolute artifact paths or paths relative to the plan. Set expiry to a reviewed future Unix time.
+Build the pinned contracts with `scripts/build-contracts.sh`. Write the manifest with `python scripts/artifacts.py --output /PRIVATE/manifest.json`. A later tooling revision is admitted only when every contract build input still matches the pinned source. Copy [the plan template](../scripts/mainnet-plan.example.json), replace its placeholders and select a future grant expiry. Artifact paths can be absolute or relative to the plan.
 
-The owner and agent must each have only their native master key active. The parent administrator must have exactly three weight-one Ed25519 members and thresholds 2/2/2. Keep these accounts separate. Fund them independently before preparation. Keep each source above its classic reserve plus all assigned stage fee caps. Keep the owner above those amounts plus the funding principal. Check liabilities and other pending transactions separately. Preflight checks authority but does not calculate spendable balances. This tool does not create accounts or change signers.
+Use separate owner, agent, server and recipient accounts. Owner, agent and server each require only their native master key. The parent administrator requires three distinct weight-one Ed25519 members and thresholds 2/2/2. The server co-signer is separate from the parent-managed checker. The tool checks these authority profiles and does not change them.
 
-Example fee caps total 50 XLM. They are planning ceilings, not fee quotations. Payment principal is 0.001 XLM, with initial ODC funding capped at 0.002 XLM. Review all caps before use. Classic reserves and other account funding remain separate.
+Fund the accounts independently. Keep each source above its classic reserve and assigned stage fee caps. The owner also needs the funding principal. Check liabilities and pending transactions separately; preflight does not calculate spendable balances. The example caps total 50 XLM. Initial wallet funding is capped at 0.002 XLM and the single smoke payment at 0.001 XLM. These are ceilings, not fee quotations.
 
 ```sh
 python scripts/mainnet_release.py check --plan /PRIVATE/plan.json --allow-mainnet --output /PRIVATE/check.json
 python scripts/mainnet_release.py preflight --plan /PRIVATE/plan.json --allow-mainnet --output /PRIVATE/preflight.json
 ```
 
-`check` is offline. Its output gives the unique packet directory for the plan digest. `preflight` reads public account and network state. Every CLI request uses the explicit endpoint and passphrase selected by the tool.
+`check` is offline and reports the unique packet directory. `preflight` reads public network and account state. Every CLI request uses the selected RPC endpoint and network passphrase.
 
-## Deployment and smoke execution
+## Prepare and reconcile
 
-Obtain explicit approval before exporting private Wasm or transaction arguments to the public RPC. Add `--allow-payload-export` only after that approval. This flag authorizes preparation, not signing or payment.
+Obtain approval before exporting private Wasm or transaction arguments to a public RPC. Use `--allow-payload-export` only after that approval. It permits preparation, not signing or payment.
 
-Prepare stages in this order: `upload-engine`, `upload-parent`, `upload-odc`, `deploy-parent`, `deploy-odc`, `fund`, `execute`. Each stage requires successful settlement of all previous original packets. The parent constructor creates the engine. Select `--parent` from the settled parent packet and `--wallet` from the settled ODC packet.
+Stages are `upload-engine`, `upload-parent`, `upload-wallet`, `deploy-parent`, `deploy-wallet`, `fund`, and `execute`. Each requires successful settlement of previous original packets. The parent constructor creates its checker. The Common wallet constructor receives the owner, agent, server, immutable XLM asset, source identity, selected rules and Grant. It disables x402 for this direct-transfer smoke plan.
 
 ```sh
 python scripts/mainnet_release.py prepare --plan /PRIVATE/plan.json --allow-mainnet --allow-payload-export --stage upload-engine --output /PRIVATE/packets-PLAN_DIGEST/upload-engine.json
 python scripts/mainnet_release.py settle --plan /PRIVATE/plan.json --allow-mainnet --prepared /PRIVATE/packets-PLAN_DIGEST/upload-engine.json --output /PRIVATE/upload-engine-status.json
 ```
 
-Between these commands, inspect the first packet's `unsigned_xdr`, exact Wasm/contract identity, constructor arguments, fee, expiry and authorization tree. Copy its `unsigned_xdr` value to a private XDR file. Use an independent secure wallet to authorize that exact packet. Complete any required Soroban authorization entries. Archive the signed bytes before the operator broadcasts them. These scripts provide no broadcast command.
+Between preparation and settlement checks, review the exact unsigned packet with an independent secure wallet. Archive signed bytes before an operator broadcasts them. These tools provide no broadcast operation. For funding and execution, provide `--parent` and `--wallet` from their original settled deployment packets.
 
-Do not overwrite packets or prepare a replacement under the same plan. One immutable packet exists per stage. The sum of the seven fee bids cannot exceed the plan cap. One funding packet and one execution packet limit the smoke principal. A copied plan or another signing tool is outside this local cap. An expired, failed or uncertain packet requires explicit reconciliation and a separately reviewed plan before replacement.
+Each stage has one immutable packet path. Do not overwrite a packet or prepare a replacement under the same plan. Preserve expired, failed and uncertain packets, reconcile them, and obtain a separately reviewed plan before replacement. Copied plans and other signing tools are outside this local cap.
 
-For `deploy-odc`, add `--parent C...`. For `fund` and `execute`, add both `--parent C...` and `--wallet C...`. Execution also requires a retained nonzero 32-byte `--operation-id HEX`. Use the unique stage packet path printed by `check`. Deploy sequentially because constructors need settled dependencies and each packet expires after five minutes.
+## Two-party execution authorization
 
-After funding settles, prepare rejection simulations before the single real smoke execution:
+Execution requires the agent's transaction signature and separate native server authorization. It uses two preparation steps:
 
 ```sh
-python scripts/mainnet_release.py simulate-e2e --plan /PRIVATE/plan.json --allow-mainnet --allow-payload-export --parent C... --wallet C... --operation-id HEX --output /PRIVATE/e2e.json
+python scripts/mainnet_release.py prepare --plan /PRIVATE/plan.json --allow-mainnet --allow-payload-export --stage execute --parent C_PARENT --wallet C_WALLET --operation-id HEX --output /PRIVATE/packets-PLAN_DIGEST/execute-auth.json
+python scripts/mainnet_release.py complete-execute --plan /PRIVATE/plan.json --allow-mainnet --allow-payload-export --prepared /PRIVATE/packets-PLAN_DIGEST/execute-auth.json --server-auth /PRIVATE/signed-server-auth.xdr --output /PRIVATE/packets-PLAN_DIGEST/execute.json
 ```
 
-This checks a positive receipt, forbidden recipient, excess amount, stale revision and expiry. After execution settles, use a new operation ID and `--replay-id ORIGINAL_HEX` to test replay rejection. No simulated effects settle or extend TTL. Repeated execution simulations require sufficient remaining grant capacity.
+The first packet is not ready for transaction signing. An independent server signer must review and sign its exact `server_authorization_xdr` using the plan's network passphrase. Return the complete signed Soroban authorization entry, without changing its invocation, nonce or ledger expiry. The tool never requests a server key.
 
-`settle` queries the original transaction hash. `NOT_FOUND` and other uncertain states remain unresolved. Never release reservations or sign replacements from those results. Successful settlement reports the charged fee and rejects charges above the prepared bid or stage cap. Funding requires zero initial ODC XLM balance and checks its exact settled increase. Successful execution checks the exact receipt, current wallet/recipient XLM balances and calls/total counters against the prepared snapshot. Concurrent owner activity can prevent that exact comparison and needs reconciliation. Use a new status-output filename for each observation.
+Completion verifies the server signature, current signer profiles, original transaction, wallet state, exact principal and authorization window. It then runs an enforce-mode simulation with the signed server entry. Only resource data and a bounded fee can change. The result still has no transaction-envelope signatures. The agent can review and sign that final packet through its secure wallet. Do not sign the earlier authorization request as a transaction.
 
-## Release acceptance
+## Simulations and settlement
 
-These commands cover ODC contract deployment and a direct transfer smoke test. Repeat integrated native and ODC Testnet settlement/restart acceptance at the selected SDK, CLI, service and app revisions before a release decision. Formal audit, lifetime maintenance, account reserves and owner approval remain separate release requirements. Monitor every code/state dependency TTL. A read simulation does not renew it. Follow [administration](admin.md) for submitted TTL maintenance and restoration.
+After funding, use `simulate-e2e` with the parent, wallet and a nonzero operation ID. It checks a positive receipt, forbidden recipient, excessive amount, stale deployment version and expiry. After execution, a fresh operation ID plus `--replay-id ORIGINAL_HEX` checks replay rejection. These record-mode simulations do not establish actual signatures or settlement; completion separately enforces the server signature.
+
+`settle` queries the original transaction hash. Missing or uncertain results stay unresolved. Success requires the exact receipt and a charged fee within the original bid and stage cap. Funding checks the wallet's exact balance increase. Execution checks wallet and recipient balances plus Common call and total counters. Concurrent owner activity can prevent exact comparison and requires reconciliation. Use a new status-output filename for each observation.
+
+Read simulations do not renew TTL. Follow [administration](admin.md) for submitted lifetime maintenance and restoration. Network deployment and live settlement require separate operator authorization.
