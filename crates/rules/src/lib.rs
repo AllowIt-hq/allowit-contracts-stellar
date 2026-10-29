@@ -31,6 +31,54 @@ fn limit(env: &Env, state: &EngineState, name: &str) -> Result<i128> {
         Ok(value)
     }
 }
+/// Validate the native owner parameters required by one canonical zero-parameter rule.
+/// Zero call capacity and an empty recipient list are valid deny-all configurations.
+pub fn validate_rule(
+    env: &Env,
+    rule: &soroban_sdk::Symbol,
+    grant: &allowit_wallet_protocol::Grant,
+) -> Result<()> {
+    let state = EngineState {
+        grant: grant.clone(),
+        spent: allowit_wallet_protocol::Spent::new(env),
+    };
+    for (name, parameter) in [
+        ("transaction_cap", "per_transfer"),
+        ("daily_cap", "daily_limit"),
+        ("total_cap", "total_limit"),
+    ] {
+        if *rule == soroban_sdk::Symbol::new(env, name) {
+            limit(env, &state, parameter)?;
+            return Ok(());
+        }
+    }
+    for (name, parameter) in [("call_cap", "max_calls"), ("expiry", "expires_at")] {
+        if *rule == soroban_sdk::Symbol::new(env, name) {
+            grant_u64(env, &state, parameter)?;
+            return Ok(());
+        }
+    }
+    if *rule == soroban_sdk::Symbol::new(env, "recipient") {
+        Vec::<Address>::try_from_val(
+            env,
+            &grant
+                .get(key(env, "recipients"))
+                .ok_or(Error::InvalidParameter)?,
+        )
+        .map_err(|_| Error::InvalidParameter)?;
+    } else if *rule == soroban_sdk::Symbol::new(env, "token") {
+        String::try_from_val(
+            env,
+            &grant
+                .get(key(env, "token"))
+                .ok_or(Error::InvalidParameter)?,
+        )
+        .map_err(|_| Error::InvalidParameter)?;
+    } else {
+        return Err(Error::InvalidParameter);
+    }
+    Ok(())
+}
 fn spent_amount(env: &Env, state: &EngineState, name: &str) -> Result<i128> {
     let Some(value) = state.spent.get(key(env, name)) else {
         return Ok(0);

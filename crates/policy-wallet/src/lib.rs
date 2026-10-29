@@ -225,6 +225,55 @@ fn token_label(env: &Env, asset: &Address) -> String {
         token::Client::new(env, asset).symbol()
     }
 }
+// A transfer to a classic issuer burns its asset. Derive the immutable SAC identity
+// from the cached symbol and candidate issuer without reentering the active SAC.
+fn issuer_destination(env: &Env, state: &State, to: &Address) -> bool {
+    let Ok(issuer) = public_key(env, to) else {
+        return false;
+    };
+    let len = state.token.len() as usize;
+    if len == 0 || len > 48 {
+        return false;
+    }
+    let mut encoded = [0u8; 48];
+    state.token.copy_into_slice(&mut encoded[..len]);
+    let mut code = [0u8; 12];
+    let mut cursor = 0;
+    let mut size = 0;
+    while cursor < len {
+        if size == 12 {
+            return false;
+        }
+        code[size] = if encoded[cursor] == b'\\' {
+            if cursor + 3 >= len || encoded[cursor + 1] != b'x' {
+                return false;
+            }
+            let hex = |b| match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                _ => None,
+            };
+            let (Some(high), Some(low)) = (hex(encoded[cursor + 2]), hex(encoded[cursor + 3]))
+            else {
+                return false;
+            };
+            cursor += 4;
+            high * 16 + low
+        } else {
+            let b = encoded[cursor];
+            cursor += 1;
+            b
+        };
+        size += 1;
+    }
+    // SEP-11 keeps at least five bytes for AlphaNum12, including escaped zeros.
+    let (kind, width) = if size <= 4 { (1u32, 4) } else { (2u32, 12) };
+    let mut asset = Bytes::from_array(env, &kind.to_be_bytes());
+    asset.append(&Bytes::from_slice(env, &code[..width]));
+    asset.append(&Bytes::from_array(env, &[0; 4]));
+    asset.append(&issuer.into());
+    env.deployer().with_stellar_asset(asset).deployed_address() == state.asset
+}
 fn move_tokens(env: &Env, asset: &Address, to: &Address, amount: i128) -> Result<(), Error> {
     let client = token::Client::new(env, asset);
     let from = env.current_contract_address();
@@ -284,7 +333,7 @@ fn admit<P: Policy>(
     if args.amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if args.to == env.current_contract_address() {
+    if args.to == env.current_contract_address() || issuer_destination(env, &state, &args.to) {
         return Err(Error::InvalidRecipient);
     }
     let nonce = state.nonce.checked_add(1).ok_or(Error::Overflow)?;
@@ -307,6 +356,7 @@ fn admit<P: Policy>(
         policy_instance: state.policy_instance.clone(),
     };
     let initial = storage.load().map_err(|_| Error::InvalidState)?;
+    P::validate(env, &state.rules, &state.grant)?;
     let final_spent = P::check(
         env,
         request,
@@ -468,7 +518,7 @@ pub fn recover(env: &Env, recipient: Address, amount: i128) -> Result<(), Error>
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if recipient == env.current_contract_address() {
+    if recipient == env.current_contract_address() || issuer_destination(env, &state, &recipient) {
         return Err(Error::InvalidRecipient);
     }
     move_tokens(env, &state.asset, &recipient, amount)
@@ -575,26 +625,13 @@ impl Policy for Simple {
 pub struct Common;
 impl Policy for Common {
     const KIND: &'static str = "common_policy_engine";
-    fn validate(env: &Env, rules: &Vec<Symbol>, _grant: &Grant) -> Result<(), Error> {
-        if rules.is_empty() {
-            return Err(Error::InvalidGrant);
-        }
+    fn validate(env: &Env, rules: &Vec<Symbol>, grant: &Grant) -> Result<(), Error> {
         for (i, rule) in rules.iter().enumerate() {
-            if ![
-                "transaction_cap",
-                "daily_cap",
-                "total_cap",
-                "call_cap",
-                "recipient",
-                "expiry",
-                "token",
-            ]
-            .iter()
-            .any(|name| rule == Symbol::new(env, name))
-                || rules.iter().take(i).any(|prior| prior == rule)
-            {
+            if rules.iter().take(i).any(|prior| prior == rule) {
                 return Err(Error::InvalidGrant);
             }
+            allowit_policy_rules::validate_rule(env, &rule, grant)
+                .map_err(|_| Error::InvalidGrant)?;
         }
         Ok(())
     }
@@ -604,7 +641,6 @@ impl Policy for Common {
         mut state: EngineState,
         rules: &Vec<Symbol>,
     ) -> Result<Spent, Error> {
-        Self::validate(env, rules, &state.grant)?;
         let grant = state.grant.clone();
         for rule in rules.iter() {
             let result = if rule == Symbol::new(env, "transaction_cap") {

@@ -24,8 +24,9 @@ deploys an engine with no constructor arguments. Deployment uses the parent's ad
 all-zero 32-byte salt. The engine executable is `ExternalRef { owner: parent_address, tag: "engine" }`.
 The host resolves that reference to the selected Wasm. Failure rolls back creation and state writes.
 
-The parent stores no signing key, token balance accounting or wallet policy. Wallets select the
-engine address separately. Changing the parent owner does not change a wallet owner.
+The parent stores no signing key, token balance accounting or wallet policy. Simple, Common and
+Custom wallets run their checks locally and have no shared-engine address field. The parent manages
+the separate shared-checker interface. Changing the parent owner does not change a wallet owner.
 
 ## Calls and authorization
 

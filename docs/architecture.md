@@ -19,15 +19,14 @@ complete policy semantics. Wallet policies run their selected checks locally, wi
 
 Common's `rules` is an ordered list of zero-extra-parameter function names: `transaction_cap`,
 `daily_cap`, `total_cap`, `call_cap`, `recipient`, `expiry`, and `token`. Each receives the normalized
-request, owner Grant and current Spent. There are no extra authored arguments. Empty, unknown or
-duplicate selector lists reject. The wallet enforces only the rules that the owner selects explicitly.
+request, owner Grant and current Spent. There are no extra authored arguments. Unknown or duplicate selectors reject. An empty list explicitly selects no local business checks, like Simple. The wallet enforces only the rules that the owner selects explicitly.
 
 | Rule | Required Grant values | Updated Spent |
 | --- | --- | --- |
 | `transaction_cap` | Positive `per_transfer` in native units | None |
 | `daily_cap` | Positive `daily_limit` in native units | UTC `day`, `daily`, `daily_operation` |
 | `total_cap` | Positive `total_limit` in native units | `total`, `total_operation` |
-| `call_cap` | Positive U64 `max_calls` | `calls`, `call_operation` |
+| `call_cap` | U64 `max_calls`; zero denies every call | `calls`, `call_operation` |
 | `recipient` | `recipients: Vec<Address>` | None |
 | `expiry` | `expires_at: u64`, exclusive Unix seconds | None |
 | `token` | `token: String`, authenticated asset label | None |
@@ -58,7 +57,7 @@ The wallet never treats archival as a fresh allowance. Normal calls do not migra
 The kernel checks the complete invocation, installed module and schema, source wallet, immutable
 asset, positive amount, recipient, pause, expiry, deployment version, execution nonce and replay.
 Direct execution requires native authorization from both agent and server. Sender debit and
-recipient credit must match the exact transfer. Usage, nonce, receipt and effects commit atomically.
+recipient credit must match the exact transfer. Delegated execution and recovery reject issuer destinations because these burn tokens. The owner can explicitly burn through `invoke`. Usage, nonce, receipt and effects commit atomically.
 
 `policy_binding()` reports `engine_kind`, `contract_version`, logical identity, exact module hash,
 source digest, argument schema digest and private `_execute` selector. Its tier identifier does not
@@ -67,10 +66,12 @@ replace verification of the executable hash. `policy_spent()` returns the full r
 ## x402 and owner operations
 
 The owner explicitly enables x402. Both agent and server must then be G-addresses. The wallet derives
-their Ed25519 public keys and requires both signatures over SHA-256 of XDR
+their raw Ed25519 master public keys and requires both signatures over SHA-256 of XDR
 `(Symbol("allowit_wallet_v1"), host_payload, execution)`. The host payload binds network, native
 nonce, expiry and invocation tree. The hook admits one exact installed-SAC transfer context and
 uses the same local policy, replay and usage checks as direct execution. The wallet caches asset metadata before the active token call. Native SAC effects and hook state changes roll back together.
+
+Changing a classic account signer or master weight does not revoke this explicit raw-key x402 delegation. The wallet owner must disable x402, pause the wallet, or replace the agent/server address through `deploy_policy`. Direct `execute` follows native account signer thresholds.
 
 `deploy_policy` atomically signs owner, agent, server, source digest, rules, Grant, x402 enablement,
 optional wallet Wasm hash and the next deployment version. A changed owner must accept the packet.
@@ -84,8 +85,7 @@ cannot use that path. Native transaction sequencing and Soroban authorization no
 of an owner's signed authorization. No automatic shared checker participates in owner operations.
 
 Wallet release/layout, owner deployment sequence and parent administration version are distinct.
-Unknown stored formats reject. For a real incompatible layout, pause, run an explicit migration,
-install compatible wallet code and then unpause. Contract upgrades require explicit owner authorization.
+Unknown stored formats reject. Simple, Common and Custom share the version-1 layout. Tier changes must install matching rules and source digest; delegated admission validates the active tier after an upgrade. For an incompatible layout, the owner must select reviewed code that reads the retained layout and performs the explicit migration. Installing code that cannot read that layout can disable owner recovery and upgrades. Pausing alone does not prevent this. Contract upgrades require explicit owner authorization.
 
 ## Classic Stellar accounts
 

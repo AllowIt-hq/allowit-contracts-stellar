@@ -14,6 +14,8 @@ Select `--network testnet` explicitly. Mainnet preparation additionally requires
 
 ## Native wallet and engine administrator
 
+The classic CLI retains `--engine` for its service co-signer. This means the wallet `server` role, not the parent-managed shared checker address.
+
 The native wallet owner is its account master key. Setup admits only an existing account with master weight 1, no other signers and default thresholds. It atomically adds agent/engine weight 1, changes owner weight to 3, and sets thresholds 2/2/3. Setup never silently replaces existing authority. Signer verification rejects unexpected signers, hash/preauthorized signers and threshold drift.
 
 ```sh
@@ -62,7 +64,7 @@ Select `allowit_simple_policy_engine.wasm`, `allowit_common_policy_engine.wasm`,
 `allowit_custom_policy.wasm`. Config contains exactly `owner`, `agent`, `server`, `asset`,
 `policy_instance`, `source_digest`, `rules`, `grant`, and `x402_enabled`.
 The asset is an immutable native SAC. Identity and source digests are nonzero 32-byte hex strings.
-`rules` contains the owner's ordered Common function names. Simple and Custom use an empty list.
+`rules` contains the owner's ordered Common function names. An empty Common list selects no local business checks. Simple and Custom use an empty list.
 The Custom sample's source digest must match its compiled source.
 
 Grant JSON maps names to canonical base64 SCVal XDR. The tool converts these exact values to the
