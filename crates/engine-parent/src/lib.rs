@@ -1,9 +1,15 @@
 #![no_std]
+//! Owns the shared engine's executable reference and its independent administration authority.
+//! Wallet custody, wallet owner operations and server signing keys are outside this contract.
 use soroban_sdk::{
     Address, BytesN, ContractExecutable, ContractExecutableRef, Env, String, contract,
     contracterror, contractimpl, contracttype,
 };
 
+// Keep the native u32 key unchanged. Renaming this constant does not move existing state.
+const STATE_KEY: u32 = 0;
+
+/// Parent configuration stored under STATE_KEY in this contract's instance storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParentState {
@@ -19,29 +25,36 @@ pub struct ParentState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
+    /// The supplied administration version differs from the stored version.
     StaleVersion = 1,
+    /// The u64 administration version cannot advance.
     Overflow = 2,
+    /// A handoff selects the parent or its managed engine as administrator.
     InvalidAdmin = 3,
 }
 
 #[contract]
 pub struct EngineParent;
 
+/// Stable executable-reference tag owned by this parent. It is not a custody contract identifier.
 fn tag(env: &Env) -> String {
     String::from_str(env, "engine")
 }
+/// Initialize constructor state or read it, then maintain the parent instance and code lifetime.
 fn load(env: &Env, initial: Option<ParentState>) -> ParentState {
     if let Some(state) = initial {
-        env.storage().instance().set(&0u32, &state);
+        env.storage().instance().set(&STATE_KEY, &state);
     }
     let ttl = env.storage().max_ttl();
     env.deployer()
         .extend_ttl(env.current_contract_address(), ttl / 2, ttl);
-    env.storage().instance().get(&0u32).unwrap()
+    env.storage().instance().get(&STATE_KEY).unwrap()
 }
+/// Commit state after load and authorization; no second lifetime update is needed.
 fn save(env: &Env, state: &ParentState) {
-    env.storage().instance().set(&0u32, state);
+    env.storage().instance().set(&STATE_KEY, state);
 }
+/// Authenticate the current owner and advance one administration version without touching the engine.
 fn authorize(env: &Env, version: u64) -> Result<ParentState, Error> {
     let mut state = load(env, None);
     state.owner.require_auth();
@@ -65,7 +78,9 @@ mod engine {
 
 #[contractimpl]
 impl EngineParent {
-    /// Create the shared veto engine and its independent upgrade authority.
+    /// Create the shared engine and its independent upgrade authority.
+    /// The engine uses this parent's "engine" executable reference and the all-zero deployment salt.
+    /// Its constructor receives no arguments. The parent starts at administration version zero.
     ///
     /// # Parameters
     /// - `env`: Host-provided execution environment; callers do not serialize this argument.
@@ -73,7 +88,7 @@ impl EngineParent {
     /// - `engine_wasm`: Uploaded engine Wasm hash selected by that authority.
     ///
     /// # Returns
-    /// Returns no value. Invalid roles or deployment failure roll back creation.
+    /// Returns no value. Failed owner authorization or deployment rolls back the reference and state writes.
     pub fn __constructor(env: Env, owner: Address, engine_wasm: BytesN<32>) {
         owner.require_auth();
         env.executable_refs().set(&tag(&env), &engine_wasm);
@@ -103,7 +118,7 @@ impl EngineParent {
     /// - `env`: Host-provided execution environment; callers do not serialize this argument.
     ///
     /// # Returns
-    /// Returns administrator, engine address and administrative version; no custody authority is granted.
+    /// Returns owner, engine address and administrative version. It renews parent lifetime without reading engine dependencies.
     pub fn state(env: Env) -> ParentState {
         load(&env, None)
     }
@@ -114,7 +129,7 @@ impl EngineParent {
     /// - `env`: Host-provided execution environment; callers do not serialize this argument.
     ///
     /// # Returns
-    /// Returns the shared veto address. It does not approve wallet spending.
+    /// Returns the shared engine address after renewing its instance, referenced code and executable-reference entry. It grants no spending authority.
     pub fn engine(env: Env) -> Address {
         engine::load(&env, load(&env, None).engine)
     }
@@ -127,7 +142,7 @@ impl EngineParent {
     /// - `version`: Exact current parent administrative version, not a policy deployment or engine release version.
     ///
     /// # Returns
-    /// Returns success after one administrative version increment and atomic reference update.
+    /// Returns success after one version increment and reference update. The engine address and instance data stay unchanged.
     pub fn upgrade_engine(env: Env, new_hash: BytesN<32>, version: u64) -> Result<(), Error> {
         let state = authorize(&env, version)?;
         // The host rejects hashes that do not identify uploaded Wasm.
@@ -164,7 +179,7 @@ impl EngineParent {
     /// - `version`: Exact current parent administrative version.
     ///
     /// # Returns
-    /// Returns success after atomic code update and administrative version increment, or rolls back both.
+    /// Returns success after the invocation commits the new code and version. The selected executable must understand the retained state layout.
     pub fn upgrade_parent(env: Env, new_hash: BytesN<32>, version: u64) -> Result<(), Error> {
         let state = authorize(&env, version)?;
         env.deployer()

@@ -40,11 +40,11 @@ jobs:
           rustup target add wasm32v1-none --toolchain 1.98.0
       - name: Build all contract Wasm
         run: scripts/build-contracts.sh
-      - name: ODC and shared-engine containment
+      - name: Policy wallets and shared-engine containment
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p allowit-odc -p allowit-engine-parent -p allowit-wallet-engine -- --nocapture 2>&1 | tee "$RUNNER_TEMP/wallet-mvp.log"
+          cargo test --locked -p allowit-policy-wallet -p allowit-simple-policy-engine -p allowit-common-policy-engine -p allowit-custom-policy -p allowit-engine-parent -p allowit-wallet-engine -- --nocapture 2>&1 | tee "$RUNNER_TEMP/wallet-mvp.log"
           grep -E "[1-9][0-9]* passed; 0 failed" "$RUNNER_TEMP/wallet-mvp.log"
       - name: Admin transaction tooling
         run: |

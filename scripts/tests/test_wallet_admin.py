@@ -152,12 +152,12 @@ class NativeAdmin(unittest.TestCase):
 
 class ContractAdmin(unittest.TestCase):
     def test_exact_allowlist_and_types(self):
-        self.assertEqual(ca.checked_args("set_pause", {"paused": True, "deployment_version": 3}, "odc")["paused"], True)
+        self.assertEqual(ca.checked_args("set_pause", {"paused": True, "deployment_version": 3}, "wallet")["paused"], True)
         for value in ({"paused": "false", "deployment_version": 3}, {"paused": True, "deployment_version": True}, {"paused": True, "deployment_version": 3, "target": KEYS[1]}):
             with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
-                ca.checked_args("set_pause", value, "odc")
-        self.assertNotIn("transfer", ca.ODC)
-        self.assertNotIn("approve", ca.ODC)
+                ca.checked_args("set_pause", value, "wallet")
+        self.assertNotIn("transfer", ca.WALLET)
+        self.assertNotIn("approve", ca.WALLET)
         self.assertNotIn("set_grant", ca.PARENT)
 
     def test_generic_grant_preserves_native_types_and_rejects_noncanonical_values(self):
@@ -299,7 +299,7 @@ class ContractAdmin(unittest.TestCase):
         with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
             ca.checked_args("set_admin", {"owner": contract, "version": 0}, "parent")
         with self.assertRaises(ValueError):
-            ca.checked_args("recover", {"recipient": KEYS[1], "amount": 0, "version": 0}, "odc")
+            ca.checked_args("recover", {"recipient": KEYS[1], "amount": 0, "version": 0}, "wallet")
 
     def test_cli_address_errors_do_not_echo_input(self):
         scripts = Path(__file__).resolve().parents[1]
@@ -354,21 +354,22 @@ class ContractAdmin(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ca.command(options)
 
-    def test_odc_constructor_requires_explicit_nonzero_policy_identity(self):
+    def test_wallet_constructor_requires_explicit_nonzero_policy_identity(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "odc.wasm"
+            path = Path(directory) / "wallet.wasm"
             path.write_bytes(b"reviewed-artifact")
             asset = StrKey.encode_contract(bytes([2]) * 32)
             engine = StrKey.encode_contract(bytes([3]) * 32)
             values = {"custom": scval.to_bytes(b"preserved").to_xdr()}
-            args = SimpleNamespace(action="deploy-odc", network="testnet", allow_mainnet=False,
-                source=KEYS[0], owner=KEYS[0], agent=KEYS[1], engine=engine, asset=asset,
-                wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
-                grant=json.dumps(values), policy_instance="11" * 32)
+            config = {"owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "asset": asset,
+                "source_digest": "22" * 32, "rules": [], "grant": values, "x402_enabled": False, "policy_instance": "11" * 32}
+            args = SimpleNamespace(action="deploy-wallet", network="testnet", allow_mainnet=False,
+                source=KEYS[0], config=json.dumps(config), wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest())
             command = ca.command(args)
-            self.assertEqual(command[command.index("--policy-instance") + 1], "11" * 32)
+            self.assertEqual(json.loads(command[command.index("--config") + 1])["policy_instance"], "11" * 32)
             for identity in (None, "", "00" * 32, "not-a-policy-id"):
-                args.policy_instance = identity
+                config["policy_instance"] = identity
+                args.config = json.dumps(config)
                 with self.assertRaises(ValueError):
                     ca.command(args)
 

@@ -267,9 +267,9 @@ fn engine_cannot_become_its_own_upgrade_admin() {
 fn version_overflow_rejects_without_switching_engine() {
     let f = Fixture::new(false);
     f.env.as_contract(&f.parent, || {
-        let mut state: ParentState = f.env.storage().instance().get(&0u32).unwrap();
+        let mut state: ParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
         state.version = u64::MAX;
-        f.env.storage().instance().set(&0u32, &state);
+        f.env.storage().instance().set(&STATE_KEY, &state);
     });
     let before = f.client().state();
     f.auth(
@@ -361,9 +361,9 @@ fn parent_administration_does_not_load_an_unavailable_engine() {
     let f = Fixture::new(false);
     let missing = Address::generate(&f.env);
     f.env.as_contract(&f.parent, || {
-        let mut state: ParentState = f.env.storage().instance().get(&0u32).unwrap();
+        let mut state: ParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
         state.engine = missing.clone();
-        f.env.storage().instance().set(&0u32, &state);
+        f.env.storage().instance().set(&STATE_KEY, &state);
     });
     assert!(f.client().try_engine().is_err());
     f.auth(
@@ -391,7 +391,7 @@ fn previous_parent_layout_is_not_read_as_current_state() {
             Symbol::new(&f.env, "engine"),
             Address::generate(&f.env).into_val(&f.env),
         );
-        f.env.storage().instance().set(&0u32, &old);
+        f.env.storage().instance().set(&STATE_KEY, &old);
     });
     assert!(f.client().try_state().is_err());
 }

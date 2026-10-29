@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write a public source/artifact manifest after an ODC build; contains no keys."""
+"""Write a public source/artifact manifest after an policy wallet build; contains no keys."""
 import argparse
 import hashlib
 import json
@@ -7,14 +7,14 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACTS = ("allowit_odc", "allowit_wallet_engine", "allowit_engine_parent")
+CONTRACTS = ("allowit_simple_policy_engine", "allowit_common_policy_engine", "allowit_custom_policy", "allowit_wallet_engine", "allowit_engine_parent")
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--output", type=Path, help="Write the manifest to this explicit path; otherwise print to stdout only")
 args = parser.parse_args()
 files = [ROOT / "target/wasm32v1-none/release" / f"{name}.wasm" for name in CONTRACTS]
 missing = [str(path.relative_to(ROOT)) for path in files if not path.is_file()]
 if missing:
-    parser.error("Build the ODC contracts first. Missing: " + ", ".join(missing))
+    parser.error("Build the policy wallet contracts first. Missing: " + ", ".join(missing))
 source_files = [ROOT / name for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")]
 source_files += sorted((ROOT / "crates").rglob("*.rs"))
 source_files += sorted((ROOT / "crates").rglob("Cargo.toml"))

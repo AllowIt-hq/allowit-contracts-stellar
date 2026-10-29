@@ -210,6 +210,8 @@ pub struct ExecutionRequest {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyBinding {
+    /// Exact installed wallet tier, independently bound by its executable hash.
+    pub engine_kind: Symbol,
     /// Compiled kernel release metadata. Exact executable identity remains module_digest.
     pub contract_version: u32,
     /// Stable nonzero logical policy identifier. Upgrades and configuration changes preserve this identity.

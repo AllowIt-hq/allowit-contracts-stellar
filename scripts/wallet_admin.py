@@ -46,7 +46,7 @@ def owner_only(state):
         if weight > 0:
             active.append(signer)
     if len(active) != 1 or active[0]["type"] != "ed25519_public_key" or active[0]["key"] != account:
-        raise ValueError("ODC owner must have only its master key active; delegated native quorums are unsafe")
+        raise ValueError("Policy wallet owner must have only its master key active; delegated native quorums are unsafe")
     weight = active[0]["weight"]
     if any(type(t) is not int or not 0 <= t <= weight for t in thresholds(state)):
         raise ValueError("Owner thresholds must remain satisfiable by its master key")

@@ -16,10 +16,10 @@ import contract_admin as ca
 from stellar_sdk import Address, Keypair, Network, StrKey, TransactionEnvelope, xdr, scval
 
 CLI = os.environ.get("STELLAR_BIN") or shutil.which("stellar")
-WASM = Path(__file__).resolve().parents[2] / "target/wasm32v1-none/release/allowit_odc.wasm"
+WASM = Path(__file__).resolve().parents[2] / "target/wasm32v1-none/release/allowit_common_policy_engine.wasm"
 
 
-@unittest.skipUnless(CLI and WASM.exists(), "Build ODC Wasm and set STELLAR_BIN to test CLI encoding")
+@unittest.skipUnless(CLI and WASM.exists(), "Build policy wallet Wasm and set STELLAR_BIN to test CLI encoding")
 class RealCliEncoding(unittest.TestCase):
     def test_generic_grant_exact_native_encoding(self):
         code = WASM.read_bytes()
@@ -68,7 +68,7 @@ class RealCliEncoding(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as config:
                 cmd = [CLI, "--config-dir", config, "contract", "invoke", "--id", contract, "--source-account", account, "--rpc-url", f"http://127.0.0.1:{server.server_port}", "--network-passphrase", Network.TESTNET_NETWORK_PASSPHRASE, "--build-only", "--", "deploy_policy"]
-                result = subprocess.run(cmd + ca.serialize({"deployment": {"deployment_version": 1, "owner": account, "agent": recipient, "engine": contract, "grant": grant, "x402_enabled": False, "wasm_hash": None}}), check=True, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(cmd + ca.serialize({"deployment": {"deployment_version": 1, "owner": account, "agent": recipient, "server": Keypair.from_raw_ed25519_seed(bytes([4]) * 32).public_key, "source_digest": "22" * 32, "rules": ["transaction_cap"], "grant": grant, "x402_enabled": False, "wasm_hash": None}}), check=True, capture_output=True, text=True, timeout=30)
                 tx = TransactionEnvelope.from_xdr(result.stdout.strip(), Network.TESTNET_NETWORK_PASSPHRASE)
                 self.assertEqual(tx.signatures, [])
                 args = tx.transaction.operations[0].host_function.invoke_contract.args
@@ -80,12 +80,14 @@ class RealCliEncoding(unittest.TestCase):
                 self.assertEqual(values["max_calls"].u64.uint64, 0)
                 for name, encoded in grant.items():
                     self.assertEqual(values[name].to_xdr(), encoded)
-                for action, wasm in (("deploy-parent", WASM.with_name("allowit_engine_parent.wasm")), ("deploy-odc", WASM)):
+                for action, wasm in (("deploy-parent", WASM.with_name("allowit_engine_parent.wasm")), ("deploy-wallet", WASM)):
                     with self.subTest(action=action):
                         expected = hashlib.sha256(wasm.read_bytes()).hexdigest()
                         options = SimpleNamespace(action=action, network="testnet", allow_mainnet=False, source=account,
                             wasm=str(wasm), wasm_hash=expected, engine_wasm="11" * 32,
-                            owner=account, agent=recipient, engine=contract, asset=contract, grant=json.dumps(grant), policy_instance="11" * 32)
+                            owner=account, config=json.dumps({"owner": account, "agent": recipient,
+                                "server": Keypair.from_raw_ed25519_seed(bytes([4]) * 32).public_key, "asset": contract,
+                                "source_digest": "22" * 32, "rules": ["transaction_cap"], "grant": grant, "x402_enabled": False, "policy_instance": "11" * 32}))
                         prepared = ca.command(options)
                         self.assertIn("--wasm", prepared)
                         self.assertNotIn("--wasm-hash", prepared)
@@ -97,7 +99,7 @@ class RealCliEncoding(unittest.TestCase):
                         host = deployed.transaction.operations[0].host_function
                         self.assertEqual(host.type, xdr.HostFunctionType.HOST_FUNCTION_TYPE_CREATE_CONTRACT_V2)
                         self.assertEqual(host.create_contract_v2.executable.wasm_hash.hash.hex(), expected)
-                        self.assertEqual(len(host.create_contract_v2.constructor_args), 2 if action == "deploy-parent" else 6)
+                        self.assertEqual(len(host.create_contract_v2.constructor_args), 2 if action == "deploy-parent" else 1)
                 self.assertTrue(methods)
                 self.assertTrue(set(methods) <= {"getNetwork", "getLedgerEntries"})
                 self.assertNotIn("sendTransaction", methods)

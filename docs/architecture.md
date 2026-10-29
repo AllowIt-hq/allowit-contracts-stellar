@@ -1,107 +1,99 @@
-# Policy wallet and rule execution
+# Policy wallet engines
 
-The owner selects custody code, agent, immutable SAC and authored policy. The kernel protects
-custody mechanics. The policy selects business rules and the final usage data to commit.
+Policy wallets hold one immutable native Stellar Asset Contract (SAC) asset. The owner chooses
+wallet code, agent, independent server signer and policy configuration. The server signer is not a
+shared checker contract or its parent administrator.
 
-```mermaid
-flowchart LR
-    O[Owner] -->|code and configuration| W[Policy wallet]
-    A[Agent] -->|exact signed transfer| W
-    W --> P[Compiled owner policy]
-    P --> L[Bundled canonical rules]
-    P --> E[Selected shared engine checks]
-    L --> R[Proposed spent maps]
-    E --> R
-    R -->|policy final return| W
-    W -->|atomic commit and exact effect| T[Immutable SAC]
-```
+| Implementation | Delegated authorization | Local policy |
+| --- | --- | --- |
+| `SimplePolicyEngine` | Agent and server | Custody invariants only. The server checks the authored policy offchain. |
+| `CommonPolicyEngine` | Agent and server | Ordered owner-selected canonical checks using Grant and current Spent. |
+| `CustomPolicy` | Agent and server | Bespoke compiled local policy using wallet mixins. |
 
-## Configuration and functional state
+All implementations use a direct owner-selected Wasm executable. A system-managed reference cannot
+replace wallet custody code. The [engine parent](engine-parent.md) manages shared checker code
+only. Policy compilation recommends an implementation compatible with the selected rail and the
+complete policy semantics. Wallet policies run their selected checks locally, with no shared fallback.
 
-`Grant` is a map of names to exact native values. It is immutable during delegated execution. The
-kernel requires no daily limit, recipient list or other optional rule parameter. Each selected rule
-validates its own needed keys. Top-level names are native Strings with valid UTF-8. Unrelated
-values are preserved without coercion, with no policy-imposed count or value-type limit.
+## Common and custom policy
 
-`Spent` is a separate persistent raw map under the stable policy instance. It supports arbitrary
-named data, including keys selected by the engine. Scalar helpers read or transform u64, Boolean
-and String entries. They reject a requested entry of the wrong type and preserve unrelated values.
+Common's `rules` is an ordered list of zero-extra-parameter function names: `transaction_cap`,
+`daily_cap`, `total_cap`, `call_cap`, `recipient`, `expiry`, and `token`. Each receives the normalized
+request, owner Grant and current Spent. There are no extra authored arguments. Unknown or duplicate selectors reject. An empty list explicitly selects no local business checks, like Simple. The wallet enforces only the rules that the owner selects explicitly.
 
-The authored entrypoint receives the request, Grant and full state view. Rule calls return Spent
-values. `with_spent` replaces the view's spent map while preserving its Grant:
+| Rule | Required Grant values | Updated Spent |
+| --- | --- | --- |
+| `transaction_cap` | Positive `per_transfer` in native units | None |
+| `daily_cap` | Positive `daily_limit` in native units | UTC `day`, `daily`, `daily_operation` |
+| `total_cap` | Positive `total_limit` in native units | `total`, `total_operation` |
+| `call_cap` | U64 `max_calls`; zero denies every call | `calls`, `call_operation` |
+| `recipient` | `recipients: Vec<Address>` | None |
+| `expiry` | `expires_at: u64`, exclusive Unix seconds | None |
+| `token` | `token: String`, authenticated asset label | None |
 
-```rust
-let daily = allowit::daily_cap(request, state)?;
-let after_daily = allowit::with_spent(state, daily)?;
-let total = engine::total_cap(request, &after_daily)?;
-let n = allowit::state_get(&total, "custom_count", 0u64)?;
-let final_spent = allowit::state_set(total, "custom_count", n + 1)?;
-Ok(final_spent)
-```
+Amount limits accept positive native I128 or U64 values. Each canonical rule checks its selected
+parameters and usage values. Invalid values or a denied check reject execution. Checks pass their
+resulting Spent map to the next selected check. Operation markers prevent duplicate charges for
+one operation. All rules preserve unrelated native values without coercion.
 
-Only the final returned map commits. Helpers have no hidden persistent writes or merge behavior.
-Returning an earlier map deliberately discards later unused results. A property-only policy starts
-with `spent(state)`. An unchanged map avoids a data write, and an unused empty map creates no entry.
-Native persistent storage preserves archived data through restoration rather than treating it as
-new data. `policy_spent()` reads the complete map. Owner control paths do not load it.
+Simple requires an empty rule list. Grant fields alone do not create local enforcement. Custom
+also uses an empty selector list because its compiled code defines the complete check sequence. The sample
+calls local daily, total and call rules, then increments its own `custom_count`. Its source digest
+must equal the compiled source. Mixins protect authority and execution mechanics independently of
+that business state. Custom code is owner-selected code and therefore remains trusted for custody.
 
-## Rule placement and responsibility
+## Configuration and effects
 
-The SDK planner selects placement before deployment from enforcement responsibility, expected
-volume and compatible supplied cost estimates. Its manifest records the choice and reason.
-`self::` selects eligible bundled rules, `engine::` selects shared checks, and `allowit::` uses the
-planner. Missing compatible costs use the documented responsibility default. System or external
-authority requirements cannot be moved locally merely to reduce cost.
+`PolicyConfig` contains `owner`, `agent`, `server`, `asset`, `policy_instance`, `source_digest`,
+`rules`, `grant`, and `x402_enabled`. Owner, agent and server must differ. The asset is an admitted
+native SAC. The nonzero policy identity and asset stay fixed. Source digests bind the owner-approved
+policy. The exact wallet Wasm hash identifies implementation code.
 
-Both placements call the canonical `allowit-policy-rules` implementation. Bundled calls reference
-selected functions directly. A missing, false or failed shared check follows the authored result
-semantics and never triggers a local fallback. Genuine predicate APIs preserve ordinary false
-separately from errors.
+Grant is an owner-signed map of UTF-8 names to native values. Spent is a separate persistent map
+under the stable policy identity. Only the final policy result commits. An unused empty map creates
+no entry, and unchanged data avoids another write. Archived persistent records require restoration.
+The wallet never treats archival as a fresh allowance. Normal calls do not migrate stored state.
 
-Each shared call receives copied request data and the full Grant/Spent view. It returns only
-`EngineResult { approval, spent }`. It cannot mutate caller references or return executable
-commands. The canonical daily, total and call rules record the logical operation ID in their usage
-map, so repeated checks revalidate bounds without charging the same operation twice. Their exact
-keys, units, UTC rollover and errors are documented in `crates/rules/src/lib.rs`.
+The kernel checks the complete invocation, installed module and schema, source wallet, immutable
+asset, positive amount, recipient, pause, expiry, deployment version, execution nonce and replay.
+Direct execution requires native authorization from both agent and server. Sender debit and
+recipient credit must match the exact transfer. Delegated execution and recovery reject issuer destinations because these burn tokens. The owner can explicitly burn through `invoke`. Usage, nonce, receipt and effects commit atomically.
 
-A selected shared engine is trusted for its decision and returned business-state integrity. It can
-alter usage keys also read by bundled checks. Bundling one rule does not create per-key isolation
-from other shared writers. The compiled policy determines which map becomes authoritative.
+`policy_binding()` reports `engine_kind`, `contract_version`, logical identity, exact module hash,
+source digest, argument schema digest and private `_execute` selector. Its tier identifier does not
+replace verification of the executable hash. `policy_spent()` returns the full raw map.
 
-## Custody invariants and authorization
+## x402 and owner operations
 
-The kernel independently checks agent authority, installed policy/module/schema, canonical
-arguments, immutable SAC and wallet source, positive amount, self-payment, pause, expiry,
-`deployment_version`, execution nonce and operation replay. It imposes no hidden business counters
-or automatic checks based on Grant key names. The `execute` path checks exact sender debit and
-recipient credit. Native effects, final spent data, nonce and receipt commit atomically.
+The owner explicitly enables x402. Both agent and server must then be G-addresses. The wallet derives
+their raw Ed25519 master public keys and requires both signatures over SHA-256 of XDR
+`(Symbol("allowit_wallet_v1"), host_payload, execution)`. The host payload binds network, native
+nonce, expiry and invocation tree. The hook admits one exact installed-SAC transfer context and
+uses the same local policy, replay and usage checks as direct execution. The wallet caches asset metadata before the active token call. Native SAC effects and hook state changes roll back together.
 
-The x402 hook accepts one exact installed-SAC transfer context and the complete canonical request.
-The owner explicitly selects `x402_enabled`; its key derives from the requested G-agent. A signed
-owner deployment can atomically update the agent or Grant and retain enablement. It rebuilds the
-agent/asset cache. Old requests fail the deployment version or derived-key checks. False disables
-the path. Native account signer or threshold changes do not revoke this raw-key delegation.
+Changing a classic account signer or master weight does not revoke this explicit raw-key x402 delegation. The wallet owner must disable x402, pause the wallet, or replace the agent/server address through `deploy_policy`. Direct `execute` follows native account signer thresholds.
 
-The signature covers SHA-256 of XDR `(Symbol("allowit_x402_v1"), host_payload, execution)`. The host
-payload binds network, native authorization nonce, ledger expiry and invocation tree. The hook
-uses cached authenticated asset metadata and makes no active-SAC callback. Native SAC semantics
-provide its effects guarantee. The engine receives no wallet token-authorization subtree.
+`deploy_policy` atomically signs owner, agent, server, source digest, rules, Grant, x402 enablement,
+optional wallet Wasm hash and the next deployment version. A changed owner must accept the packet.
+Deployment preserves pause, Spent and execution nonce. Only `set_pause` changes pause.
 
-## Owner control and releases
+Owner recovery and `invoke(contract, function, args, auth)` require the current owner. They bypass
+delegated business limits and preserve delegated Spent and nonce. Passthrough authorization binds
+the exact target, function, arguments and all supplied nested authorization trees. The owner can
+therefore authorize token allowances or other general operations deliberately. Agent and server
+cannot use that path. Native transaction sequencing and Soroban authorization nonces prevent replay
+of an owner's signed authorization. No automatic shared checker participates in owner operations.
 
-`deploy_policy` signs owner, agent, engine, Grant, x402 enablement and optional kernel hash at the
-next `deployment_version`. A changed owner also authorizes the exact packet. Deployment preserves
-pause and spent data. Only `set_pause(paused, deployment_version)` changes pause. Recovery requires
-owner authorization, has no configuration-version fence and does not change delegated usage.
-Keep owner authority independent of automated signers.
+Wallet release/layout, owner deployment sequence and parent administration version are distinct.
+Unknown stored formats reject. Simple, Common and Custom share the version-1 layout. Tier changes must install matching rules and source digest. Deployments with a different code hash defer tier parameter validation to delegated admission; unchanged-code redeployments validate immediately. For an incompatible layout, the owner must select reviewed code that reads the retained layout and performs the explicit migration. Installing code that cannot read that layout can disable owner recovery and upgrades. Pausing alone does not prevent this. Contract upgrades require explicit owner authorization.
 
-`contract_version` identifies the supported custody release/layout; `engine_version` identifies the
-engine release. Both begin at 1. Exact Wasm hashes identify code. The engine parent orders its own
-administration with a separate version and can replace shared engine code only. It cannot change
-wallet code, Grant, authority or asset. Wallet code uses a direct owner-selected Wasm hash rather
-than a system-controlled executable reference. Owner paths never query the engine.
+## Classic Stellar accounts
 
-Normal calls accept one known state format and never migrate it. For an incompatible state change:
-pause, deploy and run a migration contract, deploy the new contract using the migrated state, then
-unpause. Migration must preserve authoritative usage, ordering and replay history. Issuer controls,
-TTL restoration and native network availability remain separate from engine authority.
+A classic G-address account can implement Simple-style authorization with owner weight 3, agent
+and server weights 1, low/medium thresholds 2 and high threshold 3. The owner can act alone, while
+the agent and server must jointly authorize delegated transfers. Admission must reject extra
+signers and preserve the owner-only high-threshold path.
+
+This route has no Soroban custody contract or contract storage rent. Classic account and subentry
+reserves still apply. Policy checks run in the server before signing. Common onchain rules and
+bespoke CustomPolicy code require a compatible contract rail.
