@@ -15,5 +15,7 @@ test-deny = []
 soroban-sdk.workspace = true
 allowit-wallet-protocol = { path = "../protocol" }
 
+allowit-policy-rules = { path = "../rules" }
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

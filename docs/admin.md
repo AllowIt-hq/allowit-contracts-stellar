@@ -14,6 +14,8 @@ Select `--network testnet` explicitly. Mainnet preparation additionally requires
 
 ## Native wallet and engine administrator
 
+The classic CLI retains `--engine` for its service co-signer. This means the wallet `server` role, not the parent-managed shared checker address.
+
 The native wallet owner is its account master key. Setup admits only an existing account with master weight 1, no other signers and default thresholds. It atomically adds agent/engine weight 1, changes owner weight to 3, and sets thresholds 2/2/3. Setup never silently replaces existing authority. Signer verification rejects unexpected signers, hash/preauthorized signers and threshold drift.
 
 ```sh
@@ -37,23 +39,76 @@ The source account signs initial setup under its existing master authority. Late
 
 ## Contract setup and owner administration
 
-Run `scripts/build-contracts.sh` before contract tests or deployment preparation. It builds the deny-engine, compiled-recipient and native-XLM policy fixtures, then restores default deployable artifacts. Do not deploy a test-feature artifact.
+[Engine parent](engine-parent.md) defines parent state, executable references, version ordering and recovery.
 
-Use `contract_admin.py upload --source "$OWNER" --wasm PATH` separately for `allowit_wallet_engine.wasm`, `allowit_engine_parent.wasm` and `allowit_odc.wasm`. Review, sign and submit each prepared upload manually. Record its resulting Wasm hash.
+Run `scripts/build-contracts.sh` before contract tests or deployment preparation. It reproduces all
+policy modules, builds the test fixtures, then restores the default deployable artifacts. Select the
+reviewed source and placement manifest when preparing a policy executable.
 
-Prepare `deploy-parent --source "$ADMIN" --admin "$ADMIN" --engine-wasm HASH --wasm target/wasm32v1-none/release/allowit_engine_parent.wasm --wasm-hash PARENT_HASH`, with three `--member` values. The script verifies the exact native admin quorum. Constructor preparation requires the local Wasm and its expected uploaded hash. The tool checks the local bytes and the raw transaction executable against that hash. It passes only `--wasm` to CLI 28.1.0 so constructor arguments work. The constructor creates the shared engine. Read its address with `read --contract PARENT_ADDRESS --source "$ADMIN" --method engine`. This command only simulates the read. It does not commit TTL extensions.
+Use `contract_admin.py upload --source "$OWNER" --wasm PATH` separately for the engine, parent and
+policy wallet Wasm. Review, sign and submit prepared uploads manually, retaining each resulting hash.
 
-After deployment, prepare a native Stellar CLI invocation of the parent's `engine()` method. Select an explicit source account to pay fees. Review the assembled transaction, sign it with the source identity, and submit it. Use `--auth-mode root` for this invocation. Repeat before the engine or its executable reference expires. A submitted invocation refreshes TTL for the parent, the engine executable reference, and the engine instance/code.
+Prepare `deploy-parent --source "$ADMIN" --owner "$ADMIN" --engine-wasm HASH --wasm
+ target/wasm32v1-none/release/allowit_engine_parent.wasm --wasm-hash PARENT_HASH`, with three
+`--member` values. The script verifies the native admin quorum, local Wasm and creation executable
+hash. The constructor creates the shared engine. Read its address with `read --contract
+PARENT_ADDRESS --source "$ADMIN" --method engine`.
 
-`contract_admin.py admin` does not admit `engine()`, so use the native CLI for this operation. Monitor TTL separately. Restore archived dependencies through separate reviewed transactions before normal calls resume.
+A read simulation does not commit TTL updates. Submit a reviewed native CLI invocation of the
+parent's `engine()` before the parent, engine reference or engine code expires. Select an explicit
+fee source and `--auth-mode root`. The admin tool does not admit this maintenance invocation.
+Restore archived dependencies through separate reviewed transactions.
 
-Prepare `deploy-odc --source "$OWNER" --owner "$OWNER" --agent "$AGENT" --engine ENGINE_ADDRESS --wasm target/wasm32v1-none/release/allowit_odc.wasm --wasm-hash ODC_HASH --grant JSON --policy-instance POLICY_ID`. Grant JSON contains `asset`, `recipients`, `per_transfer`, `daily_limit`, `total_limit`, `max_calls` and `expires_at`. Amounts use native asset units. `POLICY_ID` is the stable nonzero 32-byte installation identifier, encoded as hexadecimal. Select it explicitly and retain it when changing the custody route.
+Prepare `deploy-wallet --source "$OWNER" --config JSON --wasm PATH --wasm-hash HASH`.
+Select `allowit_simple_policy_engine.wasm`, `allowit_common_policy_engine.wasm`, or a reviewed
+`allowit_custom_policy.wasm`. Config contains exactly `owner`, `agent`, `server`, `asset`,
+`policy_instance`, `source_digest`, `rules`, `grant`, and `x402_enabled`.
+The asset is an immutable native SAC. Identity and source digests are nonzero 32-byte hex strings.
+`rules` contains the owner's ordered Common function names. An empty Common list selects no local business checks. Simple and Custom use an empty list.
+The Custom sample's source digest must match its compiled source.
 
-Fund the resulting ODC only with `grant.asset`, through an exact SAC transfer after deployment. The grant asset is immutable in this code. `recover` transfers only that asset. Recovering other SAC balances requires an owner-authorized code upgrade. Set each request expiry at or before `grant.expires_at`. Both the ODC and shared engine reject a later expiry.
+Grant JSON maps names to canonical base64 SCVal XDR. The tool converts these exact values to the
+pinned CLI's tagged native JSON without guessing types. For example, generate a U64 limit with
+`stellar_sdk.scval.to_uint64(100000).to_xdr()` or bytes with `scval.to_bytes(value).to_xdr()`.
+No names, limits or recipients are mandatory. Only selected policy rules interpret their keys.
+Duplicate JSON keys and noncanonical value encodings reject. Fund the wallet only with its
+installed asset. `recover` transfers only that asset.
 
-`admin --family odc --contract ADDRESS --source "$OWNER" --method METHOD --arguments JSON` admits only owner administration and recovery methods. Parent administration uses `--family parent`, the native admin source and three `--member` values. Arguments must match the method exactly, including `expected_revision`. Parent `set_admin` requires a native G candidate and three `--candidate-member` values. The script checks its exact 2-of-3 configuration. Contract administrator candidates remain outside this MVP. The script checks current authority and revision before preparation. ODC deployment and administration also require a native owner account with only its master signer active and satisfiable thresholds. A 3/1/1 native agent wallet cannot serve as that owner. Owner handoff applies the same admission to the candidate. These checks inspect current ledger state. Keep owner signer configuration independent of agent authority afterward. It never admits agent transfers or arbitrary calls.
+`admin --family wallet --contract ADDRESS --source "$OWNER" --method METHOD --arguments JSON` admits
+`deploy_policy`, `set_pause` and `recover`. Parent administration uses `--family parent`, its native
+admin source and three `--member` values.
 
-Owner/admin handoffs require both authorities. Envelope signing alone does not fill independent Soroban authorization entries. Collect and verify those authorizations with the corresponding wallets before submission. Preparation does not establish candidate acceptance. Nested grant i128 fields are encoded as decimal strings for the CLI. Simulation authorization permits matching roots, source credentials and the exact handoff candidate. Invocation roots have no children. Deployment permits one exact source-authorized `__constructor` child at the address derived from the creation preimage and network, with identical arguments and no deeper calls. `--max-fee` caps total and resource fees in stroops (default 1 XLM). Always inspect simulated authorization trees, quoted resource fees and the exact contract identity. The assembled transaction binds its account sequence and expires after five minutes. Archive signed bytes before broadcast. After uncertain submission, reconcile its original hash before preparing a replacement. Archived state requires a separate reviewed restoration transaction. This tool does not restore or retry automatically. Owner pause, recovery, engine binding and code upgrades remain independent of engine approval.
+A deployment argument contains exactly `deployment_version`, `owner`, `agent`, `server`,
+`source_digest`, `rules`, `grant`, `x402_enabled`, and `wasm_hash`. The target version is current plus
+one. Use null for unchanged code. Deployment preserves pause and spent data. A changed owner must
+also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
+False disables x402 without changing direct two-role execution authorization.
 
+Owner passthrough uses `invoke(contract, function, args, auth)`. Prepare this exact call with the
+native CLI and inspect every nested authorization entry. This general owner operation is outside
+the restricted admin tool's method allowlist. Only the current owner can authorize it.
 
-Read `policy_binding()` with `read --contract ODC_ADDRESS --source "$OWNER" --method policy_binding` before preparing agent execution. It reports source and schema identities with the actual wallet Wasm digest. The execution adapter matches them against the installed policy. New deployments receive an explicit policy identity in the constructor. Compatible older state without that binding rejects execution. Independent owner recovery and administration remain available. No identity initializes automatically, and accounting remains unchanged.
+`set_pause` takes `paused` and the next `deployment_version`. `recover` takes `recipient` and positive
+native `amount`, with no configuration version or usage update. Parent methods use their separate current `version`. `set_admin` takes the candidate `owner`. Argument fields must match the chosen method. The tool admits native owner
+accounts with only their active master signer and satisfiable thresholds. Parent `set_admin` checks
+its candidate's exact 2-of-3 membership. Other owner authorization schemes require their own adapter.
+
+Owner/admin handoffs require both authorities on the same intent. Envelope signing alone does not
+fill independent Soroban authorization entries. Collect and check them before submission. Preparation
+does not establish candidate acceptance. Review the exact invocation roots, allowed constructor
+children, resource fee and footprint. `--max-fee` bounds total/resource fees in stroops. Prepared
+envelopes expire after five minutes. Save signed bytes before broadcast and reconcile the original
+hash after an uncertain response. The tool never signs, submits, restores or retries automatically.
+
+Use `read --contract POLICY_WALLET_ADDRESS --source "$OWNER" --method policy_binding` to inspect the contract
+release, policy instance, module/source digests and argument schema. `policy_spent` reads the full
+raw usage map. Archived data requires native restoration and is never reinitialized as an absent
+map. The SDK rejects unavailable or ambiguous state observations before new signing. Owner pause,
+deployment and recovery do not read spent data or depend on shared engine availability.
+
+Normal operations do not migrate state. An incompatible change uses this explicit maintenance
+sequence: pause, deploy and run a migration contract, deploy the new contract using the migrated
+state, then unpause. Compatible code updates retain the installed format and usage/replay records.
+
+The parent stores `owner`, `version` and `engine`. Wallet deployment and contract release versions remain separate.
+Older parent state uses different field names. Migrate that state explicitly before installing this parent executable on an existing address.

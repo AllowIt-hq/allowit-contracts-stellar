@@ -1,53 +1,99 @@
-# ODC and shared-engine architecture
+# Policy wallet engines
 
-The ODC (policy wallet) holds assets and enforces the owner's delegation locally. The shared engine can refuse an agent operation. It cannot enlarge that delegation, administer the wallet or replace its code.
+Policy wallets hold one immutable native Stellar Asset Contract (SAC) asset. The owner chooses
+wallet code, agent, independent server signer and policy configuration. The server signer is not a
+shared checker contract or its parent administrator.
 
-The [README](../README.md) defines the transfer wallet. [Administration](admin.md) covers setup and owner operations.
+| Implementation | Delegated authorization | Local policy |
+| --- | --- | --- |
+| `SimplePolicyEngine` | Agent and server | Custody invariants only. The server checks the authored policy offchain. |
+| `CommonPolicyEngine` | Agent and server | Ordered owner-selected canonical checks using Grant and current Spent. |
+| `CustomPolicy` | Agent and server | Bespoke compiled local policy using wallet mixins. |
 
-## Custody and owner control
+All implementations use a direct owner-selected Wasm executable. A system-managed reference cannot
+replace wallet custody code. The [engine parent](engine-parent.md) manages shared checker code
+only. Policy compilation recommends an implementation compatible with the selected rail and the
+complete policy semantics. Wallet policies run their selected checks locally, with no shared fallback.
 
-```mermaid
-flowchart LR
-    O[Owner] -->|admin, pause, recovery| W[ODC policy wallet]
-    O -->|select Wasm and engine binding| W
-    A[Agent] -->|bounded request| W
-    W -->|exact request after local checks| E[Shared engine]
-    E -->|approval or rejection| W
-    W -->|execute after approval and local checks| T[Admitted targets]
-```
+## Common and custom policy
 
-The owner controls ODC code upgrades, policy configuration, agent delegation and engine binding. Owner administration, pause and recovery use independent entrypoints that never call the engine. Engine failure, denial or upgrade cannot block those paths. An ODC authority change invalidates stale agent requests through a configuration epoch change. Owner handoff requires current-owner authorization and candidate acceptance, preserving accounting. The owner address must be owner-only: no agent or engine signer may reach its medium threshold.
+Common's `rules` is an ordered list of zero-extra-parameter function names: `transaction_cap`,
+`daily_cap`, `total_cap`, `call_cap`, `recipient`, `expiry`, and `token`. Each receives the normalized
+request, owner Grant and current Spent. There are no extra authored arguments. Unknown or duplicate selectors reject. An empty list explicitly selects no local business checks, like Simple. The wallet enforces only the rules that the owner selects explicitly.
 
-Store a direct owner-selected Wasm hash in each ODC executable. Many ODC instances can share the same small kernel Wasm while retaining separate state. Compiled Rust implements the kernel and its owner-approved deterministic policy checks. Source need not be duplicated per wallet. Owner dispatch and envelope checks remain in owner-trusted code, outside the system-upgradeable engine. No policy interpreter belongs in this custody boundary. Stellar stores [contract code separately from instance state](https://developers.stellar.org/docs/learn/fundamentals/contract-development/overview), so identical Wasm need not be uploaded for each wallet.
+| Rule | Required Grant values | Updated Spent |
+| --- | --- | --- |
+| `transaction_cap` | Positive `per_transfer` in native units | None |
+| `daily_cap` | Positive `daily_limit` in native units | UTC `day`, `daily`, `daily_operation` |
+| `total_cap` | Positive `total_limit` in native units | `total`, `total_operation` |
+| `call_cap` | U64 `max_calls`; zero denies every call | `calls`, `call_operation` |
+| `recipient` | `recipients: Vec<Address>` | None |
+| `expiry` | `expires_at: u64`, exclusive Unix seconds | None |
+| `token` | `token: String`, authenticated asset label | None |
 
-[CAP-0085 executable references](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0085.md) permit fleet upgrades through a separately managed executable entry. A system-controlled reference for ODC code would let the system replace custody checks. Do not use that configuration. An owner-controlled reference is optional, with the same owner trust boundary. An owner-controlled helper or proxy adds footprint and offers no per-instance code saving over shared Wasm. Shared code still requires TTL maintenance. Per-wallet state still has [storage and restoration costs](https://developers.stellar.org/docs/learn/fundamentals/contract-development/storage/persisting-data).
+Amount limits accept positive native I128 or U64 values. Each canonical rule checks its selected
+parameters and usage values. Invalid values or a denied check reject execution. Checks pass their
+resulting Spent map to the next selected check. Operation markers prevent duplicate charges for
+one operation. All rules preserve unrelated native values without coercion.
 
-## Engine upgrades
+Simple requires an empty rule list. Grant fields alone do not create local enforcement. Custom
+also uses an empty selector list because its compiled code defines the complete check sequence. The sample
+calls local daily, total and call rules, then increments its own `custom_count`. Its source digest
+must equal the compiled source. Mixins protect authority and execution mechanics independently of
+that business state. Custom code is owner-selected code and therefore remains trusted for custody.
 
-```mermaid
-flowchart LR
-    S[System 2-of-3 wallet] -->|authorize updates and handoff| P[Engine parent]
-    F[Future admin contract] -.->|accept parent authority| P
-    P -->|upgrade engine only| E[Shared engine]
-```
+## Configuration and effects
 
-The shared engine has a parent contract administered by a 2-of-3 wallet. A future administrator contract replaces that authority address on the unchanged parent. The current authority authorizes the handoff. The candidate accepts the exact parent, network and revision. The handoff preserves state. The parent controls engine upgrades only, with no ODC upgrade, recovery or configuration authority.
+`PolicyConfig` contains `owner`, `agent`, `server`, `asset`, `policy_instance`, `source_digest`,
+`rules`, `grant`, and `x402_enabled`. Owner, agent and server must differ. The asset is an admitted
+native SAC. The nonzero policy identity and asset stay fixed. Source digests bind the owner-approved
+policy. The exact wallet Wasm hash identifies implementation code.
 
-## Execution and local containment
+Grant is an owner-signed map of UTF-8 names to native values. Spent is a separate persistent map
+under the stable policy identity. Only the final policy result commits. An unused empty map creates
+no entry, and unchanged data avoids another write. Archived persistent records require restoration.
+The wallet never treats archival as a fresh allowance. Normal calls do not migrate stored state.
 
-The local kernel must enforce:
+The kernel checks the complete invocation, installed module and schema, source wallet, immutable
+asset, positive amount, recipient, pause, expiry, deployment version, execution nonce and replay.
+Direct execution requires native authorization from both agent and server. Sender debit and
+recipient credit must match the exact transfer. Delegated execution and recovery reject issuer destinations because these burn tokens. The owner can explicitly burn through `invoke`. Usage, nonce, receipt and effects commit atomically.
 
-- Owner identity, authorized agent, request nonce, configuration epoch and expiry. Owner signatures govern configuration. Agent signatures govern delegated requests.
-- An owner-approved operation allowlist and envelope: target, method, exact arguments, assets, recipient, amount, hard spending caps and count limits.
-- Persistent local spending and count state. Funding, configuration changes and engine replacement cannot erase consumed limits or replay history.
-- Exact authorization subtrees for admitted calls. Authorize no ambient spending authority. Stellar's [authorization framework](https://developers.stellar.org/docs/learn/fundamentals/contract-development/authorization) binds required authorization to invocation contexts.
+`policy_binding()` reports `engine_kind`, `contract_version`, logical identity, exact module hash,
+source digest, argument schema digest and private `_execute` selector. Its tier identifier does not
+replace verification of the executable hash. `policy_spent()` returns the full raw map.
 
-General contract calls default to disabled. Enable only owner-allowlisted operations with locally bounded effects. Policy configuration constrains permitted arguments. Each execution binds exact arguments within those constraints. The baseline rejects token approvals, persistent allowances and uncontrolled token pulls.
+## x402 and owner operations
 
-The ODC constructs the request from authenticated arguments and its own state. Engine approval binds that request and configuration. The engine returns an approval boolean, not commands, accounting deltas or expanded local policy. Missing approval, malformed responses, engine traps, archival and resource exhaustion reject agent execution. The ODC exposes no external `__check_auth` hook. Raw agent-signed token or dApp authorization rejects. The engine receives no ODC spending authorization.
+The owner explicitly enables x402. Both agent and server must then be G-addresses. The wallet derives
+their raw Ed25519 master public keys and requires both signatures over SHA-256 of XDR
+`(Symbol("allowit_wallet_v1"), host_payload, execution)`. The host payload binds network, native
+nonce, expiry and invocation tree. The hook admits one exact installed-SAC transfer context and
+uses the same local policy, replay and usage checks as direct execution. The wallet caches asset metadata before the active token call. Native SAC effects and hook state changes roll back together.
 
-The ODC authorizes an exact direct SAC transfer, checks sender debits and recipient credits, and updates its counters atomically. Incoming funds cannot conceal outgoing spending through a net balance comparison. Reject effects that the local kernel cannot verify. A failed call or effect mismatch reverts accounting and execution.
+Changing a classic account signer or master weight does not revoke this explicit raw-key x402 delegation. The wallet owner must disable x402, pause the wallet, or replace the agent/server address through `deploy_policy`. Direct `execute` follows native account signer thresholds.
 
-A compromised engine can approve every request that already fits the local delegation. It can therefore consume all delegated capacity. It cannot prove compliance with an arbitrary owner-authored predicate that only the engine evaluates. Enforce every restriction that must survive engine compromise inside the owner-controlled ODC kernel. Otherwise, explicitly accept engine trust for that restriction. Owner-kernel bug fixes require owner upgrades. Shared engine fixes can take effect immediately, but cannot repair kernel bugs. Engine approval never substitutes for local containment.
+`deploy_policy` atomically signs owner, agent, server, source digest, rules, Grant, x402 enablement,
+optional wallet Wasm hash and the next deployment version. A changed owner must accept the packet.
+Deployment preserves pause, Spent and execution nonce. Only `set_pause` changes pause.
 
-Issuer clawback or freeze, malicious admitted tokens or targets, owner-key compromise, fees, network availability and TTL restoration remain separate risks.
+Owner recovery and `invoke(contract, function, args, auth)` require the current owner. They bypass
+delegated business limits and preserve delegated Spent and nonce. Passthrough authorization binds
+the exact target, function, arguments and all supplied nested authorization trees. The owner can
+therefore authorize token allowances or other general operations deliberately. Agent and server
+cannot use that path. Native transaction sequencing and Soroban authorization nonces prevent replay
+of an owner's signed authorization. No automatic shared checker participates in owner operations.
+
+Wallet release/layout, owner deployment sequence and parent administration version are distinct.
+Unknown stored formats reject. Simple, Common and Custom share the version-1 layout. Tier changes must install matching rules and source digest; delegated admission validates the active tier after an upgrade. For an incompatible layout, the owner must select reviewed code that reads the retained layout and performs the explicit migration. Installing code that cannot read that layout can disable owner recovery and upgrades. Pausing alone does not prevent this. Contract upgrades require explicit owner authorization.
+
+## Classic Stellar accounts
+
+A classic G-address account can implement Simple-style authorization with owner weight 3, agent
+and server weights 1, low/medium thresholds 2 and high threshold 3. The owner can act alone, while
+the agent and server must jointly authorize delegated transfers. Admission must reject extra
+signers and preserve the owner-only high-threshold path.
+
+This route has no Soroban custody contract or contract storage rent. Classic account and subentry
+reserves still apply. Policy checks run in the server before signing. Common onchain rules and
+bespoke CustomPolicy code require a compatible contract rail.

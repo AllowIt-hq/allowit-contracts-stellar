@@ -21,6 +21,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "allowit-common-policy-engine"
+version = "0.1.0"
+dependencies = [
+ "allowit-policy-rules",
+ "allowit-policy-wallet",
+ "allowit-wallet-protocol",
+ "ed25519-dalek",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "allowit-custom-policy"
+version = "0.1.0"
+dependencies = [
+ "allowit-policy-rules",
+ "allowit-policy-wallet",
+ "allowit-wallet-protocol",
+ "ed25519-dalek",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "allowit-engine-parent"
 version = "0.1.0"
 dependencies = [
@@ -29,7 +51,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "allowit-odc"
+name = "allowit-policy-rules"
 version = "0.1.0"
 dependencies = [
  "allowit-wallet-protocol",
@@ -37,9 +59,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "allowit-policy-wallet"
+version = "0.1.0"
+dependencies = [
+ "allowit-policy-rules",
+ "allowit-wallet-protocol",
+ "ed25519-dalek",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "allowit-simple-policy-engine"
+version = "0.1.0"
+dependencies = [
+ "allowit-policy-rules",
+ "allowit-policy-wallet",
+ "allowit-wallet-protocol",
+ "ed25519-dalek",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "allowit-wallet-engine"
 version = "0.1.0"
 dependencies = [
+ "allowit-policy-rules",
  "allowit-wallet-protocol",
  "soroban-sdk",
 ]

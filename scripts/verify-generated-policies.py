@@ -10,13 +10,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "https://github.com/AllowIt-hq/allowit-sdk.git"
-PAIRS = (
-    ("policy.rs", "generated_policy.rs"),
-    ("recipient-policy.rs", "generated_recipient_policy.rs"),
-    ("financial-policy.rs", "test_generated_financial_policy.rs"),
-    ("bool-policy.rs", "test_generated_bool_policy.rs"),
-    ("xlm-policy.rs", "generated_xlm_policy.rs"),
-)
+PAIRS = (("policy.rs", "generated_policy.rs"),)
 
 
 def run(arguments, **kwargs):
@@ -31,13 +25,13 @@ def verify(sdk, revision):
     environment = dict(os.environ)
     environment["CARGO_TARGET_DIR"] = str(ROOT / "target/policy-codegen")
     for source, generated in PAIRS:
-        source_path = ROOT / "crates/odc/policy" / source
-        expected = (ROOT / "crates/odc/src" / generated).read_text()
+        source_path = ROOT / "crates/custom-policy/policy" / source
+        expected = (ROOT / "crates/custom-policy/src" / generated).read_text()
         actual = run(["cargo", "run", "--quiet", "--locked", "--manifest-path", str(sdk / "Cargo.toml"),
                       "--bin", "allowit", "--", "stellar-native", str(source_path)], env=environment)
         if actual != expected:
             raise SystemExit("Generated policy output differs from its pinned compiler: " + generated)
-    print("PASS 5 generated policy modules reproduced at SDK " + revision)
+    print(f"PASS {len(PAIRS)} generated policy modules reproduced at SDK " + revision)
 
 
 parser = argparse.ArgumentParser(description=__doc__)

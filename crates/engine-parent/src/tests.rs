@@ -1,9 +1,8 @@
 use super::*;
-use allowit_wallet_protocol::{EngineClient, EngineContext, Grant, TransferRequest};
+use allowit_wallet_protocol::{EngineClient, EngineRequest, EngineState, Grant, Spent};
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    vec,
 };
 
 const ENGINE_WASM: &[u8] =
@@ -54,48 +53,49 @@ impl Fixture {
         }]);
     }
 }
-fn context(env: &Env) -> EngineContext {
-    let asset = Address::generate(env);
-    let recipient = Address::generate(env);
-    EngineContext {
-        wallet: Address::generate(env),
-        agent: Address::generate(env),
-        asset: asset.clone(),
-        request: TransferRequest {
-            recipient: recipient.clone(),
+fn context(env: &Env) -> (EngineRequest, EngineState) {
+    let mut grant = Grant::new(env);
+    grant.set(String::from_str(env, "daily_limit"), 10u64.into_val(env));
+    (
+        EngineRequest {
+            wallet: Address::generate(env),
+            agent: Address::generate(env),
+            asset: Address::generate(env),
+            token: String::from_str(env, "USDC"),
+            decimals: 7,
+            recipient: Address::generate(env),
             amount: 1,
+            operation_id: BytesN::from_array(env, &[1; 32]),
             nonce: 0,
-            revision: 0,
+            deployment_version: 0,
             expires_at: 200,
+            now: 100,
         },
-        grant: Grant {
-            asset,
-            recipients: vec![env, recipient],
-            per_transfer: 2,
-            daily_limit: 10,
-            total_limit: 20,
-            max_calls: 5,
-            expires_at: 300,
+        EngineState {
+            grant,
+            spent: Spent::new(env),
         },
-        spent_daily: 0,
-        spent_total: 0,
-        calls: 0,
-        now: 100,
-    }
+    )
+}
+fn approved(env: &Env, engine: &Address) -> bool {
+    let (request, state) = context(env);
+    EngineClient::new(env, engine)
+        .daily_cap(&request, &state)
+        .approval
 }
 
 #[test]
 fn compiled_parent_deploys_compiled_external_reference_engine() {
     let f = Fixture::new(true);
     let state = f.client().state();
-    assert_eq!(state.upgrade_authority, f.admin);
-    assert_eq!(state.revision, 0);
+    assert_eq!(state.owner, f.admin);
+    assert_eq!(state.version, 0);
     assert_eq!(f.client().engine(), state.engine);
-    assert!(EngineClient::new(&f.env, &state.engine).evaluate(&context(&f.env)));
+    assert!(approved(&f.env, &state.engine));
 }
 
 #[test]
-fn wrong_or_absent_admin_cannot_upgrade_and_stale_revision_does_not_commit() {
+fn wrong_or_absent_admin_cannot_upgrade_and_stale_version_does_not_commit() {
     let f = Fixture::new(false);
     let c = f.client();
     let before = c.state();
@@ -114,7 +114,7 @@ fn wrong_or_absent_admin_cannot_upgrade_and_stale_revision_does_not_commit() {
     );
     assert_eq!(
         c.try_upgrade_engine(&f.engine_hash, &1),
-        Err(Ok(Error::StaleRevision))
+        Err(Ok(Error::StaleVersion))
     );
     assert_eq!(c.state(), before);
     f.auth(
@@ -123,12 +123,12 @@ fn wrong_or_absent_admin_cannot_upgrade_and_stale_revision_does_not_commit() {
         (f.engine_hash.clone(), 0u64).into_val(&f.env),
     );
     c.upgrade_engine(&f.engine_hash, &0);
-    assert_eq!(c.state().revision, 1);
+    assert_eq!(c.state().version, 1);
     assert_eq!(c.engine(), before.engine);
 }
 
 #[test]
-fn missing_uploaded_code_rolls_back_parent_revision() {
+fn missing_uploaded_code_rolls_back_parent_version() {
     let f = Fixture::new(false);
     let bad = BytesN::from_array(&f.env, &[99; 32]);
     f.auth(
@@ -137,8 +137,8 @@ fn missing_uploaded_code_rolls_back_parent_revision() {
         (bad.clone(), 0u64).into_val(&f.env),
     );
     assert!(f.client().try_upgrade_engine(&bad, &0).is_err());
-    assert_eq!(f.client().state().revision, 0);
-    assert!(EngineClient::new(&f.env, &f.client().engine()).evaluate(&context(&f.env)));
+    assert_eq!(f.client().state().version, 0);
+    assert!(approved(&f.env, &f.client().engine()));
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn rotation_requires_both_current_admin_and_candidate_for_exact_arguments() {
     assert!(f.client().try_set_admin(&next, &0).is_err());
     f.auth(&next, "set_admin", args.clone());
     assert!(f.client().try_set_admin(&next, &0).is_err());
-    assert_eq!(f.client().state().revision, 0);
+    assert_eq!(f.client().state().version, 0);
     f.env.mock_auths(&[
         MockAuth {
             address: &f.admin,
@@ -172,8 +172,8 @@ fn rotation_requires_both_current_admin_and_candidate_for_exact_arguments() {
         },
     ]);
     f.client().set_admin(&next, &0);
-    assert_eq!(f.client().state().upgrade_authority, next);
-    assert_eq!(f.client().state().revision, 1);
+    assert_eq!(f.client().state().owner, next);
+    assert_eq!(f.client().state().version, 1);
     f.auth(
         &f.admin,
         "upgrade_engine",
@@ -199,9 +199,9 @@ fn compiled_parent_self_upgrade_preserves_state_and_admin_gate() {
     f.client().upgrade_parent(&wasm, &0);
     let after = f.client().state();
     assert_eq!(after.engine, before.engine);
-    assert_eq!(after.upgrade_authority, before.upgrade_authority);
-    assert_eq!(after.revision, 1);
-    assert!(EngineClient::new(&f.env, &after.engine).evaluate(&context(&f.env)));
+    assert_eq!(after.owner, before.owner);
+    assert_eq!(after.version, 1);
+    assert!(approved(&f.env, &after.engine));
 }
 
 #[test]
@@ -209,7 +209,11 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     let f = Fixture::new(true);
     let engine = f.client().engine();
     let context = context(&f.env);
-    assert!(EngineClient::new(&f.env, &engine).evaluate(&context));
+    assert!(
+        EngineClient::new(&f.env, &engine)
+            .daily_cap(&context.0, &context.1)
+            .approval
+    );
     let deny = f
         .env
         .deployer()
@@ -222,8 +226,12 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     );
     f.client().upgrade_engine(&deny, &0);
     assert_eq!(f.client().engine(), engine);
-    assert!(!EngineClient::new(&f.env, &engine).evaluate(&context));
-    assert_eq!(f.client().state().revision, 1);
+    assert!(
+        !EngineClient::new(&f.env, &engine)
+            .daily_cap(&context.0, &context.1)
+            .approval
+    );
+    assert_eq!(f.client().state().version, 1);
     // A later authorized release can restore the engine, preserving identity.
     f.auth(
         &f.admin,
@@ -231,8 +239,12 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
         (f.engine_hash.clone(), 1u64).into_val(&f.env),
     );
     f.client().upgrade_engine(&f.engine_hash, &1);
-    assert!(EngineClient::new(&f.env, &engine).evaluate(&context));
-    assert_eq!(f.client().state().revision, 2);
+    assert!(
+        EngineClient::new(&f.env, &engine)
+            .daily_cap(&context.0, &context.1)
+            .approval
+    );
+    assert_eq!(f.client().state().version, 2);
 }
 
 #[test]
@@ -248,16 +260,16 @@ fn engine_cannot_become_its_own_upgrade_admin() {
         f.client().try_set_admin(&engine, &0),
         Err(Ok(Error::InvalidAdmin))
     );
-    assert_eq!(f.client().state().revision, 0);
+    assert_eq!(f.client().state().version, 0);
 }
 
 #[test]
-fn revision_overflow_rejects_without_switching_engine() {
+fn version_overflow_rejects_without_switching_engine() {
     let f = Fixture::new(false);
     f.env.as_contract(&f.parent, || {
-        let mut state: ParentState = f.env.storage().instance().get(&0u32).unwrap();
-        state.revision = u64::MAX;
-        f.env.storage().instance().set(&0u32, &state);
+        let mut state: ParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
+        state.version = u64::MAX;
+        f.env.storage().instance().set(&STATE_KEY, &state);
     });
     let before = f.client().state();
     f.auth(
@@ -333,4 +345,53 @@ fn engine_lookup_extends_cold_reference_instance_and_code_ttl() {
             .as_contract(&f.parent, || f.env.executable_refs().get_ttl(&tag(&f.env))),
         max
     );
+}
+
+#[test]
+fn constructor_initializes_parent_lifetime_without_an_extra_state_read() {
+    use soroban_sdk::testutils::Deployer as _;
+    let f = Fixture::new(true);
+    let max = f.env.storage().max_ttl();
+    assert_eq!(f.env.deployer().get_contract_instance_ttl(&f.parent), max);
+    assert_eq!(f.env.deployer().get_contract_code_ttl(&f.parent), max);
+}
+
+#[test]
+fn parent_administration_does_not_load_an_unavailable_engine() {
+    let f = Fixture::new(false);
+    let missing = Address::generate(&f.env);
+    f.env.as_contract(&f.parent, || {
+        let mut state: ParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
+        state.engine = missing.clone();
+        f.env.storage().instance().set(&STATE_KEY, &state);
+    });
+    assert!(f.client().try_engine().is_err());
+    f.auth(
+        &f.admin,
+        "upgrade_engine",
+        (f.engine_hash.clone(), 0u64).into_val(&f.env),
+    );
+    f.client().upgrade_engine(&f.engine_hash, &0);
+    assert_eq!(f.client().state().version, 1);
+    assert_eq!(f.client().state().engine, missing);
+}
+
+#[test]
+fn previous_parent_layout_is_not_read_as_current_state() {
+    use soroban_sdk::{Map, Symbol};
+    let f = Fixture::new(false);
+    f.env.as_contract(&f.parent, || {
+        let mut old = Map::<Symbol, Val>::new(&f.env);
+        old.set(
+            Symbol::new(&f.env, "upgrade_authority"),
+            f.admin.clone().into_val(&f.env),
+        );
+        old.set(Symbol::new(&f.env, "revision"), 0u64.into_val(&f.env));
+        old.set(
+            Symbol::new(&f.env, "engine"),
+            Address::generate(&f.env).into_val(&f.env),
+        );
+        f.env.storage().instance().set(&STATE_KEY, &old);
+    });
+    assert!(f.client().try_state().is_err());
 }

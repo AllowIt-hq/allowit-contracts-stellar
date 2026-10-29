@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import wallet_admin as wa
 import contract_admin as ca
-from stellar_sdk import Keypair, TransactionEnvelope, Account, TransactionBuilder, Address, StrKey, xdr
+from stellar_sdk import Keypair, TransactionEnvelope, Account, TransactionBuilder, Address, StrKey, xdr, scval
 
 KEYS = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 6)]
 
@@ -152,22 +152,27 @@ class NativeAdmin(unittest.TestCase):
 
 class ContractAdmin(unittest.TestCase):
     def test_exact_allowlist_and_types(self):
-        self.assertEqual(ca.checked_args("set_paused", {"paused": True, "expected_revision": 3}, "odc")["paused"], True)
-        for value in ({"paused": "false", "expected_revision": 3}, {"paused": True, "expected_revision": True}, {"paused": True, "expected_revision": 3, "target": KEYS[1]}):
+        self.assertEqual(ca.checked_args("set_pause", {"paused": True, "deployment_version": 3}, "wallet")["paused"], True)
+        for value in ({"paused": "false", "deployment_version": 3}, {"paused": True, "deployment_version": True}, {"paused": True, "deployment_version": 3, "target": KEYS[1]}):
             with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
-                ca.checked_args("set_paused", value, "odc")
-        self.assertNotIn("transfer", ca.ODC)
-        self.assertNotIn("approve", ca.ODC)
+                ca.checked_args("set_pause", value, "wallet")
+        self.assertNotIn("transfer", ca.WALLET)
+        self.assertNotIn("approve", ca.WALLET)
         self.assertNotIn("set_grant", ca.PARENT)
 
-    def test_grant_limits_and_exact_fields(self):
-        value = {"asset": KEYS[0], "recipients": [KEYS[1]], "per_transfer": 1, "daily_limit": 2, "total_limit": 3, "max_calls": 4, "expires_at": 1000}
-        ca.grant(value)
-        for key, bad in (("per_transfer", 3), ("max_calls", 0), ("expires_at", True), ("recipients", [KEYS[1], KEYS[1]])):
-            modified = copy.deepcopy(value)
-            modified[key] = bad
-            with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
-                ca.grant(modified)
+    def test_generic_grant_preserves_native_types_and_rejects_noncanonical_values(self):
+        values = {"bytes": scval.to_bytes(b"custom").to_xdr(), "negative": scval.to_int128(-9).to_xdr(),
+                  "enabled": scval.to_bool(True).to_xdr(), "amount": scval.to_uint64(0).to_xdr()}
+        self.assertEqual(ca.grant(values), values)
+        self.assertEqual(ca.grant({}), {})
+        tagged = json.loads(ca.serialize({"grant": values})[1])
+        for name, value in tagged.items():
+            self.assertEqual(xdr.SCVal.from_json_dict(value).to_xdr(), values[name])
+        for invalid in ({"x": 1}, {"x": "invalid"}, {"x": values["bytes"] + "="}, {1: values["bytes"]}):
+            with self.assertRaises((ValueError, TypeError)):
+                ca.grant(invalid)
+        with self.assertRaises(ValueError):
+            ca.public_json('{"custom":1,"custom":2}')
 
     def test_assembly_preserves_intent_and_adds_resources(self):
         raw = TransactionBuilder(Account(KEYS[0], 42), wa.PASSPHRASE["testnet"], base_fee=100).append_upload_contract_wasm_op(b"test-wasm").set_timeout(0).build()
@@ -292,9 +297,9 @@ class ContractAdmin(unittest.TestCase):
         with self.assertRaises(ValueError):
             ca.validate_auth(op)
         with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
-            ca.checked_args("set_admin", {"new_admin": contract, "expected_revision": 0}, "parent")
+            ca.checked_args("set_admin", {"owner": contract, "version": 0}, "parent")
         with self.assertRaises(ValueError):
-            ca.checked_args("recover", {"recipient": KEYS[1], "amount": 0, "expected_revision": 0}, "odc")
+            ca.checked_args("recover", {"recipient": KEYS[1], "amount": 0, "version": 0}, "wallet")
 
     def test_cli_address_errors_do_not_echo_input(self):
         scripts = Path(__file__).resolve().parents[1]
@@ -323,13 +328,22 @@ class ContractAdmin(unittest.TestCase):
         args.allow_mainnet = True
         self.assertIn("--build-only", ca.command(args))
 
+    def test_parent_arguments_use_owner_and_version(self):
+        values = {"owner": KEYS[1], "version": 0}
+        self.assertEqual(ca.checked_args("set_admin", values, "parent"), values)
+        for old in ({"new_admin": KEYS[1], "expected_revision": 0},
+                    {"owner": KEYS[1], "version": -1},
+                    {"owner": KEYS[1], "version": 2**64}):
+            with self.assertRaises(ValueError):
+                ca.checked_args("set_admin", old, "parent")
+
     def test_deployment_requires_matching_local_wasm(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "contract.wasm"
             path.write_bytes(b"test-wasm")
             expected = hashlib.sha256(path.read_bytes()).hexdigest()
             options = SimpleNamespace(action="deploy-parent", network="testnet", allow_mainnet=False, source=KEYS[0],
-                wasm=str(path), wasm_hash=expected, admin=KEYS[0], engine_wasm="11" * 32)
+                wasm=str(path), wasm_hash=expected, owner=KEYS[0], engine_wasm="11" * 32)
             command = ca.command(options)
             self.assertIn("--wasm", command)
             self.assertNotIn("--wasm-hash", command)
@@ -340,22 +354,22 @@ class ContractAdmin(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ca.command(options)
 
-    def test_odc_constructor_requires_explicit_nonzero_policy_identity(self):
+    def test_wallet_constructor_requires_explicit_nonzero_policy_identity(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "odc.wasm"
+            path = Path(directory) / "wallet.wasm"
             path.write_bytes(b"reviewed-artifact")
             asset = StrKey.encode_contract(bytes([2]) * 32)
             engine = StrKey.encode_contract(bytes([3]) * 32)
-            values = {"asset": asset, "recipients": [KEYS[3]], "per_transfer": 10,
-                      "daily_limit": 20, "total_limit": 30, "max_calls": 5, "expires_at": 1000}
-            args = SimpleNamespace(action="deploy-odc", network="testnet", allow_mainnet=False,
-                source=KEYS[0], owner=KEYS[0], agent=KEYS[1], engine=engine,
-                wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
-                grant=json.dumps(values), policy_instance="11" * 32)
+            values = {"custom": scval.to_bytes(b"preserved").to_xdr()}
+            config = {"owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "asset": asset,
+                "source_digest": "22" * 32, "rules": [], "grant": values, "x402_enabled": False, "policy_instance": "11" * 32}
+            args = SimpleNamespace(action="deploy-wallet", network="testnet", allow_mainnet=False,
+                source=KEYS[0], config=json.dumps(config), wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest())
             command = ca.command(args)
-            self.assertEqual(command[command.index("--policy-instance") + 1], "11" * 32)
+            self.assertEqual(json.loads(command[command.index("--config") + 1])["policy_instance"], "11" * 32)
             for identity in (None, "", "00" * 32, "not-a-policy-id"):
-                args.policy_instance = identity
+                config["policy_instance"] = identity
+                args.config = json.dumps(config)
                 with self.assertRaises(ValueError):
                     ca.command(args)
 
