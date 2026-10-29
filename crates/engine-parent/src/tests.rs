@@ -65,7 +65,7 @@ fn context(env: &Env) -> EngineContext {
             recipient: recipient.clone(),
             amount: 1,
             nonce: 0,
-            revision: 0,
+            deployment_version: 0,
             expires_at: 200,
         },
         grant: Grant {

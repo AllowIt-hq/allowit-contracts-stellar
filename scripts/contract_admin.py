@@ -15,7 +15,7 @@ from wallet_admin import admin as verify_admin, fetch, owner_only, PASSPHRASE
 # No transfers, token approvals, general calls or arbitrary method dispatch.
 ODC = {
     "deploy_policy": {"deployment"},
-    "set_pause": {"paused", "policy_version"},
+    "set_pause": {"paused", "deployment_version"},
     "recover": {"recipient", "amount"},
 }
 
@@ -83,17 +83,19 @@ def grant(value):
 
 
 def deployment(value):
-    fields = {"policy_version", "owner", "agent", "engine", "grant", "paused", "x402_signer", "wasm_hash"}
+    fields = {"deployment_version", "owner", "agent", "engine", "grant", "paused", "x402_enabled", "wasm_hash"}
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("Deployment fields must exactly match the ODC ABI")
-    if type(value["policy_version"]) is not int or not 0 < value["policy_version"] < 2**64:
-        raise ValueError("Invalid policy version")
+    if type(value["deployment_version"]) is not int or not 0 < value["deployment_version"] < 2**64:
+        raise ValueError("Invalid deployment version")
     for role in ("owner", "agent", "engine"):
         address(value[role])
     grant(value["grant"])
     if type(value["paused"]) is not bool:
         raise ValueError("paused must be boolean")
-    for name in ("x402_signer", "wasm_hash"):
+    if type(value["x402_enabled"]) is not bool:
+        raise ValueError("x402_enabled must be boolean")
+    for name in ("wasm_hash",):
         if value[name] is not None:
             code_hash(value[name])
     return value
@@ -106,9 +108,9 @@ def checked_args(method, values, family):
     for key, value in values.items():
         if key == "deployment":
             deployment(value)
-        elif key == "policy_version":
+        elif key == "deployment_version":
             if type(value) is not int or not 0 < value < 2**64:
-                raise ValueError("Invalid policy version")
+                raise ValueError("Invalid deployment version")
         elif key == "expected_revision" or key == "amount":
             if type(value) is not int or (value < 0 if key == "expected_revision" else value <= 0) or value > (2**64 - 1 if key == "expected_revision" else 2**127 - 1):
                 raise ValueError("Invalid integer " + key)
@@ -322,8 +324,8 @@ def main():
             if values["expected_revision"] != state["revision"]:
                 raise ValueError("Expected revision does not match current state")
         elif args.method != "recover":
-            target = values["deployment"]["policy_version"] if args.method == "deploy_policy" else values["policy_version"]
-            if target != state["policy_version"] + 1:
+            target = values["deployment"]["deployment_version"] if args.method == "deploy_policy" else values["deployment_version"]
+            if target != state["deployment_version"] + 1:
                 raise ValueError("Policy deployment must use the next version")
     output = cli_run(prepared)
     candidate = None

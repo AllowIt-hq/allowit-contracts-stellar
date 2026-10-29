@@ -32,54 +32,61 @@ mod generated_policy;
 compile_error!("Select only one test policy fixture");
 
 const DAY: u64 = 86_400;
-const VERSION: u32 = 2;
+/// First explicitly numbered kernel release, not Cargo package semver or an admin counter.
+const CONTRACT_VERSION: u32 = 1;
 const TTL_THRESHOLD: u32 = 100_000;
 const TTL_EXTEND: u32 = 200_000;
 
+/// Protected wallet state for one contract release. Ordinary calls never migrate this layout.
+/// Incompatible changes require explicit maintenance: pause, deploy and run a migration contract,
+/// deploy the policy contract using the migrated state, then unpause. This ABI provides no migration helper.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct State {
-    pub version: u32,
+    /// Contract release that owns this stored layout. Unknown releases reject instead of guessing a conversion.
+    pub contract_version: u32,
+    /// Current owner address. Native address authorization controls administration and financial recovery.
     pub owner: Address,
+    /// Configured delegated executor address. The x402 path derives its signing key from an enabled G-address agent.
     pub agent: Address,
+    /// Shared veto-engine address. Engine approval cannot replace local policy checks or authorize owner administration.
     pub engine: Address,
+    /// Local spending permissions and independent ceilings, enforced even when the shared engine approves.
     pub grant: Grant,
+    /// Successful delegated spending in native asset base units for spent_day; owner funding does not reset it.
     pub spent_daily: i128,
+    /// UTC day number, floor of the ledger timestamp divided by 86400, for spent_daily.
     pub spent_day: u64,
+    /// Cumulative successful delegated spending in native asset base units; configuration changes preserve it.
     pub spent_total: i128,
+    /// Number of successful delegated transfers, shared across execute and x402 and bounded by max_calls.
     pub calls: u64,
+    /// Strict next execution sequence shared by delegated spending paths. It is distinct from the native authorization nonce.
     pub nonce: u64,
-    pub policy_version: u64,
-    pub paused: bool,
-}
-
-#[contracttype]
-#[derive(Clone)]
-struct LegacyState {
-    pub version: u32,
-    pub owner: Address,
-    pub agent: Address,
-    pub engine: Address,
-    pub grant: Grant,
-    pub spent_daily: i128,
-    pub spent_day: u64,
-    pub spent_total: i128,
-    pub calls: u64,
-    pub nonce: u64,
-    pub revision: u64,
+    /// Active owner configuration counter. Executions use the current value; configuration changes target exactly the next value.
+    pub deployment_version: u64,
+    /// Whether delegated spending is blocked. Independent owner administration and recovery remain available.
     pub paused: bool,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyDeployment {
-    pub policy_version: u64,
+    /// Target owner configuration counter, exactly active deployment_version plus one. Stale or skipped targets reject.
+    pub deployment_version: u64,
+    /// Desired owner address. A handoff requires both the current and desired owners to authorize the exact packet.
     pub owner: Address,
+    /// Configured delegated executor address. The x402 path derives its signing key from an enabled G-address agent.
     pub agent: Address,
+    /// Shared veto-engine address. Engine approval cannot replace local policy checks or authorize owner administration.
     pub engine: Address,
+    /// Local spending permissions and independent ceilings, enforced even when the shared engine approves.
     pub grant: Grant,
+    /// Whether delegated spending is blocked. Independent owner administration and recovery remain available.
     pub paused: bool,
-    pub x402_signer: Option<BytesN<32>>,
+    /// Explicit owner opt-in for the exact SAC authorization path. Agent or grant changes require false before later re-enablement.
+    pub x402_enabled: bool,
+    /// Optional owner-selected uploaded kernel hash. The host applies it atomically with the configuration deployment.
     pub wasm_hash: Option<BytesN<32>>,
 }
 
@@ -116,24 +123,63 @@ enum Key {
     X402Config,
 }
 
-/// An owner-delegated raw Ed25519 key. Native account thresholds do not revoke it.
+/// Enabled agent identity and authenticated asset label. The raw key is derived from the G-address.
+/// Native account threshold or signer changes do not revoke this owner delegation.
 #[contracttype]
 #[derive(Clone)]
 pub struct X402Config {
+    /// Configured delegated executor address. The x402 path derives its signing key from an enabled G-address agent.
     pub agent: Address,
-    pub public_key: BytesN<32>,
+    /// Authenticated installed asset label, cached outside the active SAC call to avoid authorization reentry.
     pub token: String,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct X402Authorization {
+    /// Complete request bound to the host authorization payload, active deployment version and exact SAC transfer.
     pub execution: ExecutionRequest,
+    /// 64-byte Ed25519 agent signature over the domain-separated host authorization payload and complete execution request.
     pub signature: BytesN<64>,
 }
 
 #[contract]
 pub struct Odc;
+
+fn agent_public_key(env: &Env, agent: &Address) -> Result<BytesN<32>, Error> {
+    let encoded = agent.to_xdr(env);
+    let prefix = [0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0];
+    if encoded.len() != 44
+        || prefix
+            .iter()
+            .enumerate()
+            .any(|(i, byte)| encoded.get(i as u32) != Some(*byte))
+    {
+        return Err(Error::InvalidActor);
+    }
+    let mut key = [0u8; 32];
+    encoded.slice(12..44).copy_into_slice(&mut key);
+    Ok(BytesN::from_array(env, &key))
+}
+
+fn x402_config(env: &Env, agent: &Address) -> Result<X402Config, Error> {
+    let raw: soroban_sdk::Val = env
+        .storage()
+        .instance()
+        .get(&Key::X402Config)
+        .ok_or(Error::UnsupportedOperation)?;
+    let config = X402Config::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
+    if config.agent != *agent {
+        return Err(Error::InvalidActor);
+    }
+    agent_public_key(env, agent)?;
+    let fields = soroban_sdk::Map::<Symbol, soroban_sdk::Val>::try_from_val(env, &raw)
+        .map_err(|_| Error::InvalidState)?;
+    if fields.len() != 2 {
+        return Err(Error::InvalidState);
+    }
+    Ok(config)
+}
 
 fn binding(env: &Env) -> Result<PolicyBinding, Error> {
     if generated_policy::SOURCE_PROFILE != "allowit-stellar-transfer-v1"
@@ -156,7 +202,7 @@ fn binding(env: &Env) -> Result<PolicyBinding, Error> {
         return Err(Error::InvalidState);
     };
     Ok(PolicyBinding {
-        interface_version: VERSION,
+        contract_version: CONTRACT_VERSION,
         policy_instance,
         module_digest,
         source_digest: BytesN::from_array(env, &generated_policy::SOURCE_HASH),
@@ -171,32 +217,10 @@ fn load(env: &Env) -> Result<State, Error> {
         .instance()
         .get(&0u32)
         .ok_or(Error::InvalidState)?;
-    let s = if let Ok(state) = State::try_from_val(env, &raw) {
-        if state.version != VERSION {
-            return Err(Error::InvalidState);
-        }
-        state
-    } else {
-        let old = LegacyState::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
-        if old.version != 1 {
-            return Err(Error::InvalidState);
-        }
-        State {
-            version: VERSION,
-            owner: old.owner,
-            agent: old.agent,
-            engine: old.engine,
-            grant: old.grant,
-            spent_daily: old.spent_daily,
-            spent_day: old.spent_day,
-            spent_total: old.spent_total,
-            calls: old.calls,
-            nonce: old.nonce,
-            policy_version: old.revision,
-            paused: old.paused,
-        }
-    };
-    if s.version != VERSION {
+    let s = State::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
+    let fields = soroban_sdk::Map::<Symbol, soroban_sdk::Val>::try_from_val(env, &raw)
+        .map_err(|_| Error::InvalidState)?;
+    if s.contract_version != CONTRACT_VERSION || fields.len() != 12 {
         return Err(Error::InvalidState);
     }
     env.storage()
@@ -212,11 +236,11 @@ fn store(env: &Env, state: &State) {
         .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
 }
 
-fn commit_deployment(env: &Env, s: &mut State, policy_version: u64) -> Result<(), Error> {
-    if s.policy_version.checked_add(1).ok_or(Error::Overflow)? != policy_version {
+fn commit_deployment(env: &Env, s: &mut State, deployment_version: u64) -> Result<(), Error> {
+    if s.deployment_version.checked_add(1).ok_or(Error::Overflow)? != deployment_version {
         return Err(Error::StaleRequest);
     }
-    s.policy_version = policy_version;
+    s.deployment_version = deployment_version;
     store(env, s);
     Ok(())
 }
@@ -345,13 +369,13 @@ fn admit(
         recipient: arguments.to.clone(),
         amount: arguments.amount,
         nonce: execution.nonce,
-        revision: execution.policy_version,
+        deployment_version: execution.deployment_version,
         expires_at: execution.expires_at,
     };
     if s.paused {
         return Err(Error::Paused);
     }
-    if request.nonce != s.nonce || request.revision != s.policy_version {
+    if request.nonce != s.nonce || request.deployment_version != s.deployment_version {
         return Err(Error::StaleRequest);
     }
     let now = env.ledger().timestamp();
@@ -437,7 +461,7 @@ fn admit(
         to: request.recipient,
         amount: request.amount,
         nonce: request.nonce,
-        policy_version: request.revision,
+        deployment_version: request.deployment_version,
     };
     env.storage().persistent().set(&operation_key, &receipt);
     let ttl = env.storage().max_ttl();
@@ -449,6 +473,18 @@ fn admit(
 
 #[contractimpl]
 impl Odc {
+    /// Create an owner-authorized wallet with immutable asset identity and zero consumption.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    /// - `owner`: Independent administration authority; authorizes this exact constructor.
+    /// - `agent`: Delegated executor, distinct from owner, engine and this wallet.
+    /// - `engine`: Shared veto address; it receives no custody authority.
+    /// - `grant`: Initial local permissions with a seven-decimal native SAC and future expiry.
+    /// - `policy_instance`: Nonzero stable 32-byte logical identity retained across deployments.
+    ///
+    /// # Returns
+    /// Returns no value. Failed admission or authorization rolls back creation.
     pub fn __constructor(
         env: Env,
         owner: Address,
@@ -478,7 +514,7 @@ impl Odc {
         store(
             &env,
             &State {
-                version: VERSION,
+                contract_version: CONTRACT_VERSION,
                 owner,
                 agent,
                 engine,
@@ -488,23 +524,42 @@ impl Odc {
                 spent_total: 0,
                 calls: 0,
                 nonce: 0,
-                policy_version: 0,
+                deployment_version: 0,
                 paused: false,
             },
         );
     }
 
+    /// Read wallet state after validating its contract release and exact stored layout.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    ///
+    /// # Returns
+    /// Returns current state without resetting counters. This read does not invoke the engine.
     pub fn state(env: Env) -> Result<State, Error> {
         load(&env)
     }
 
-    /// Immutable installed native module and argument schema for the generated policy wrapper.
+    /// Read installed policy identities and the executing contract release.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    ///
+    /// # Returns
+    /// Returns local binding metadata. It never calls the engine or depends on engine availability.
     pub fn policy_binding(env: Env) -> Result<PolicyBinding, Error> {
         binding(&env)
     }
 
-    /// Generated transport wrapper around the statically compiled private owner policy.
-    /// The admitted native operation is stellar::sep41_transfer, not a second wallet API.
+    /// Execute one exact delegated SAC transfer through the compiled policy and local grant.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    /// - `execution`: Canonical installed invocation, current deployment_version, next execution nonce, logical ID and expiry.
+    ///
+    /// # Returns
+    /// Returns the committed transfer receipt. Effects, consumption and replay records roll back together on failure.
     pub fn execute(env: Env, execution: ExecutionRequest) -> Result<TransferReceipt, Error> {
         let s = load(&env)?;
         s.agent.require_auth();
@@ -513,10 +568,19 @@ impl Odc {
         Ok(receipt)
     }
 
-    /// Apply one complete owner-approved policy deployment at the next version.
+    /// Commit one complete owner-approved policy configuration at the next deployment version.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    /// - `deployment`: Complete desired configuration, target active version plus one and optional uploaded kernel hash. A changed owner must also authorize.
+    ///
+    /// # Returns
+    /// Returns success after an atomic configuration commit. Existing consumption, execution nonce and operation IDs remain intact.
     pub fn deploy_policy(env: Env, deployment: PolicyDeployment) -> Result<(), Error> {
         let mut s = owner_state(&env)?;
-        if s.policy_version.checked_add(1).ok_or(Error::Overflow)? != deployment.policy_version {
+        if s.deployment_version.checked_add(1).ok_or(Error::Overflow)?
+            != deployment.deployment_version
+        {
             return Err(Error::StaleRequest);
         }
         validate_roles(
@@ -532,23 +596,15 @@ impl Odc {
         if deployment.owner != s.owner {
             deployment.owner.require_auth();
         }
-        if (deployment.agent != s.agent || deployment.grant != s.grant)
-            && deployment.x402_signer.is_some()
-        {
+        if (deployment.agent != s.agent || deployment.grant != s.grant) && deployment.x402_enabled {
             return Err(Error::InvalidActor);
         }
-        if let Some(public_key) = deployment.x402_signer {
-            let mut encoded = Bytes::from_slice(&env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0]);
-            encoded.append(&public_key.clone().into());
-            let agent = Address::from_xdr(&env, &encoded).map_err(|_| Error::InvalidActor)?;
-            if agent != deployment.agent {
-                return Err(Error::InvalidActor);
-            }
+        if deployment.x402_enabled {
+            agent_public_key(&env, &deployment.agent)?;
             env.storage().instance().set(
                 &Key::X402Config,
                 &X402Config {
-                    agent,
-                    public_key,
+                    agent: deployment.agent.clone(),
                     token: policy_token(&env, &s.grant.asset),
                 },
             );
@@ -560,7 +616,7 @@ impl Odc {
         s.engine = deployment.engine;
         s.grant = deployment.grant;
         s.paused = deployment.paused;
-        commit_deployment(&env, &mut s, deployment.policy_version)?;
+        commit_deployment(&env, &mut s, deployment.deployment_version)?;
         if let Some(hash) = deployment.wasm_hash {
             env.deployer()
                 .update_current_contract(soroban_sdk::ContractExecutable::Wasm(hash));
@@ -568,22 +624,47 @@ impl Odc {
         Ok(())
     }
 
-    /// Pause changes use the same next-policy-version sequence as deployments.
-    pub fn set_pause(env: Env, paused: bool, policy_version: u64) -> Result<(), Error> {
+    /// Pause or resume delegated execution using the shared owner configuration sequence.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    /// - `paused`: True blocks delegated spending; false permits it subject to all policy checks.
+    /// - `deployment_version`: Target version, exactly current plus one. No independent admin nonce exists.
+    ///
+    /// # Returns
+    /// Returns success after owner authorization and one version increment. It does not call the engine.
+    pub fn set_pause(env: Env, paused: bool, deployment_version: u64) -> Result<(), Error> {
         let mut s = owner_state(&env)?;
         s.paused = paused;
-        commit_deployment(&env, &mut s, policy_version)
+        commit_deployment(&env, &mut s, deployment_version)
     }
 
     // A separate `recover_funds` ABI is unnecessary once `__check_auth` admits
     // owner-authorized token calls. The SDK delegates recovery to the Stellar rail vendor.
+
+    /// Move installed-asset funds under independent owner authorization.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    /// - `recipient`: Owner-selected destination, distinct from the wallet.
+    /// - `amount`: Positive native i128 base units of the installed SAC to transfer.
+    ///
+    /// # Returns
+    /// Returns success after exact balance-effect checks. It has no caller version fence and does not change delegated counters.
     pub fn recover(env: Env, recipient: Address, amount: i128) -> Result<(), Error> {
         let s = owner_state(&env)?;
         move_tokens(&env, &s.grant.asset, &recipient, amount)
     }
 
-    /// General calls and arbitrary authorization are outside this transfer-only ABI.
-    pub fn unsupported(_env: Env) -> Result<(), Error> {
+    /// Reject general calls and arbitrary authorization outside the admitted transfer ABI.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    ///
+    /// # Returns
+    /// Always returns UnsupportedOperation without authorizing an effect.
+    pub fn unsupported(env: Env) -> Result<(), Error> {
+        let _ = env;
         Err(Error::UnsupportedOperation)
     }
 }
@@ -596,6 +677,16 @@ impl CustomAccountInterface for Odc {
     type Signature = X402Authorization;
     type Error = Error;
 
+    /// Authorize one exact installed-SAC transfer for the explicitly enabled G-address agent.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    /// - `signature_payload`: Host-supplied digest binding network, native authorization nonce, expiry and invocation tree.
+    /// - `authorization`: Agent signature and complete installed execution request for this exact transfer.
+    /// - `contexts`: Exactly one transfer context matching the installed SAC, wallet source, recipient and amount.
+    ///
+    /// # Returns
+    /// Returns success only after derived-key verification and shared policy admission. Enclosing transaction failure rolls back accounting.
     fn __check_auth(
         env: Env,
         signature_payload: Hash<32>,
@@ -603,11 +694,7 @@ impl CustomAccountInterface for Odc {
         contexts: Vec<Context>,
     ) -> Result<(), Error> {
         let s = load(&env)?;
-        let config: X402Config = env
-            .storage()
-            .instance()
-            .get(&Key::X402Config)
-            .ok_or(Error::UnsupportedOperation)?;
+        let config = x402_config(&env, &s.agent)?;
         if config.agent != s.agent || contexts.len() != 1 {
             return Err(Error::InvalidActor);
         }
@@ -648,7 +735,7 @@ impl CustomAccountInterface for Odc {
                 .to_xdr(&env),
         );
         env.crypto().ed25519_verify(
-            &config.public_key,
+            &agent_public_key(&env, &s.agent)?,
             &digest.to_bytes().into(),
             &authorization.signature,
         );

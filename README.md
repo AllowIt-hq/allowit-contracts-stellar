@@ -1,6 +1,6 @@
 # AllowIt native Stellar contracts
 
-`allowit-odc` is an owner-controlled SAC transfer wallet. The public `execute(...)` wrapper authenticates the installed module, private entrypoint, schema and canonical arguments. It then calls the statically compiled owner policy. It checks recipient permissions, per-transfer/daily/lifetime caps, call count, expiry, nonce and policy version locally. Amounts use exact native `i128` units. The shared `allowit-wallet-engine` returns only a veto decision. `allowit-engine-parent` manages its shared executable and separate upgrade authority.
+`allowit-odc` is an owner-controlled SAC transfer wallet. The public `execute(...)` wrapper authenticates the installed module, private entrypoint, schema and canonical arguments. It then calls the statically compiled owner policy. It checks recipient permissions, per-transfer/daily/lifetime caps, call count, expiry, nonce and deployment version locally. Amounts use exact native `i128` units. The shared `allowit-wallet-engine` returns only a veto decision. `allowit-engine-parent` manages its shared executable and separate upgrade authority.
 
 Owner policy deployments, pause and recovery never call the engine. Spending counters survive configuration changes. General calls, token approvals and arbitrary contract-account signing are unsupported. The owner can enable exact SAC transfer authorization for standard Stellar x402. Fund the ODC with a direct SAC transfer.
 
@@ -42,10 +42,10 @@ Each spending path authenticates the agent and binds exact canonical arguments. 
 
 ## Standard x402 authorization
 
-The owner selects or revokes the constrained signer in a complete `deploy_policy(deployment)` packet.
-The Ed25519 key must identify the configured G-account agent. This explicitly delegates that raw key.
+The owner enables or disables the constrained agent signer in a complete `deploy_policy(deployment)` packet.
+The Ed25519 key is derived from the configured G-account agent. Explicit `x402_enabled` opt-in delegates that key.
 Native account threshold changes do not revoke it. Disable it explicitly or replace the agent.
-A grant or agent change requires `x402_signer: None`. A later deployment can delegate a matching key.
+A grant or agent change requires `x402_enabled: false`. A later deployment can enable the derived key.
 New wallets start with the path disabled.
 
 `__check_auth` accepts one exact installed-SAC `transfer(wallet, recipient, amount)` context.
@@ -59,14 +59,21 @@ Owner recovery and administration remain independent of this path and the engine
 
 ## Versioned owner policy deployment
 
-`deploy_policy` accepts `PolicyDeployment`: `policy_version`, `owner`, `agent`, `engine`, `grant`,
-`paused`, `x402_signer` and optional `wasm_hash`. The target version must equal the active version plus one.
+`deploy_policy` accepts `PolicyDeployment`: `deployment_version`, `owner`, `agent`, `engine`, `grant`,
+`paused`, `x402_enabled` and optional `wasm_hash`. The target version must equal the active version plus one.
 Owner, grant, agent, engine, pause, delegated key and kernel changes use this same signed deployment path.
 A changed owner also authorizes the exact packet. The asset remains fixed. Accounting and replay records survive.
 
-`set_pause(paused, policy_version)` uses the same next-version ordering without an engine call.
+`set_pause(paused, deployment_version)` uses the same next-version ordering without an engine call.
 `recover(recipient, amount)` authenticates the owner and moves funds without a configuration version or version increment.
-Agent execution binds the active `policy_version`, so an owner deployment invalidates earlier preparations.
-`policy_binding().interface_version` identifies wire interface 2 independently of the stored state format.
-The reader converts known V1 `revision` state into the same policy-version value without resetting funds or counters.
-The private shared-engine wire keeps `revision` as an alias of that single value.
+Agent execution binds the active `deployment_version`, so an owner deployment invalidates earlier preparations.
+`policy_binding().contract_version` identifies the supported contract release and call format.
+Stored state carries the same release value. This format requires a fresh deployment and rejects
+pre-stable layouts instead of performing an implicit conversion. For an incompatible state change,
+pause, deploy and run a migration contract, deploy the new contract using the migrated state, then
+unpause. Normal contract operations never migrate state.
+The shared engine context uses the same `deployment_version` value.
+
+`contract_version: 1` is the first explicitly numbered kernel release. `engine_version()` returns
+that engine executable's release number. These are not Cargo semver or parent administration counters. Exact Wasm digests still identify executable bytes. Reading the
+wallet binding never calls the engine; engine metadata is a separate optional observation.

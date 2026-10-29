@@ -16,7 +16,7 @@ flowchart LR
     W -->|execute after approval and local checks| T[Admitted targets]
 ```
 
-The owner controls ODC code upgrades, policy configuration, agent delegation and engine binding. Owner administration, pause and recovery use independent entrypoints that never call the engine. Engine failure, denial or upgrade cannot block those paths. An ODC authority change invalidates stale agent requests through a policy version change. Owner handoff requires current-owner authorization and candidate acceptance, preserving accounting. The owner address must be owner-only: no agent or engine signer may reach its medium threshold.
+The owner controls ODC code upgrades, policy configuration, agent delegation and engine binding. Owner administration, pause and recovery use independent entrypoints that never call the engine. Engine failure, denial or upgrade cannot block those paths. An ODC authority change invalidates stale agent requests through a deployment version change. Owner handoff requires current-owner authorization and candidate acceptance, preserving accounting. The owner address must be owner-only: no agent or engine signer may reach its medium threshold.
 
 Store a direct owner-selected Wasm hash in each ODC executable. Many ODC instances can share the same small kernel Wasm while retaining separate state. Compiled Rust implements the kernel and its owner-approved deterministic policy checks. Source need not be duplicated per wallet. Owner dispatch and envelope checks remain in owner-trusted code, outside the system-upgradeable engine. No policy interpreter belongs in this custody boundary. Stellar stores [contract code separately from instance state](https://developers.stellar.org/docs/learn/fundamentals/contract-development/overview), so identical Wasm need not be uploaded for each wallet.
 
@@ -54,21 +54,28 @@ Issuer clawback or freeze, malicious admitted tokens or targets, owner-key compr
 
 ## x402 signer delegation
 
-The owner selects an optional `x402_signer` in a complete `deploy_policy` packet.
-This delegates a raw Ed25519 key matching the configured G-account agent. Native threshold changes
-do not revoke that key. Selecting no key revokes the path. An agent or grant change requires no key in that deployment.
-State schema 2 names the single configuration counter `policy_version`. The reader accepts known V1 state
-by mapping `revision` to that value. Separate configuration stores the signer and admitted asset label.
+The owner sets `x402_enabled` in a complete `deploy_policy` packet.
+This explicitly delegates the Ed25519 key derived from the configured G-account agent. Native threshold changes
+do not revoke that key. Selecting false revokes the path. An agent or grant change requires false in that deployment.
+Separate configuration stores the enabled agent and admitted asset label, without a duplicate public key.
 The authorization signature binds the host payload and full canonical execution request under `allowit_x402_v1`.
 The host binds network, authorization nonce, ledger expiry and invocation tree. The kernel additionally
-checks local request expiry, policy/module/schema, operation ID, nonce and configuration revision.
+checks local request expiry, policy/module/schema, operation ID, nonce and deployment version.
 
 ## Policy versions
 
-All owner configuration changes use one complete `PolicyDeployment` packet and the next `policy_version`.
-The packet fixes owner, agent, engine, grant, pause state, optional delegated key and optional kernel hash.
-Owner handoff also requires candidate authorization. `set_pause(paused, policy_version)` uses the same
+All owner configuration changes use one complete `PolicyDeployment` packet and the next `deployment_version`.
+The packet fixes owner, agent, engine, grant, pause state, explicit x402 opt-in and optional kernel hash.
+Owner handoff also requires candidate authorization. `set_pause(paused, deployment_version)` uses the same
 version commit. Both reject stale or skipped versions without changing state. They never invoke the engine.
 Agent requests bind the active version. Funds, spending, nonces and operation IDs survive configuration changes.
 Financial `recover(recipient, amount)` needs owner authorization, has no caller version fence and does not
-change policy version. The private engine ABI maps its `revision` field to the same active policy version.
+change deployment version. The shared engine context carries the same active `deployment_version`.
+
+`contract_version` numbers the compiled kernel release; `engine_version` numbers the engine executable
+release. Both start at 1. The stored `contract_version` identifies the layout owned by that release.
+The loader accepts one known format. Fresh deployment is required for this pre-stable format.
+Compatible code updates retain the same state layout. Incompatible state changes follow explicit
+maintenance: pause, deploy and run a migration contract, deploy the policy contract using the migrated
+state, then unpause. Ordinary operations never migrate state. Engine metadata never gates owner
+authority, and parent administrative revision remains separate.

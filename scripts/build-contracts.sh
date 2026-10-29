@@ -4,7 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 scripts/check-policy-bindings.py
 python3 scripts/verify-generated-policies.py
-python3 scripts/build-upgrade-fixture.py
 stellar_bin="${STELLAR_BIN:-stellar}"
 "$stellar_bin" contract build --locked --package allowit-wallet-engine --features test-deny
 mkdir -p target/test-fixtures

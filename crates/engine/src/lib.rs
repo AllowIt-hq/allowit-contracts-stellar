@@ -5,10 +5,33 @@ use soroban_sdk::{Env, contract, contractimpl};
 #[contract]
 pub struct Engine;
 
+/// First explicitly numbered engine executable release; not a parent administration counter.
+const ENGINE_VERSION: u32 = 1;
+
 #[contractimpl]
 impl Engine {
-    /// Pure veto: callers must enforce custody and authenticate observations.
-    pub fn evaluate(_env: Env, context: EngineContext) -> bool {
+    /// Read this engine executable's declared release metadata.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    ///
+    /// # Returns
+    /// Returns ENGINE_VERSION without state reads, authorization or spending effects.
+    pub fn engine_version(env: Env) -> u32 {
+        let _ = env;
+        ENGINE_VERSION
+    }
+
+    /// Evaluate an additional bounded veto from custody-supplied observations.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided execution environment; callers do not serialize this argument.
+    /// - `context`: Exact transfer, local grant, protected counters and ledger time supplied by the wallet. The record alone grants no authority.
+    ///
+    /// # Returns
+    /// Returns true only when these checks permit the proposal. The caller must independently enforce custody and actual effects.
+    pub fn evaluate(env: Env, context: EngineContext) -> bool {
+        let _ = env;
         // Compiled replacement fixture: an upgraded engine may veto everything.
         if cfg!(feature = "test-deny") {
             return false;

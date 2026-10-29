@@ -70,21 +70,17 @@ impl<'a> TestClient<'a> {
     }
     fn deployment(&self, previous: u64) -> PolicyDeployment {
         let s = self.state();
-        let key = self.env.as_contract(self.wallet, || {
-            self.env
-                .storage()
-                .instance()
-                .get::<_, X402Config>(&Key::X402Config)
-                .map(|c| c.public_key)
+        let enabled = self.env.as_contract(self.wallet, || {
+            self.env.storage().instance().has(&Key::X402Config)
         });
         PolicyDeployment {
-            policy_version: previous.checked_add(1).unwrap(),
+            deployment_version: previous.checked_add(1).unwrap(),
             owner: s.owner,
             agent: s.agent,
             engine: s.engine,
             grant: s.grant,
             paused: s.paused,
-            x402_signer: key,
+            x402_enabled: enabled,
             wasm_hash: None,
         }
     }
@@ -99,7 +95,7 @@ impl<'a> TestClient<'a> {
     {
         let mut p = self.deployment(*previous);
         p.grant = grant.clone();
-        p.x402_signer = None;
+        p.x402_enabled = false;
         self.client.try_deploy_policy(&p)
     }
     fn set_agent(&self, agent: &Address, previous: &u64) {
@@ -113,7 +109,7 @@ impl<'a> TestClient<'a> {
     {
         let mut p = self.deployment(*previous);
         p.agent = agent.clone();
-        p.x402_signer = None;
+        p.x402_enabled = false;
         self.client.try_deploy_policy(&p)
     }
     fn set_engine(&self, engine: &Address, previous: &u64) {
@@ -142,9 +138,9 @@ impl<'a> TestClient<'a> {
         self.client
             .try_set_pause(paused, &previous.checked_add(1).unwrap())
     }
-    fn set_x402_signer(&self, key: &Option<BytesN<32>>, previous: &u64) {
+    fn set_x402_enabled(&self, enabled: bool, previous: &u64) {
         let mut p = self.deployment(*previous);
-        p.x402_signer = key.clone();
+        p.x402_enabled = enabled;
         self.client.deploy_policy(&p);
     }
     fn transfer_owner(&self, owner: &Address, previous: &u64) {
@@ -193,7 +189,7 @@ impl<'a> TestClient<'a> {
             policy_instance: installed.policy_instance,
             operation_id: BytesN::from_array(self.env, &id),
             nonce: request.nonce,
-            policy_version: request.revision,
+            deployment_version: request.deployment_version,
             expires_at: request.expires_at,
             invocation: allowit_wallet_protocol::PolicyInvocation {
                 module_digest: installed.module_digest,
@@ -300,7 +296,7 @@ impl Fixture {
             recipient: self.recipient.clone(),
             amount,
             nonce: state.nonce,
-            revision: state.policy_version,
+            deployment_version: state.deployment_version,
             expires_at: self.env.ledger().timestamp() + 100,
         }
     }
@@ -386,19 +382,19 @@ fn failed_engines_cannot_block_owner_pause_recovery_or_reconfiguration() {
     let trap = f.env.register(Trap, ());
     let missing = Address::generate(&f.env);
     for engine in [deny, trap, missing] {
-        c.set_engine(&engine, &c.state().policy_version);
+        c.set_engine(&engine, &c.state().deployment_version);
         let before = c.state();
         assert_eq!(c.try_transfer(&f.request(1)), Err(Ok(Error::EngineDenied)));
         assert_eq!(c.state(), before);
-        c.set_paused(&true, &c.state().policy_version);
+        c.set_paused(&true, &c.state().deployment_version);
         assert_eq!(c.try_transfer(&f.request(1)), Err(Ok(Error::Paused)));
-        c.recover(&f.owner, &1, &c.state().policy_version);
-        c.set_paused(&false, &c.state().policy_version);
+        c.recover(&f.owner, &1, &c.state().deployment_version);
+        c.set_paused(&false, &c.state().deployment_version);
         assert_eq!(c.state().spent_total, 0);
         assert_eq!(c.state().nonce, 0);
     }
     assert_eq!(f.balance(&f.owner), 3);
-    c.set_engine(&f.engine, &c.state().policy_version);
+    c.set_engine(&f.engine, &c.state().deployment_version);
     c.transfer(&f.request(1));
 }
 
@@ -426,7 +422,7 @@ fn engine_receives_no_wallet_spending_authority() {
 }
 
 #[test]
-fn owner_controls_require_owner_not_agent_and_revision_is_exact() {
+fn owner_controls_require_owner_not_agent_and_deployment_version_is_exact() {
     let f = Fixture::new(false);
     let c = f.client();
     let outsider = Address::generate(&f.env);
@@ -464,7 +460,7 @@ fn owner_controls_require_owner_not_agent_and_revision_is_exact() {
     c.set_paused(&true, &0);
     f.env.mock_all_auths();
     assert_eq!(c.try_set_paused(&false, &0), Err(Ok(Error::StaleRequest)));
-    assert_eq!(c.state().policy_version, 1);
+    assert_eq!(c.state().deployment_version, 1);
     assert_eq!(c.try_unsupported(), Err(Ok(Error::UnsupportedOperation)));
 }
 
@@ -485,7 +481,7 @@ fn funding_and_all_admin_mutations_preserve_consumption() {
     let next_owner = Address::generate(&f.env);
     c.transfer_owner(&next_owner, &3);
     let after = c.state();
-    assert_eq!(after.policy_version, 4);
+    assert_eq!(after.deployment_version, 4);
     assert_eq!(after.spent_daily, before.spent_daily);
     assert_eq!(after.spent_day, before.spent_day);
     assert_eq!(after.spent_total, before.spent_total);
@@ -543,10 +539,10 @@ fn compiled_odc_upgrade_keeps_address_state_and_rejects_old_requests() {
     // A valid custom section gives the compatible compiled code a new hash.
     replacement.extend_from_array(&[0, 5, 4, b'o', b'd', b'c', b'2']);
     let hash = f.env.deployer().upload_contract_wasm(replacement);
-    c.upgrade(&hash, &before.policy_version);
+    c.upgrade(&hash, &before.deployment_version);
     let after = c.state();
     let expected = State {
-        version: VERSION,
+        contract_version: CONTRACT_VERSION,
         owner: before.owner,
         agent: before.agent,
         engine: before.engine,
@@ -556,17 +552,17 @@ fn compiled_odc_upgrade_keeps_address_state_and_rejects_old_requests() {
         spent_total: before.spent_total,
         calls: before.calls,
         nonce: before.nonce,
-        policy_version: before.policy_version + 1,
+        deployment_version: before.deployment_version + 1,
         paused: before.paused,
     };
     assert_eq!(after, expected);
     assert_eq!(c.address, f.odc);
     assert_eq!(f.odc.executable(), Some(Executable::Wasm(hash)));
     assert_eq!(c.try_transfer(&old_request), Err(Ok(Error::StaleRequest)));
-    c.set_paused(&true, &c.state().policy_version);
-    c.recover(&f.owner, &1, &c.state().policy_version);
-    c.set_engine(&f.engine, &c.state().policy_version);
-    c.set_paused(&false, &c.state().policy_version);
+    c.set_paused(&true, &c.state().deployment_version);
+    c.recover(&f.owner, &1, &c.state().deployment_version);
+    c.set_engine(&f.engine, &c.state().deployment_version);
+    c.set_paused(&false, &c.state().deployment_version);
     c.transfer(&f.request(1));
     assert_eq!(c.state().spent_total, 11);
 }
@@ -773,7 +769,7 @@ fn compiled_parent_engine_upgrade_vetoes_two_odcs_without_custody_authority() {
             recipient: f.recipient.clone(),
             amount,
             nonce: state.nonce,
-            revision: state.policy_version,
+            deployment_version: state.deployment_version,
             expires_at: env.ledger().timestamp() + 100,
         }
     };
@@ -813,11 +809,11 @@ fn compiled_parent_engine_upgrade_vetoes_two_odcs_without_custody_authority() {
     assert_eq!(f.client().address, f.odc);
     assert_eq!(second.address, odc_two);
     // Neither owner's emergency control depends on the now-denying engine.
-    f.client().set_paused(&true, &before_one.policy_version);
+    f.client().set_paused(&true, &before_one.deployment_version);
     f.client()
-        .recover(&f.owner, &1, &f.client().state().policy_version);
-    second.set_paused(&true, &before_two.policy_version);
-    second.recover(&owner_two, &1, &second.state().policy_version);
+        .recover(&f.owner, &1, &f.client().state().deployment_version);
+    second.set_paused(&true, &before_two.deployment_version);
+    second.recover(&owner_two, &1, &second.state().deployment_version);
     for (state, before) in [
         (f.client().state(), before_one),
         (second.state(), before_two),
@@ -842,8 +838,8 @@ fn compiled_parent_engine_upgrade_vetoes_two_odcs_without_custody_authority() {
     assert_eq!(parent_client.engine(), shared_engine);
     env.mock_all_auths();
     f.client()
-        .set_paused(&false, &f.client().state().policy_version);
-    second.set_paused(&false, &second.state().policy_version);
+        .set_paused(&false, &f.client().state().deployment_version);
+    second.set_paused(&false, &second.state().deployment_version);
     f.client().transfer(&f.request(1));
     second.transfer(&second_request(1));
     assert_eq!(f.client().state().spent_total, 11);
@@ -1032,7 +1028,7 @@ fn unbound_upgrade_state_cannot_execute_but_owner_recovery_remains_independent()
     });
     assert_eq!(client.try_execute(&request), Err(Ok(Error::InvalidState)));
     let before = client.state();
-    client.recover(&f.owner, &10, &before.policy_version);
+    client.recover(&f.owner, &10, &before.deployment_version);
     let after = client.state();
     assert_eq!(after.spent_total, before.spent_total);
     assert_eq!(after.nonce, before.nonce);
@@ -1105,7 +1101,7 @@ fn compiled_authored_private_policy_rejects_effect_allowed_by_grant_and_engine()
         recipient: f.recipient.clone(),
         amount: 10,
         nonce: 0,
-        revision: 0,
+        deployment_version: 0,
         expires_at: env.ledger().timestamp() + 100,
     };
     let before = client.state();
@@ -1370,7 +1366,7 @@ fn compiled_same_xlm_policy_executes_native_sac_and_rejects_issued_native_alias(
         recipient: recipient.clone(),
         amount: 10,
         nonce: 0,
-        revision: 0,
+        deployment_version: 0,
         expires_at: DAY + 100,
     };
     client.transfer(&request);
@@ -1428,71 +1424,6 @@ fn compiled_same_xlm_policy_executes_native_sac_and_rejects_issued_native_alias(
     assert_eq!(token::Client::new(&env, &issued).balance(&recipient), 0);
 }
 
-#[soroban_sdk::contractclient(name = "PreviousOdcClient")]
-#[allow(dead_code)] // The generated client, rather than this declaration, is invoked.
-trait PreviousOdcInterface {
-    fn state(env: Env) -> LegacyState;
-    fn transfer(env: Env, request: TransferRequest);
-    fn upgrade(env: Env, new_wasm_hash: BytesN<32>, expected_revision: u64);
-}
-
-#[test]
-fn actual_previous_odc_state_upgrade_retains_independent_owner_recovery() {
-    const PREVIOUS_WASM: &[u8] =
-        include_bytes!("../../../target/test-fixtures/odc_unbound_v1.wasm");
-    let f = Fixture::new(true);
-    let env = &f.env;
-    let grant = f.client().state().grant;
-    env.mock_all_auths_allowing_non_root_auth();
-    let wallet = env.register(
-        PREVIOUS_WASM,
-        (f.owner.clone(), f.agent.clone(), f.engine.clone(), grant),
-    );
-    env.mock_all_auths();
-    StellarAssetClient::new(env, &f.asset).mint(&wallet, &1000);
-    let previous = PreviousOdcClient::new(env, &wallet);
-    previous.transfer(&TransferRequest {
-        recipient: f.recipient.clone(),
-        amount: 10,
-        nonce: 0,
-        revision: 0,
-        expires_at: DAY + 100,
-    });
-    let before = previous.state();
-    assert_eq!(before.spent_total, 10);
-    assert_eq!(before.nonce, 1);
-    let new_hash = env.deployer().upload_contract_wasm(ODC_WASM);
-    previous.upgrade(&new_hash, &before.revision);
-    let current = TestClient::new(env, &wallet);
-    let expected = State {
-        version: VERSION,
-        owner: before.owner,
-        agent: before.agent,
-        engine: before.engine,
-        grant: before.grant,
-        spent_daily: before.spent_daily,
-        spent_day: before.spent_day,
-        spent_total: before.spent_total,
-        calls: before.calls,
-        nonce: before.nonce,
-        policy_version: before.revision + 1,
-        paused: before.paused,
-    };
-    assert_eq!(current.state(), expected);
-    assert_eq!(current.try_policy_binding(), Err(Ok(Error::InvalidState)));
-    let mut request = f.client().envelope(&f.request(1));
-    request.nonce = expected.nonce;
-    request.policy_version = expected.policy_version;
-    assert_eq!(current.try_execute(&request), Err(Ok(Error::InvalidState)));
-    current.recover(&f.owner, &20, &expected.policy_version);
-    let recovered = current.state();
-    assert_eq!(recovered.spent_total, 10);
-    assert_eq!(recovered.nonce, 1);
-    assert_eq!(recovered.policy_version, expected.policy_version);
-    assert_eq!(token::Client::new(env, &f.asset).balance(&f.owner), 20);
-    assert_eq!(token::Client::new(env, &f.asset).balance(&wallet), 970);
-}
-
 // Real signatures and real host authorization exercise the token -> ODC hook.
 fn x402_setup_compiled(compiled: bool) -> (Fixture, ed25519_dalek::SigningKey) {
     let f = Fixture::new(compiled);
@@ -1502,8 +1433,8 @@ fn x402_setup_compiled(compiled: bool) -> (Fixture, ed25519_dalek::SigningKey) {
     encoded.append(&pubkey.clone().into());
     let agent = Address::from_xdr(&f.env, &encoded).unwrap();
     let c = TestClient::new(&f.env, &f.odc);
-    c.set_agent(&agent, &c.state().policy_version);
-    c.set_x402_signer(&Some(pubkey), &c.state().policy_version);
+    c.set_agent(&agent, &c.state().deployment_version);
+    c.set_x402_enabled(true, &c.state().deployment_version);
     (f, key)
 }
 
@@ -1615,7 +1546,7 @@ fn x402_rejects_mutation_context_and_revocation() {
             .is_err()
     );
     let c = TestClient::new(&f.env, &f.odc);
-    c.set_grant(&c.state().grant, &c.state().policy_version);
+    c.set_grant(&c.state().grant, &c.state().deployment_version);
     assert!(
         f.env
             .try_invoke_contract_check_auth::<Error>(
@@ -1710,7 +1641,7 @@ fn x402_rejects_signed_invalid_requests_and_engine_veto() {
     bad.nonce += 1;
     cases.push(bad);
     let mut bad = valid.clone();
-    bad.policy_version += 1;
+    bad.deployment_version += 1;
     cases.push(bad);
     let mut bad = valid.clone();
     bad.expires_at = f.env.ledger().timestamp();
@@ -1758,7 +1689,7 @@ fn x402_rejects_signed_invalid_requests_and_engine_veto() {
     );
     let c = TestClient::new(&f.env, &f.odc);
     for engine in [f.env.register(Deny, ()), f.env.register(Trap, ())] {
-        c.set_engine(&engine, &c.state().policy_version);
+        c.set_engine(&engine, &c.state().deployment_version);
         let sig = x402_signed(&f, &key, f.client().envelope(&f.request(50)), &payload);
         assert!(
             f.env
@@ -1826,7 +1757,7 @@ fn x402_context_and_owner_revocation_matrix() {
             .is_err()
     );
     let c = TestClient::new(&f.env, &f.odc);
-    c.set_x402_signer(&None, &c.state().policy_version);
+    c.set_x402_enabled(false, &c.state().deployment_version);
     assert!(
         f.env
             .try_invoke_contract_check_auth::<Error>(
@@ -1837,11 +1768,8 @@ fn x402_context_and_owner_revocation_matrix() {
             )
             .is_err()
     );
-    c.set_x402_signer(
-        &Some(BytesN::from_array(&f.env, &key.verifying_key().to_bytes())),
-        &c.state().policy_version,
-    );
-    c.set_agent(&c.state().agent, &c.state().policy_version);
+    c.set_x402_enabled(true, &c.state().deployment_version);
+    c.set_agent(&c.state().agent, &c.state().deployment_version);
     assert!(
         f.env
             .try_invoke_contract_check_auth::<Error>(
@@ -1894,14 +1822,14 @@ fn direct_policy_deployment_and_pause_share_exact_next_version() {
     let mut policy = c.deployment(0);
     policy.paused = true;
     c.deploy_policy(&policy);
-    assert_eq!(c.state().policy_version, 1);
+    assert_eq!(c.state().deployment_version, 1);
     assert!(c.state().paused);
     assert_eq!(c.try_set_pause(&false, &1), Err(Ok(Error::StaleRequest)));
     assert_eq!(c.try_set_pause(&false, &3), Err(Ok(Error::StaleRequest)));
     c.set_pause(&false, &2);
-    assert_eq!(c.state().policy_version, 2);
+    assert_eq!(c.state().deployment_version, 2);
     let mut skipped = c.deployment(2);
-    skipped.policy_version = 4;
+    skipped.deployment_version = 4;
     assert_eq!(c.try_deploy_policy(&skipped), Err(Ok(Error::StaleRequest)));
     let mut changed_asset = c.deployment(2);
     changed_asset.grant.asset = Address::generate(&f.env);
@@ -1911,142 +1839,25 @@ fn direct_policy_deployment_and_pause_share_exact_next_version() {
     );
     f.env.mock_auths(&[]);
     assert!(c.try_deploy_policy(&c.deployment(2)).is_err());
-    assert_eq!(c.state().policy_version, 2);
+    assert_eq!(c.state().deployment_version, 2);
 }
 
 #[test]
-fn malformed_state_does_not_fall_back_to_legacy_defaults() {
+fn unknown_contract_release_and_old_state_format_reject() {
     let f = Fixture::new(false);
     let mut state = f.client().state();
-    state.version = 1; // V2 fields with a V1 marker are not a V1 state.
+    state.contract_version = 2;
     f.env
         .as_contract(&f.odc, || f.env.storage().instance().set(&0u32, &state));
     assert_eq!(f.client().try_state(), Err(Ok(Error::InvalidState)));
-}
-
-#[contracttype]
-#[derive(Clone)]
-struct LegacyExecutionRequest {
-    policy_instance: BytesN<32>,
-    operation_id: BytesN<32>,
-    nonce: u64,
-    revision: u64,
-    expires_at: u64,
-    invocation: allowit_wallet_protocol::PolicyInvocation,
-}
-#[contracttype]
-#[derive(Clone)]
-struct LegacyBinding {
-    policy_instance: BytesN<32>,
-    module_digest: BytesN<32>,
-    source_digest: BytesN<32>,
-    argument_schema_digest: BytesN<32>,
-    entrypoint: Symbol,
-}
-#[contracttype]
-#[derive(Clone)]
-struct LegacyReceipt {
-    operation_id: BytesN<32>,
-    token: Address,
-    from: Address,
-    to: Address,
-    amount: i128,
-    nonce: u64,
-    revision: u64,
-}
-#[soroban_sdk::contractclient(name = "BoundV1Client")]
-#[allow(dead_code)]
-trait BoundV1Interface {
-    fn state(env: Env) -> LegacyState;
-    fn policy_binding(env: Env) -> LegacyBinding;
-    fn execute(env: Env, execution: LegacyExecutionRequest) -> LegacyReceipt;
-    fn upgrade(env: Env, new_wasm_hash: BytesN<32>, expected_revision: u64);
-}
-
-#[test]
-fn real_bound_v1_upgrade_preserves_accounting_and_logical_replay() {
-    const BOUND_V1: &[u8] = include_bytes!("../../../target/test-fixtures/odc_bound_v1.wasm");
-    let f = Fixture::new(true);
-    let env = &f.env;
-    env.mock_all_auths_allowing_non_root_auth();
-    let wallet = env.register(
-        BOUND_V1,
-        (
-            f.owner.clone(),
-            f.agent.clone(),
-            f.engine.clone(),
-            f.client().state().grant,
-            BytesN::from_array(env, &[81; 32]),
-        ),
-    );
-    env.mock_all_auths();
-    StellarAssetClient::new(env, &f.asset).mint(&wallet, &1000);
-    let old = BoundV1Client::new(env, &wallet);
-    let old_binding = old.policy_binding();
-    let operation_id = BytesN::from_array(env, &[82; 32]);
-    old.execute(&LegacyExecutionRequest {
-        policy_instance: old_binding.policy_instance,
-        operation_id: operation_id.clone(),
-        nonce: 0,
-        revision: 0,
-        expires_at: DAY + 100,
-        invocation: allowit_wallet_protocol::PolicyInvocation {
-            module_digest: old_binding.module_digest,
-            entrypoint: old_binding.entrypoint,
-            argument_schema_digest: old_binding.argument_schema_digest,
-            arguments: Sep41TransferArgs {
-                token: f.asset.clone(),
-                from: wallet.clone(),
-                to: f.recipient.clone(),
-                amount: 10,
-            }
-            .to_xdr(env),
-        },
-    });
-    let before = old.state();
-    assert_eq!(before.spent_total, 10);
-    old.upgrade(
-        &env.deployer().upload_contract_wasm(ODC_WASM),
-        &before.revision,
-    );
-    let current = TestClient::new(env, &wallet);
-    let migrated = current.state();
-    assert_eq!(migrated.policy_version, before.revision + 1);
-    assert_eq!(migrated.version, VERSION);
-    assert_eq!(migrated.spent_total, before.spent_total);
-    assert_eq!(migrated.spent_daily, before.spent_daily);
-    assert_eq!(migrated.calls, before.calls);
-    assert_eq!(migrated.nonce, before.nonce);
-    assert_eq!(current.policy_binding().interface_version, 2);
-    let mut request = current.envelope(&TransferRequest {
-        recipient: f.recipient.clone(),
-        amount: 1,
-        nonce: migrated.nonce,
-        revision: migrated.policy_version,
-        expires_at: DAY + 100,
-    });
-    request.operation_id = operation_id;
-    assert_eq!(current.try_execute(&request), Err(Ok(Error::Replay)));
-    request.operation_id = BytesN::from_array(env, &[83; 32]);
-    current.execute(&request);
-    let persisted = current.state();
-    assert_eq!(persisted.spent_total, 11);
-    assert_eq!(persisted.calls, 2);
-    assert_eq!(persisted.nonce, 2);
-    assert_eq!(persisted.policy_version, migrated.policy_version);
-    env.as_contract(&wallet, || {
-        let raw: soroban_sdk::Val = env.storage().instance().get(&0u32).unwrap();
-        assert_eq!(State::try_from_val(env, &raw).unwrap().version, VERSION);
-        assert!(
-            env.storage()
-                .persistent()
-                .has(&Key::Operation(BytesN::from_array(env, &[82; 32])))
-        );
-    });
-    current.recover(&f.owner, &10, &0); // No caller version or version increment in the ABI.
-    assert_eq!(current.state().policy_version, persisted.policy_version);
-    assert_eq!(f.balance(&f.owner), 10);
-    assert_eq!(token::Client::new(env, &f.asset).balance(&wallet), 979);
+    let raw: soroban_sdk::Val = state.into_val(&f.env);
+    let mut fields =
+        soroban_sdk::Map::<Symbol, soroban_sdk::Val>::try_from_val(&f.env, &raw).unwrap();
+    fields.remove(Symbol::new(&f.env, "contract_version"));
+    fields.set(Symbol::new(&f.env, "version"), 1u32.into_val(&f.env));
+    f.env
+        .as_contract(&f.odc, || f.env.storage().instance().set(&0u32, &fields));
+    assert_eq!(f.client().try_state(), Err(Ok(Error::InvalidState)));
 }
 
 #[test]
@@ -2054,9 +1865,9 @@ fn full_deployment_rejects_malformed_packet_and_revokes_changed_grant_signer() {
     let (f, _) = x402_setup_compiled(false);
     let c = f.client();
     let before = c.state();
-    let mut policy = c.deployment(before.policy_version);
+    let mut policy = c.deployment(before.deployment_version);
     policy.grant.daily_limit -= 1;
-    assert!(policy.x402_signer.is_some());
+    assert!(policy.x402_enabled);
     assert_eq!(c.try_deploy_policy(&policy), Err(Ok(Error::InvalidActor)));
     assert_eq!(c.state(), before);
     let value: soroban_sdk::Val = policy.clone().into_val(&f.env);
@@ -2070,16 +1881,16 @@ fn full_deployment_rejects_malformed_packet_and_revokes_changed_grant_signer() {
     );
     assert!(result.is_err());
     assert_eq!(c.state(), before);
-    policy.x402_signer = None;
+    policy.x402_enabled = false;
     c.deploy_policy(&policy);
     f.env.as_contract(&f.odc, || {
         assert!(!f.env.storage().instance().has(&Key::X402Config))
     });
-    assert_eq!(c.state().policy_version, before.policy_version + 1);
+    assert_eq!(c.state().deployment_version, before.deployment_version + 1);
 }
 
 #[test]
-fn engine_wire_revision_alias_uses_the_single_policy_version() {
+fn engine_context_uses_the_same_deployment_version() {
     let f = Fixture::new(false);
     let c = f.client();
     c.deploy_policy(&c.deployment(0));
@@ -2087,6 +1898,61 @@ fn engine_wire_revision_alias_uses_the_single_policy_version() {
     let context: EngineContext = f
         .env
         .as_contract(&f.engine, || f.env.storage().instance().get(&0u32).unwrap());
-    assert_eq!(context.request.revision, c.state().policy_version);
-    assert_eq!(context.request.revision, 1);
+    assert_eq!(
+        context.request.deployment_version,
+        c.state().deployment_version
+    );
+    assert_eq!(context.request.deployment_version, 1);
+}
+
+#[test]
+fn derived_x402_cache_rejects_wrong_agent_and_extra_key() {
+    for compiled in [false, true] {
+        let (f, _) = x402_setup_compiled(compiled);
+        let before = f.client().state();
+        f.env.as_contract(&f.odc, || {
+            let raw: soroban_sdk::Val = f.env.storage().instance().get(&Key::X402Config).unwrap();
+            let mut fields =
+                soroban_sdk::Map::<Symbol, soroban_sdk::Val>::try_from_val(&f.env, &raw).unwrap();
+            fields.set(
+                Symbol::new(&f.env, "public_key"),
+                BytesN::from_array(&f.env, &[99; 32]).into_val(&f.env),
+            );
+            f.env.storage().instance().set(&Key::X402Config, &fields);
+            assert!(matches!(
+                x402_config(&f.env, &before.agent),
+                Err(Error::InvalidState)
+            ));
+            fields.remove(Symbol::new(&f.env, "public_key"));
+            fields.set(
+                Symbol::new(&f.env, "agent"),
+                f.owner.clone().into_val(&f.env),
+            );
+            f.env.storage().instance().set(&Key::X402Config, &fields);
+            assert!(matches!(
+                x402_config(&f.env, &before.agent),
+                Err(Error::InvalidActor)
+            ));
+        });
+        assert_eq!(f.client().state(), before);
+    }
+}
+
+#[test]
+fn x402_enable_requires_explicit_owner_opt_in_and_a_g_agent() {
+    let f = Fixture::new(false); // The generated contract-address agent is unsupported for x402.
+    let c = f.client();
+    let mut deployment = c.deployment(0);
+    deployment.x402_enabled = true;
+    assert_eq!(
+        c.try_deploy_policy(&deployment),
+        Err(Ok(Error::InvalidActor))
+    );
+    assert_eq!(c.state().deployment_version, 0);
+    assert!(
+        f.env
+            .as_contract(&f.odc, || !f.env.storage().instance().has(&Key::X402Config))
+    );
+    assert_eq!(c.policy_binding().contract_version, 1);
+    assert_eq!(c.state().contract_version, 1);
 }

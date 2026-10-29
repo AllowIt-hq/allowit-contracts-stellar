@@ -68,12 +68,12 @@ class RealCliEncoding(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as config:
                 cmd = [CLI, "--config-dir", config, "contract", "invoke", "--id", contract, "--source-account", account, "--rpc-url", f"http://127.0.0.1:{server.server_port}", "--network-passphrase", Network.TESTNET_NETWORK_PASSPHRASE, "--build-only", "--", "deploy_policy"]
-                result = subprocess.run(cmd + ca.serialize({"deployment": {"policy_version": 1, "owner": account, "agent": recipient, "engine": contract, "grant": grant, "paused": False, "x402_signer": None, "wasm_hash": None}}), check=True, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(cmd + ca.serialize({"deployment": {"deployment_version": 1, "owner": account, "agent": recipient, "engine": contract, "grant": grant, "paused": False, "x402_enabled": False, "wasm_hash": None}}), check=True, capture_output=True, text=True, timeout=30)
                 tx = TransactionEnvelope.from_xdr(result.stdout.strip(), Network.TESTNET_NETWORK_PASSPHRASE)
                 self.assertEqual(tx.signatures, [])
                 args = tx.transaction.operations[0].host_function.invoke_contract.args
                 packet = {entry.key.sym.sc_symbol.decode(): entry.val for entry in args[0].map.sc_map}
-                self.assertEqual(packet["policy_version"].u64.uint64, 1)
+                self.assertEqual(packet["deployment_version"].u64.uint64, 1)
                 values = {entry.key.sym.sc_symbol.decode(): entry.val for entry in packet["grant"].map.sc_map}
                 self.assertEqual(values["per_transfer"].type, xdr.SCValType.SCV_I128)
                 self.assertEqual(values["per_transfer"].i128.lo.uint64, 10)

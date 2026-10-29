@@ -13,7 +13,7 @@ fn context(env: &Env) -> EngineContext {
             recipient: recipient.clone(),
             amount: 10,
             nonce: 0,
-            revision: 0,
+            deployment_version: 0,
             expires_at: 500,
         },
         grant: Grant {
@@ -112,4 +112,11 @@ fn corrupt_accounting_and_arithmetic_overflow_deny() {
     c.calls = u64::MAX;
     c.grant.max_calls = u64::MAX;
     assert!(!Engine::evaluate(env, c));
+}
+
+#[test]
+fn executable_release_metadata_is_pure_and_independent_of_admin_revisions() {
+    let env = Env::default();
+    let engine = env.register(Engine, ());
+    assert_eq!(EngineClient::new(&env, &engine).engine_version(), 1);
 }

@@ -152,8 +152,8 @@ class NativeAdmin(unittest.TestCase):
 
 class ContractAdmin(unittest.TestCase):
     def test_exact_allowlist_and_types(self):
-        self.assertEqual(ca.checked_args("set_pause", {"paused": True, "policy_version": 3}, "odc")["paused"], True)
-        for value in ({"paused": "false", "policy_version": 3}, {"paused": True, "policy_version": True}, {"paused": True, "policy_version": 3, "target": KEYS[1]}):
+        self.assertEqual(ca.checked_args("set_pause", {"paused": True, "deployment_version": 3}, "odc")["paused"], True)
+        for value in ({"paused": "false", "deployment_version": 3}, {"paused": True, "deployment_version": True}, {"paused": True, "deployment_version": 3, "target": KEYS[1]}):
             with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
                 ca.checked_args("set_pause", value, "odc")
         self.assertNotIn("transfer", ca.ODC)
