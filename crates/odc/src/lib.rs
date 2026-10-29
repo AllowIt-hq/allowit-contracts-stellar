@@ -1,9 +1,9 @@
 #![no_std]
 
 use allowit_wallet_protocol::{
-    ARGUMENT_SCHEMA_DESCRIPTOR, EngineClient, EngineContext, ExecutionRequest, Grant,
-    MAX_ARGUMENT_BYTES, MAX_RECIPIENTS, PolicyBinding, PolicyContext, Sep41TransferArgs,
-    TransferReceipt, TransferRequest,
+    ARGUMENT_SCHEMA_DESCRIPTOR, EngineError, EngineRequest, EngineResult, EngineState,
+    ExecutionRequest, Grant, MAX_ARGUMENT_BYTES, PolicyBinding, PolicyContext, PolicyEngine,
+    PolicyFailure, Sep41TransferArgs, TransferReceipt, TransferRequest, named_values_valid,
 };
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, Executable, String, Symbol, TryFromVal, Vec,
@@ -14,7 +14,10 @@ use soroban_sdk::{
     xdr::{FromXdr, ToXdr},
 };
 
-#[cfg(not(any(feature = "test-recipient-policy", feature = "test-xlm-policy")))]
+mod policy_storage;
+use policy_storage::NativePolicyStorage;
+
+#[cfg(not(any(feature = "test-recipient-policy", feature = "test-xlm-policy", feature="test-state-policy",feature="test-local-state-policy")))]
 #[rustfmt::skip]
 #[allow(unused_braces)]
 mod generated_policy;
@@ -28,9 +31,18 @@ mod generated_policy;
 #[rustfmt::skip]
 #[allow(unused_braces)]
 mod generated_policy;
+#[cfg(feature="test-state-policy")]
+#[path="generated_state_policy.rs"]
+#[rustfmt::skip]
+mod generated_policy;
+#[cfg(feature="test-local-state-policy")]
+#[path="generated_local_state_policy.rs"]
+#[rustfmt::skip]
+mod generated_policy;
 #[cfg(all(feature = "test-recipient-policy", feature = "test-xlm-policy"))]
 compile_error!("Select only one test policy fixture");
 
+#[cfg(test)]
 const DAY: u64 = 86_400;
 /// First explicitly numbered kernel release, not Cargo package semver or an admin counter.
 const CONTRACT_VERSION: u32 = 1;
@@ -49,18 +61,12 @@ pub struct State {
     pub owner: Address,
     /// Configured delegated executor address. The x402 path derives its signing key from an enabled G-address agent.
     pub agent: Address,
-    /// Shared veto-engine address. Engine approval cannot replace local policy checks or authorize owner administration.
+    /// Shared rule-engine address. Only authored checks invoke it; it has no owner administration authority.
     pub engine: Address,
-    /// Local spending permissions and independent ceilings, enforced even when the shared engine approves.
-    pub grant: Grant,
-    /// Successful delegated spending in native asset base units for spent_day; owner funding does not reset it.
-    pub spent_daily: i128,
-    /// UTC day number, floor of the ledger timestamp divided by 86400, for spent_daily.
-    pub spent_day: u64,
-    /// Cumulative successful delegated spending in native asset base units; configuration changes preserve it.
-    pub spent_total: i128,
-    /// Number of successful delegated transfers, shared across execute and x402 and bounded by max_calls.
-    pub calls: u64,
+    /// Immutable admitted native SAC. It defines transfer effects, accounting units and financial recovery.
+    pub asset: Address,
+    /// Owner-signed named configuration. Authored policy selects its validation and required keys.
+    pub grant: soroban_sdk::Map<String, soroban_sdk::Val>,
     /// Strict next execution sequence shared by delegated spending paths. It is distinct from the native authorization nonce.
     pub nonce: u64,
     /// Active owner configuration counter. Executions use the current value; configuration changes target exactly the next value.
@@ -78,13 +84,11 @@ pub struct PolicyDeployment {
     pub owner: Address,
     /// Configured delegated executor address. The x402 path derives its signing key from an enabled G-address agent.
     pub agent: Address,
-    /// Shared veto-engine address. Engine approval cannot replace local policy checks or authorize owner administration.
+    /// Shared rule-engine address. Only authored checks invoke it; it has no owner administration authority.
     pub engine: Address,
-    /// Local spending permissions and independent ceilings, enforced even when the shared engine approves.
-    pub grant: Grant,
-    /// Whether delegated spending is blocked. Independent owner administration and recovery remain available.
-    pub paused: bool,
-    /// Explicit owner opt-in for the exact SAC authorization path. Agent or grant changes require false before later re-enablement.
+    /// Owner-signed named configuration. Authored policy selects its validation and required keys.
+    pub grant: soroban_sdk::Map<String, soroban_sdk::Val>,
+    /// Explicit owner opt-in for exact SAC authorization by the requested G-agent. False disables the path.
     pub x402_enabled: bool,
     /// Optional owner-selected uploaded kernel hash. The host applies it atomically with the configuration deployment.
     pub wasm_hash: Option<BytesN<32>>,
@@ -181,6 +185,46 @@ fn x402_config(env: &Env, agent: &Address) -> Result<X402Config, Error> {
     Ok(config)
 }
 
+/// Trusted immutable request and owner configuration for compiler-selected checks.
+/// Authored functional map operations cannot alter these captured custody bindings.
+struct NativePolicyHost<'a> {
+    env: &'a Env,
+    engine: Address,
+    request: EngineRequest,
+    grant: Grant,
+}
+impl PolicyEngine for NativePolicyHost<'_> {
+    fn request(&self) -> EngineRequest {
+        self.request.clone()
+    }
+
+    fn engine_check(
+        &self,
+        method: &str,
+        spent: &allowit_wallet_protocol::Spent,
+        params: Vec<soroban_sdk::Val>,
+    ) -> Result<EngineResult, PolicyFailure> {
+        use soroban_sdk::IntoVal;
+        let env = self.env;
+        let state = EngineState {
+            grant: self.grant.clone(),
+            spent: spent.clone(),
+        };
+        let mut args = Vec::new(env);
+        args.push_back(self.request.clone().into_val(env));
+        args.push_back(state.into_val(env));
+        args.append(&params);
+        match env.try_invoke_contract::<EngineResult, EngineError>(
+            &self.engine,
+            &Symbol::new(env, method),
+            args,
+        ) {
+            Ok(Ok(result)) => Ok(result),
+            _ => Err(PolicyFailure),
+        }
+    }
+}
+
 fn binding(env: &Env) -> Result<PolicyBinding, Error> {
     if generated_policy::SOURCE_PROFILE != "allowit-stellar-transfer-v1"
         || generated_policy::SOURCE_PROFILE_VERSION != 1
@@ -220,7 +264,7 @@ fn load(env: &Env) -> Result<State, Error> {
     let s = State::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
     let fields = soroban_sdk::Map::<Symbol, soroban_sdk::Val>::try_from_val(env, &raw)
         .map_err(|_| Error::InvalidState)?;
-    if s.contract_version != CONTRACT_VERSION || fields.len() != 12 {
+    if s.contract_version != CONTRACT_VERSION || fields.len() != 9 {
         return Err(Error::InvalidState);
     }
     env.storage()
@@ -266,30 +310,6 @@ fn validate_roles(
         || engine == &wallet
     {
         return Err(Error::InvalidActor);
-    }
-    Ok(())
-}
-
-fn validate_grant(env: &Env, grant: &Grant) -> Result<(), Error> {
-    if grant.recipients.is_empty()
-        || grant.recipients.len() > MAX_RECIPIENTS
-        || grant.per_transfer <= 0
-        || grant.daily_limit <= 0
-        || grant.total_limit <= 0
-        || grant.max_calls == 0
-        || grant.expires_at <= env.ledger().timestamp()
-    {
-        return Err(Error::InvalidGrant);
-    }
-    for (i, recipient) in grant.recipients.iter().enumerate() {
-        if recipient == env.current_contract_address() {
-            return Err(Error::InvalidRecipient);
-        }
-        for prior in grant.recipients.iter().take(i) {
-            if prior == recipient {
-                return Err(Error::InvalidGrant);
-            }
-        }
     }
     Ok(())
 }
@@ -356,7 +376,7 @@ fn admit(
     let arguments = Sep41TransferArgs::from_xdr(env, &invocation.arguments)
         .map_err(|_| Error::InvalidInvocation)?;
     if arguments.clone().to_xdr(env) != invocation.arguments
-        || arguments.token != s.grant.asset
+        || arguments.token != s.asset
         || arguments.from != env.current_contract_address()
     {
         return Err(Error::InvalidInvocation);
@@ -379,84 +399,64 @@ fn admit(
         return Err(Error::StaleRequest);
     }
     let now = env.ledger().timestamp();
-    if request.expires_at <= now
-        || s.grant.expires_at <= now
-        || request.expires_at > s.grant.expires_at
-    {
+    if request.expires_at <= now {
         return Err(Error::Expired);
     }
     if request.amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if !s.grant.recipients.contains(&request.recipient)
-        || request.recipient == env.current_contract_address()
-    {
+    if request.recipient == env.current_contract_address() {
         return Err(Error::InvalidRecipient);
     }
-    let day = now / DAY;
-    if day < s.spent_day {
-        return Err(Error::ClockRegression);
-    }
-    let spent_daily = if day == s.spent_day { s.spent_daily } else { 0 };
-    let next_daily = spent_daily
-        .checked_add(request.amount)
-        .ok_or(Error::Overflow)?;
-    let next_total = s
-        .spent_total
-        .checked_add(request.amount)
-        .ok_or(Error::Overflow)?;
-    let next_calls = s.calls.checked_add(1).ok_or(Error::Overflow)?;
     let next_nonce = s.nonce.checked_add(1).ok_or(Error::Overflow)?;
-    if request.amount > s.grant.per_transfer
-        || next_daily > s.grant.daily_limit
-        || next_total > s.grant.total_limit
-        || next_calls > s.grant.max_calls
-    {
-        return Err(Error::BudgetExceeded);
-    }
     let policy_context = PolicyContext {
-        asset: s.grant.asset.clone(),
+        asset: s.asset.clone(),
         recipient: request.recipient.clone(),
         token: token_label,
         decimals: 7,
         amount: request.amount,
-        spent_daily,
-        spent_total: s.spent_total,
-        calls: s.calls,
         now,
-        spent_day: day,
     };
-    if !generated_policy::execute(&policy_context) {
-        return Err(Error::PolicyDenied);
-    }
-    let context = EngineContext {
-        wallet: env.current_contract_address(),
-        agent: s.agent.clone(),
-        asset: s.grant.asset.clone(),
-        request: request.clone(),
+    let host = NativePolicyHost {
+        env,
+        engine: s.engine.clone(),
+        request: EngineRequest {
+            wallet: env.current_contract_address(),
+            agent: s.agent.clone(),
+            asset: s.asset.clone(),
+            token: policy_context.token.clone(),
+            decimals: policy_context.decimals,
+            recipient: request.recipient.clone(),
+            amount: request.amount,
+            operation_id: execution.operation_id.clone(),
+            nonce: execution.nonce,
+            deployment_version: execution.deployment_version,
+            expires_at: execution.expires_at,
+            now,
+        },
         grant: s.grant.clone(),
-        spent_daily,
-        spent_total: s.spent_total,
-        calls: s.calls,
-        now,
     };
-    if !matches!(
-        EngineClient::new(env, &s.engine).try_evaluate(&context),
-        Ok(Ok(true))
-    ) {
-        return Err(Error::EngineDenied);
+    let storage = NativePolicyStorage {
+        env,
+        policy_instance: installed.policy_instance,
+    };
+    let initial_spent = storage.snapshot().map_err(|_| Error::InvalidState)?;
+    let state = EngineState {
+        grant: s.grant.clone(),
+        spent: initial_spent.clone().unwrap_or_else(|| Grant::new(env)),
+    };
+    let final_spent = generated_policy::execute(&policy_context, &s.grant, &state, &host)
+        .map_err(|_| Error::PolicyDenied)?;
+    if !named_values_valid(env, &final_spent) {
+        return Err(Error::InvalidState);
     }
-    // Commit local counters before the effect; host rollback restores them if
-    // the SAC transfer or exact balance-effect check fails.
-    s.spent_daily = next_daily;
-    s.spent_day = day;
-    s.spent_total = next_total;
-    s.calls = next_calls;
+    storage.commit(&initial_spent, &final_spent);
+    // Native transaction rollback covers approved engine updates and authored property writes.
     s.nonce = next_nonce;
     store(env, &s);
     let receipt = TransferReceipt {
         operation_id: execution.operation_id,
-        token: s.grant.asset,
+        token: s.asset,
         from: env.current_contract_address(),
         to: request.recipient,
         amount: request.amount,
@@ -473,14 +473,15 @@ fn admit(
 
 #[contractimpl]
 impl Odc {
-    /// Create an owner-authorized wallet with immutable asset identity and zero consumption.
+    /// Create an owner-authorized wallet with immutable asset identity and an empty spent namespace.
     ///
     /// # Parameters
     /// - `env`: Host-provided execution environment; callers do not serialize this argument.
     /// - `owner`: Independent administration authority; authorizes this exact constructor.
     /// - `agent`: Delegated executor, distinct from owner, engine and this wallet.
-    /// - `engine`: Shared veto address; it receives no custody authority.
-    /// - `grant`: Initial local permissions with a seven-decimal native SAC and future expiry.
+    /// - `engine`: Shared rule-engine address; it receives no custody authority.
+    /// - `asset`: Immutable native SAC with seven decimal places, defining accounting and recovery units.
+    /// - `grant`: Initial UTF-8 named raw values. The authored policy validates only the values it uses.
     /// - `policy_instance`: Nonzero stable 32-byte logical identity retained across deployments.
     ///
     /// # Returns
@@ -490,23 +491,24 @@ impl Odc {
         owner: Address,
         agent: Address,
         engine: Address,
-        grant: Grant,
+        asset: Address,
+        grant: soroban_sdk::Map<String, soroban_sdk::Val>,
         policy_instance: BytesN<32>,
     ) {
         owner.require_auth();
+        if !named_values_valid(&env, &grant) {
+            soroban_sdk::panic_with_error!(&env, Error::InvalidGrant);
+        }
         if policy_instance == BytesN::from_array(&env, &[0; 32]) {
             soroban_sdk::panic_with_error!(&env, Error::InvalidState);
         }
         if let Err(error) = validate_roles(&env, &owner, &agent, &engine) {
             soroban_sdk::panic_with_error!(&env, error);
         }
-        if grant.asset.executable() != Some(Executable::StellarAsset)
-            || token::Client::new(&env, &grant.asset).decimals() != 7
+        if asset.executable() != Some(Executable::StellarAsset)
+            || token::Client::new(&env, &asset).decimals() != 7
         {
             soroban_sdk::panic_with_error!(&env, Error::UnsupportedAsset);
-        }
-        if let Err(error) = validate_grant(&env, &grant) {
-            soroban_sdk::panic_with_error!(&env, error);
         }
         env.storage()
             .instance()
@@ -518,11 +520,8 @@ impl Odc {
                 owner,
                 agent,
                 engine,
+                asset,
                 grant,
-                spent_daily: 0,
-                spent_day: env.ledger().timestamp() / DAY,
-                spent_total: 0,
-                calls: 0,
                 nonce: 0,
                 deployment_version: 0,
                 paused: false,
@@ -536,7 +535,7 @@ impl Odc {
     /// - `env`: Host-provided execution environment; callers do not serialize this argument.
     ///
     /// # Returns
-    /// Returns current state without resetting counters. This read does not invoke the engine.
+    /// Returns protected configuration and execution ordering without reading spent or invoking the engine.
     pub fn state(env: Env) -> Result<State, Error> {
         load(&env)
     }
@@ -552,6 +551,31 @@ impl Odc {
         binding(&env)
     }
 
+    /// Read the complete persistent policy spent map through the native host view.
+    ///
+    /// # Parameters
+    /// - `env`: Host-provided environment. Callers do not serialize this argument.
+    ///
+    /// # Returns
+    /// Returns the exact raw map, or None only for an absent entry. An existing empty map remains Some.
+    /// Archived data follows native restoration rules and is never reinitialized. No write authority is granted.
+    pub fn policy_spent(
+        env: Env,
+    ) -> Result<Option<soroban_sdk::Map<String, soroban_sdk::Val>>, Error> {
+        load(&env)?;
+        let policy_instance = env
+            .storage()
+            .instance()
+            .get(&Key::PolicyInstance)
+            .ok_or(Error::InvalidState)?;
+        NativePolicyStorage {
+            env: &env,
+            policy_instance,
+        }
+        .snapshot()
+        .map_err(|_| Error::InvalidState)
+    }
+
     /// Execute one exact delegated SAC transfer through the compiled policy and local grant.
     ///
     /// # Parameters
@@ -563,7 +587,7 @@ impl Odc {
     pub fn execute(env: Env, execution: ExecutionRequest) -> Result<TransferReceipt, Error> {
         let s = load(&env)?;
         s.agent.require_auth();
-        let receipt = admit(&env, execution, policy_token(&env, &s.grant.asset))?;
+        let receipt = admit(&env, execution, policy_token(&env, &s.asset))?;
         move_tokens(&env, &receipt.token, &receipt.to, receipt.amount)?;
         Ok(receipt)
     }
@@ -583,21 +607,17 @@ impl Odc {
         {
             return Err(Error::StaleRequest);
         }
+        if !named_values_valid(&env, &deployment.grant) {
+            return Err(Error::InvalidGrant);
+        }
         validate_roles(
             &env,
             &deployment.owner,
             &deployment.agent,
             &deployment.engine,
         )?;
-        if deployment.grant.asset != s.grant.asset {
-            return Err(Error::UnsupportedAsset);
-        }
-        validate_grant(&env, &deployment.grant)?;
         if deployment.owner != s.owner {
             deployment.owner.require_auth();
-        }
-        if (deployment.agent != s.agent || deployment.grant != s.grant) && deployment.x402_enabled {
-            return Err(Error::InvalidActor);
         }
         if deployment.x402_enabled {
             agent_public_key(&env, &deployment.agent)?;
@@ -605,7 +625,7 @@ impl Odc {
                 &Key::X402Config,
                 &X402Config {
                     agent: deployment.agent.clone(),
-                    token: policy_token(&env, &s.grant.asset),
+                    token: policy_token(&env, &s.asset),
                 },
             );
         } else {
@@ -615,7 +635,6 @@ impl Odc {
         s.agent = deployment.agent;
         s.engine = deployment.engine;
         s.grant = deployment.grant;
-        s.paused = deployment.paused;
         commit_deployment(&env, &mut s, deployment.deployment_version)?;
         if let Some(hash) = deployment.wasm_hash {
             env.deployer()
@@ -650,10 +669,10 @@ impl Odc {
     /// - `amount`: Positive native i128 base units of the installed SAC to transfer.
     ///
     /// # Returns
-    /// Returns success after exact balance-effect checks. It has no caller version fence and does not change delegated counters.
+    /// Returns success after exact balance-effect checks. It has no caller version fence and does not change execution ordering or policy spent.
     pub fn recover(env: Env, recipient: Address, amount: i128) -> Result<(), Error> {
         let s = owner_state(&env)?;
-        move_tokens(&env, &s.grant.asset, &recipient, amount)
+        move_tokens(&env, &s.asset, &recipient, amount)
     }
 
     /// Reject general calls and arbitrary authorization outside the admitted transfer ABI.
@@ -701,7 +720,7 @@ impl CustomAccountInterface for Odc {
         let Context::Contract(context) = contexts.get(0).ok_or(Error::InvalidInvocation)? else {
             return Err(Error::UnsupportedOperation);
         };
-        if context.contract != s.grant.asset
+        if context.contract != s.asset
             || context.fn_name != Symbol::new(&env, "transfer")
             || context.args.len() != 3
         {

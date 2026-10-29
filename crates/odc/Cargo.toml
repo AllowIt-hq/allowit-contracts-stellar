@@ -10,10 +10,14 @@ crate-type = ["cdylib", "rlib"]
 [features]
 test-recipient-policy = []
 test-xlm-policy = []
+test-state-policy = []
+test-local-state-policy = []
 
 [dependencies]
 soroban-sdk = { workspace = true }
 allowit-wallet-protocol = { path = "../protocol" }
+
+allowit-policy-rules = { path = "../rules" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

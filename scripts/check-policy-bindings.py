@@ -13,11 +13,13 @@ PAIRS = (
     ("financial-policy.rs", "test_generated_financial_policy.rs"),
     ("bool-policy.rs", "test_generated_bool_policy.rs"),
     ("xlm-policy.rs", "generated_xlm_policy.rs"),
+    ("state-policy.rs", "generated_state_policy.rs"),
+    ("local-state-policy.rs", "generated_local_state_policy.rs"),
 )
 
 
 def binding(text, name):
-    match = re.search(r"pub const " + name + r": \[u8; 32\] = (\[[\s\S]*?\]);", text)
+    match = re.search(r"pub\s+const\s+" + name + r"\s*:\s*\[\s*u8\s*;\s*32\s*\]\s*=\s*(\[[\s\S]*?\]);", text)
     if not match:
         raise ValueError("Missing generated binding: " + name)
     value = bytes(ast.literal_eval(match.group(1)))
@@ -37,4 +39,4 @@ for source, generated in PAIRS:
 protocol = (ROOT / "crates/protocol/src/lib.rs").read_text()
 if SCHEMA.decode() not in protocol:
     raise SystemExit("Native argument schema differs from generated policy bindings")
-print("PASS 5 authored policy bindings and the admitted argument schema")
+print(f"PASS {len(PAIRS)} authored policy bindings and the admitted argument schema")

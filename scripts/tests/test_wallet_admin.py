@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import wallet_admin as wa
 import contract_admin as ca
-from stellar_sdk import Keypair, TransactionEnvelope, Account, TransactionBuilder, Address, StrKey, xdr
+from stellar_sdk import Keypair, TransactionEnvelope, Account, TransactionBuilder, Address, StrKey, xdr, scval
 
 KEYS = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 6)]
 
@@ -160,14 +160,19 @@ class ContractAdmin(unittest.TestCase):
         self.assertNotIn("approve", ca.ODC)
         self.assertNotIn("set_grant", ca.PARENT)
 
-    def test_grant_limits_and_exact_fields(self):
-        value = {"asset": KEYS[0], "recipients": [KEYS[1]], "per_transfer": 1, "daily_limit": 2, "total_limit": 3, "max_calls": 4, "expires_at": 1000}
-        ca.grant(value)
-        for key, bad in (("per_transfer", 3), ("max_calls", 0), ("expires_at", True), ("recipients", [KEYS[1], KEYS[1]])):
-            modified = copy.deepcopy(value)
-            modified[key] = bad
-            with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
-                ca.grant(modified)
+    def test_generic_grant_preserves_native_types_and_rejects_noncanonical_values(self):
+        values = {"bytes": scval.to_bytes(b"custom").to_xdr(), "negative": scval.to_int128(-9).to_xdr(),
+                  "enabled": scval.to_bool(True).to_xdr(), "amount": scval.to_uint64(0).to_xdr()}
+        self.assertEqual(ca.grant(values), values)
+        self.assertEqual(ca.grant({}), {})
+        tagged = json.loads(ca.serialize({"grant": values})[1])
+        for name, value in tagged.items():
+            self.assertEqual(xdr.SCVal.from_json_dict(value).to_xdr(), values[name])
+        for invalid in ({"x": 1}, {"x": "invalid"}, {"x": values["bytes"] + "="}, {1: values["bytes"]}):
+            with self.assertRaises((ValueError, TypeError)):
+                ca.grant(invalid)
+        with self.assertRaises(ValueError):
+            ca.public_json('{"custom":1,"custom":2}')
 
     def test_assembly_preserves_intent_and_adds_resources(self):
         raw = TransactionBuilder(Account(KEYS[0], 42), wa.PASSPHRASE["testnet"], base_fee=100).append_upload_contract_wasm_op(b"test-wasm").set_timeout(0).build()
@@ -346,10 +351,9 @@ class ContractAdmin(unittest.TestCase):
             path.write_bytes(b"reviewed-artifact")
             asset = StrKey.encode_contract(bytes([2]) * 32)
             engine = StrKey.encode_contract(bytes([3]) * 32)
-            values = {"asset": asset, "recipients": [KEYS[3]], "per_transfer": 10,
-                      "daily_limit": 20, "total_limit": 30, "max_calls": 5, "expires_at": 1000}
+            values = {"custom": scval.to_bytes(b"preserved").to_xdr()}
             args = SimpleNamespace(action="deploy-odc", network="testnet", allow_mainnet=False,
-                source=KEYS[0], owner=KEYS[0], agent=KEYS[1], engine=engine,
+                source=KEYS[0], owner=KEYS[0], agent=KEYS[1], engine=engine, asset=asset,
                 wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
                 grant=json.dumps(values), policy_instance="11" * 32)
             command = ca.command(args)

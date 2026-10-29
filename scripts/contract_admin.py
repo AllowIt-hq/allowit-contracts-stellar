@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare explicit Stellar contract setup/admin XDR. Never signs or submits."""
 import argparse
+import base64
 import copy
 import hashlib
 import time
@@ -24,6 +25,17 @@ PARENT = {
     "upgrade_parent": {"new_hash", "expected_revision"},
     "set_admin": {"new_admin", "expected_revision"},
 }
+
+
+def public_json(value):
+    def unique(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("Duplicate public JSON key")
+            result[key] = item
+        return result
+    return json.loads(value, object_pairs_hook=unique)
 
 
 def address(value):
@@ -64,26 +76,27 @@ def pinned_wasm(path, expected_hash):
 
 
 def grant(value):
-    fields = {"asset", "recipients", "per_transfer", "daily_limit", "total_limit", "max_calls", "expires_at"}
-    if not isinstance(value, dict) or set(value) != fields:
-        raise ValueError("Grant fields must match the ODC ABI")
-    address(value["asset"])
-    recipients = value["recipients"]
-    if not isinstance(recipients, list) or not 1 <= len(recipients) <= 16 or len(set(recipients)) != len(recipients):
-        raise ValueError("Grant requires 1..16 distinct recipients")
-    for recipient in recipients:
-        address(recipient)
-    for key in fields - {"asset", "recipients"}:
-        limit = 2**64 - 1 if key in ("max_calls", "expires_at") else 2**127 - 1
-        if type(value[key]) is not int or not 0 < value[key] <= limit:
-            raise ValueError("Grant values must be positive bounded integers")
-    if not value["per_transfer"] <= value["daily_limit"] <= value["total_limit"]:
-        raise ValueError("Grant limits must satisfy per_transfer <= daily_limit <= total_limit")
+    """Validate named canonical native values without imposing a policy schema."""
+    if not isinstance(value, dict) or any(not isinstance(name, str) for name in value):
+        raise ValueError("Grant must map names to canonical base64 SCVal XDR values")
+    for name, encoded in value.items():
+        name.encode("utf-8")
+        if not isinstance(encoded, str):
+            raise ValueError("Grant values must be canonical base64 SCVal XDR")
+        raw = base64.b64decode(encoded, validate=True)
+        decoded = xdr.SCVal.from_xdr_bytes(raw)
+        if decoded.to_xdr() != encoded:
+            raise ValueError("Grant value encoding is not canonical")
     return value
 
 
+def grant_cli(value):
+    # Pinned CLI ScType::Val uses the standard tagged SCVal JSON decoder.
+    return {name: xdr.SCVal.from_xdr(encoded).to_json_dict() for name, encoded in grant(value).items()}
+
+
 def deployment(value):
-    fields = {"deployment_version", "owner", "agent", "engine", "grant", "paused", "x402_enabled", "wasm_hash"}
+    fields = {"deployment_version", "owner", "agent", "engine", "grant", "x402_enabled", "wasm_hash"}
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("Deployment fields must exactly match the ODC ABI")
     if type(value["deployment_version"]) is not int or not 0 < value["deployment_version"] < 2**64:
@@ -91,10 +104,10 @@ def deployment(value):
     for role in ("owner", "agent", "engine"):
         address(value[role])
     grant(value["grant"])
-    if type(value["paused"]) is not bool:
-        raise ValueError("paused must be boolean")
     if type(value["x402_enabled"]) is not bool:
         raise ValueError("x402_enabled must be boolean")
+    if value["x402_enabled"] and not StrKey.is_valid_ed25519_public_key(value["agent"]):
+        raise ValueError("x402 requires a native G-agent")
     for name in ("wasm_hash",):
         if value[name] is not None:
             code_hash(value[name])
@@ -135,12 +148,9 @@ def serialize(values):
     for key, value in values.items():
         if key == "deployment":
             value = copy.deepcopy(value)
-            for amount in ("per_transfer", "daily_limit", "total_limit"):
-                value["grant"][amount] = str(value["grant"][amount])
+            value["grant"] = grant_cli(value["grant"])
         elif key == "grant":
-            value = dict(value)
-            for amount in ("per_transfer", "daily_limit", "total_limit"):
-                value[amount] = str(value[amount])
+            value = grant_cli(value)
         args += ["--" + key.replace("_", "-"), json.dumps(value, separators=(",", ":")) if not isinstance(value, str) else value]
     return args
 
@@ -259,7 +269,7 @@ def command(args):
             if args.source != args.admin:
                 raise ValueError("Parent deployment source must be its native admin account")
         else:
-            values = {"owner": account(args.owner), "agent": account(args.agent), "engine": contract(args.engine), "grant": grant(json.loads(args.grant)), "policy_instance": code_hash(args.policy_instance)}
+            values = {"owner": account(args.owner), "agent": account(args.agent), "engine": contract(args.engine), "asset": contract(args.asset), "grant": grant(public_json(args.grant)), "policy_instance": code_hash(args.policy_instance)}
             if int(values["policy_instance"], 16) == 0:
                 raise ValueError("Policy instance must be a nonzero 32-byte identifier")
             if args.source != args.owner:
@@ -271,13 +281,13 @@ def command(args):
     if not StrKey.is_valid_contract(args.contract):
         raise ValueError("Target must be a contract C address")
     if args.action == "read":
-        if args.method not in ("state", "engine", "policy_binding"):
-            raise ValueError("Only state, engine and policy_binding reads are supported")
+        if args.method not in ("state", "engine", "policy_binding", "policy_spent"):
+            raise ValueError("Only state, engine, policy_binding and policy_spent reads are supported")
         return ["contract", "invoke", "--id", args.contract, "--send=no"] + base + ["--", args.method]
     methods = ODC if args.family == "odc" else PARENT
     if args.method not in methods:
         raise ValueError("Method is outside the admin allowlist")
-    values = checked_args(args.method, json.loads(args.arguments), args.family)
+    values = checked_args(args.method, public_json(args.arguments), args.family)
     return ["contract", "invoke", "--id", args.contract, "--build-only"] + base + ["--", args.method] + serialize(values)
 
 
@@ -287,7 +297,7 @@ def main():
     p.add_argument("--network", choices=["testnet", "mainnet"], default="testnet")
     p.add_argument("--allow-mainnet", action="store_true")
     p.add_argument("--source", required=True, type=account)
-    for flag in ("wasm", "wasm-hash", "admin", "engine-wasm", "owner", "agent", "engine", "grant", "policy-instance", "contract", "method"):
+    for flag in ("wasm", "wasm-hash", "admin", "engine-wasm", "owner", "agent", "engine", "asset", "grant", "policy-instance", "contract", "method"):
         p.add_argument("--" + flag)
     p.add_argument("--family", choices=["odc", "parent"], default="odc")
     p.add_argument("--member", action="append", default=[], type=account, help="Exactly three public members of the native parent admin")
@@ -299,7 +309,7 @@ def main():
     if args.action == "deploy-parent" or args.action == "admin" and args.family == "parent":
         verify_admin(fetch(args.network, args.source), args.member)
         if args.action == "admin" and args.method == "set_admin":
-            verify_admin(fetch(args.network, json.loads(args.arguments)["new_admin"]), args.candidate_member)
+            verify_admin(fetch(args.network, public_json(args.arguments)["new_admin"]), args.candidate_member)
     if args.action == "deploy-odc" or args.action == "admin" and args.family == "odc":
         owner_only(fetch(args.network, args.source))
 
@@ -309,7 +319,7 @@ def main():
         state = json.loads(cli_run(state_args))
         authority = state["owner" if args.family == "odc" else "upgrade_authority"]
         if args.family == "odc":
-            values = json.loads(args.arguments)
+            values = public_json(args.arguments)
             if args.method == "deploy_policy":
                 policy = values["deployment"]
                 roles = {key: policy[key] for key in ("owner", "agent", "engine")}
@@ -319,7 +329,7 @@ def main():
                     owner_only(fetch(args.network, account(roles["owner"])))
         if args.source != authority:
             raise ValueError("Source is not the contract's current owner/admin")
-        values = json.loads(args.arguments)
+        values = public_json(args.arguments)
         if args.family == "parent":
             if values["expected_revision"] != state["revision"]:
                 raise ValueError("Expected revision does not match current state")
@@ -330,9 +340,9 @@ def main():
     output = cli_run(prepared)
     candidate = None
     if args.action == "admin" and args.method == "set_admin":
-        candidate = json.loads(args.arguments)["new_admin"]
+        candidate = public_json(args.arguments)["new_admin"]
     elif args.action == "admin" and args.method == "deploy_policy":
-        next_owner = json.loads(args.arguments)["deployment"]["owner"]
+        next_owner = public_json(args.arguments)["deployment"]["owner"]
         if next_owner != authority:
             candidate = next_owner
     print(output if args.action == "read" else prepare_xdr(output, args.source, args.network, max_fee=args.max_fee, candidate=candidate, expected_wasm=args.wasm_hash if args.action.startswith("deploy-") else None))
