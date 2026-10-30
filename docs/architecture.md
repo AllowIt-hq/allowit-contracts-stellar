@@ -80,12 +80,16 @@ code through an allowlist, not a list of known hazards. Every identifier must be
 - a listed type (`AllowitContext`, `AllowitError`, `AllowitGrant`, `AllowitOperation`,
   `AllowitRequest`, `AllowitRule`, `Address`, `Result`, `Option`, `DAY` and the variants
   `Some`, `None`, `Ok`, `Err`), a constant the file defines or an `allowit` type it imports;
-- another lowercase local name.
+- a lowercase name the file declares: a function or constant name, a function parameter, or a
+  `let`, `for` or match-arm binding;
+- a fixed-width primitive type: the `i` and `u` integers of 8 to 128 bits, `bool`, `char` and `str`.
 
 `use` admits only `use allowit::prelude::*;` and imports of `allowit` types. The allowlist
 therefore rejects, among others: `usize`, `isize` and float types and literals; casts (`as`);
-closures and function values, including function pointer types, because they compare by code
-address; raw pointers; qualified (`<T>::`) and generic type paths; modules, traits, impls, structs,
+closures and function values, including function pointer types and the `Some`, `Ok` and `Err`
+constructors when not called, because they compare by code address; the prelude functions
+`size_of`, `size_of_val`, `align_of`, `align_of_val` and `drop`, because type sizes differ
+between the backends (a host `Address` is a 24-byte string, onchain an 8-byte handle); raw pointers; qualified (`<T>::`) and generic type paths; modules, traits, impls, structs,
 enums, statics, `unsafe`, `extern` and paths into the including crate (`crate`, `super`, `self`);
 `ctx.state`, which policy reads only through `allowit::get_state`; and every `core` API outside the
 list, such as `NonZeroUsize`, `ilog2`, `count_ones`, `len` or `Utf8Error::valid_up_to`. A local
@@ -112,8 +116,9 @@ These checks are lexical, so they cannot see types. Every owner source therefore
 compiles:
 
 - The std-only compile builds the file as a module of a `no_std` crate whose only dependency is
-  `allowit` with only the `std` feature, as the offchain server uses it, with overflow checks on.
-  A path into `soroban_sdk`, a wallet crate or any other crate fails there. So does a call to a
+  `allowit` with only the `std` feature, as the offchain server uses it, with overflow checks on
+  and `-D unpredictable_function_pointer_comparisons`: a function pointer `==` that the lexical
+  checks miss fails there, because its result changes with the optimization level. A path into `soroban_sdk`, a wallet crate or any other crate fails there. So does a call to a
   Soroban `Env` or `Address` method, also through an alias such as `let e = &ctx.env;`, an
   address comparison with `<`, `min`, `max`, `sort` or `binary_search`, and a `std` prelude item
   such as `vec!`. On the host, `Address` is a StrKey newtype that compares only for equality:

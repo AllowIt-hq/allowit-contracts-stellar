@@ -834,6 +834,56 @@ class ContractAdmin(unittest.TestCase):
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
                 ca.standard_prefix(source(body, head))
 
+    def test_policy_source_rejects_closure_pointer_and_layout_probes(self):
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        head = HEAD + call("recipients")
+        cap = "    if {} {{\n        allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n    }}\n".format
+        # Closures after `break` coerce to function pointers whose equality depends on the build.
+        pointers = ("    let a = loop { break |x: u64| x; };\n    let b = loop { break |x: u64| x; };\n"
+                    "    let p = if ctx.request.now > 0u64 { a } else { b };\n"
+                    "    let q = if ctx.request.now > 0u64 { b } else { a };\n" + cap("p == q"))
+        # Prelude layout functions differ: the host `Address` is a 24-byte string, onchain an 8-byte handle.
+        size = "    let wide = size_of_val(&ctx.request) > 100;\n" + cap("!wide")
+        align = cap("align_of_val(&ctx.request.asset) == 8")
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            for probe in (size, align):
+                # Each passes the std-only compile, so only the allowlist rejects it.
+                policy.write_text(source(probe, head))
+                ca.host_compile(policy)
+            # The std-only compile itself denies function pointer comparisons.
+            policy.write_text(source(pointers, head))
+            with self.assertRaisesRegex(ValueError, "function-pointer-comparisons"):
+                ca.host_compile(policy)
+        probes = (
+            pointers, size, align,
+            "    let a = { if true {} |x: u64| x };\n",
+            "    let a = 'l: loop { break 'l |x: u64| x; };\n",
+            "    let a = ctx.request.now | |x: u64| x;\n",
+            "    let f = || 1u64;\n",
+            "    let a = size_of::<u64>();\n",
+            "    let a = align_of::<u64>();\n",
+            "    drop(ctx.request.amount);\n",
+            # Tuple constructors as values coerce to function pointers.
+            "    let a: fn(u64) -> Option<u64> = Some;\n",
+            "    let a = if true { Ok } else { Err };\n",
+            "    let a = Option::Some;\n",
+            # A name the file does not declare.
+            "    let a = undeclared;\n",
+        )
+        for body in probes:
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
+                ca.standard_prefix(source(body, head))
+        # Operators, pattern alternatives and declared bindings still pass.
+        allowed = ("    let n: u64 = ctx.request.now | 1u64;\n    let mut m = n;\n    m |= 2u64;\n"
+                   "    let ok = n > 0u64 || m > 0u64;\n"
+                   "    match ctx.request.operation {\n"
+                   "        AllowitOperation::sep41_transfer | AllowitOperation::sep56_deposit if ok => {}\n"
+                   "        other => {\n            let _ = other;\n        }\n    }\n"
+                   "    for k in 0u64..n.min(2u64) {\n        if let Some(v) = k.checked_add(m) {\n"
+                   "            let _ = Some(v);\n        }\n    }\n")
+        self.assertEqual(ca.standard_prefix(source(allowed, head)), ["recipients"])
+
     def test_wallet_code_changes_require_custody_layout_3(self):
         self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"3"))), 3)
         # The version 1 release declares only SDK metadata.

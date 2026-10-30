@@ -58,9 +58,10 @@ ATTRIBUTE = re.compile(r"#\s*\[\s*(?:r#)?([A-Za-z_]\w*)")
 # result in `AllowitCustomPolicy` and on the host, where `usize` is 32 and 64 bits wide, backend
 # lists differ and code addresses differ. Each identifier is one of: an allowed keyword; a field
 # or method after `.`; a path from `PATHS`; a type from `TYPES`, a constant the file defines or a
-# type it imports from `allowit`; or another lowercase local name. Pointer-width types, float and
-# `usize` literals, casts, closures and function values reject, because each can observe a
-# pointer width or a code address. Onchain resource limits still deny a policy that the host
+# type it imports from `allowit`; a lowercase name the file declares; or a fixed-width primitive
+# type. Pointer-width types, float and `usize` literals, casts, closures, function values and
+# prelude layout functions reject, because each can observe a pointer width, a layout or a code
+# address. Onchain resource limits still deny a policy that the host
 # evaluates to completion, such as deep recursion; that difference only denies.
 RUST_KEYWORDS = frozenset((
     "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn",
@@ -87,6 +88,12 @@ ALLOWIT_FUNCTIONS = GRANT_FIELDS + ("get_state", "set_state") + SERVER_FUNCTIONS
 ALLOWIT_TYPES = ("AllowitContext", "AllowitError", "AllowitGrant", "AllowitOperation", "AllowitRequest", "AllowitRule",
                  "Address", "Result", "DAY")
 TYPES = frozenset(ALLOWIT_TYPES + ("Option", "Some", "None", "Ok", "Err"))
+# Tuple constructors, which coerce to function pointers unless called.
+CONSTRUCTORS = frozenset(("Some", "Ok", "Err", "Option::Some", "Result::Ok", "Result::Err"))
+# Undeclared lowercase names that are types with one width and representation on both backends.
+PRIMITIVES = frozenset(INTEGERS + ("bool", "char", "str", "_"))
+# Prelude functions; the layout ones observe pointer widths and backend type sizes. Never local names.
+PRELUDE_FUNCTIONS = frozenset(("drop", "size_of", "size_of_val", "align_of", "align_of_val"))
 FUNCTION_PATHS = frozenset(["allowit::" + name for name in ALLOWIT_FUNCTIONS]
                            + [t + "::" + f for t in INTEGERS for f in ("from", "try_from")]
                            + ["core::cmp::min", "core::cmp::max"])
@@ -121,10 +128,12 @@ LIST_NAME = re.compile(r"\b(?:recipients|tokens)\b")
 # A struct expression or pattern of the types that hold the lists and the environment. A return
 # type followed by a block is no struct expression.
 LIST_STRUCT = re.compile(r"\bAllowit(?:Grant|Context)\s*\{")
-TOKEN = re.compile(r"r#[A-Za-z_]\w*|[A-Za-z_]\w*|::|=>|->|\$\w*|'\w+|\d\w*|\S")
+TOKEN = re.compile(r"r#[A-Za-z_]\w*|[A-Za-z_]\w*|::|=>|->|\|\||\$\w*|'\w+|\d\w*|\S")
 IDENT = re.compile(r"(?:r#)?[A-Za-z_]\w*")
-# Tokens after which `|` starts a closure rather than an `|` operator or pattern alternative.
-CLOSURE_BEFORE = frozenset(("", "(", "[", "{", ",", ";", "=", "=>", "return", "move", "!", "&", "&&", ":"))
+# Tokens that end an operand. `|` and `||` are an operator or a pattern alternative only after one;
+# anywhere else, such as after `break`, `return`, `=` or a block's `}`, they start a closure.
+OPERAND_END = frozenset((")", "]", "?", "true", "false"))
+OPEN, CLOSE = frozenset("([{"), frozenset(")]}")
 
 
 def reject(what):
@@ -156,6 +165,75 @@ def after_generics(tokens, j):
     reject("unterminated generic arguments")
 
 
+def after_brackets(tokens, j):
+    """Return the index after the bracket group that opens at tokens[j]."""
+    depth = 0
+    for k in range(j, len(tokens)):
+        depth += (tokens[k] in OPEN) - (tokens[k] in CLOSE)
+        if depth == 0:
+            return k + 1
+    reject("an unterminated attribute")
+
+
+def operand(token):
+    """True when `token` ends an operand: a non-keyword name, a literal, `)`, `]`, `?` or a boolean."""
+    return (token in OPERAND_END or token[:1].isdigit()
+            or bool(IDENT.fullmatch(token)) and token not in RUST_KEYWORDS)
+
+
+def declared(tokens):
+    """Return the lowercase names the file declares: function and constant names, function
+    parameters and the bindings of `let`, `for` and match-arm patterns. Scope is ignored, so a
+    binding the scan misses only rejects; prelude functions reject even when declared."""
+    names = set()
+
+    def bind(k):
+        token = tokens[k]
+        if IDENT.fullmatch(token) and token not in RUST_KEYWORDS and not token[0].isupper() \
+                and tokens[k - 1] != "::" and tokens[k + 1:k + 2] not in (["("], ["::"], ["{"], ["!"]):
+            names.add(token.removeprefix("r#"))
+
+    def pattern(k, stops):
+        # Bind the names of the pattern at tokens[k] up to a stop token at its own depth.
+        depth = 0
+        while k < len(tokens) and not (depth == 0 and tokens[k] in stops):
+            depth += (tokens[k] in OPEN) - (tokens[k] in CLOSE)
+            if depth < 0:
+                return
+            bind(k)
+            k += 1
+
+    for k, token in enumerate(tokens[:-1]):
+        if token in ("fn", "const"):
+            names.add(tokens[k + 1].removeprefix("r#"))
+        if token == "let":
+            pattern(k + 1, ("=", ";", ":"))
+        elif token == "for":
+            pattern(k + 1, ("in",))
+        elif token == "fn" and "(" in tokens[k:]:
+            # Each parameter pattern runs from `(` or a top-level `,` to its `:`.
+            depth, start = 0, tokens.index("(", k)
+            for j in range(start, len(tokens)):
+                depth += (tokens[j] in OPEN) - (tokens[j] in CLOSE)
+                if depth == 0:
+                    break
+                if depth == 1 and tokens[j] in ("(", ","):
+                    pattern(j + 1, (":", ",", ")"))
+        elif token == "=>":
+            # The arm pattern runs back to the previous `,`, `{` or `}`; a guard after `if` binds nothing.
+            depth, found = 0, []
+            for j in range(k - 1, -1, -1):
+                depth += (tokens[j] in (")", "]")) - (tokens[j] in ("(", "["))
+                if depth == 0 and tokens[j] in (",", "{", "}"):
+                    break
+                if depth == 0 and tokens[j] == "if":
+                    found = []
+                found.append(j)
+            for j in found:
+                bind(j)
+    return names
+
+
 def allowlisted(code):
     """Raise ValueError unless every identifier, path, method, field and literal of `code` is on the
     allowlist. Comments and literals are already removed."""
@@ -163,11 +241,15 @@ def allowlisted(code):
         reject("a non-ASCII identifier")
     tokens = TOKEN.findall(code)
     local_fns = {tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "fn"}
+    local_names = declared(tokens)
     defined = {tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "const" and IDENT.fullmatch(tokens[k + 1])}
     i = 0
     while i < len(tokens):
         token, before = tokens[i], tokens[i - 1] if i else ""
         after = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if token == "#" and after == "[":
+            i = after_brackets(tokens, i + 1)  # An attribute; `portable` checks its name.
+            continue
         if token == "use":
             imported, i = uses(tokens, i)
             defined |= imported
@@ -180,8 +262,11 @@ def allowlisted(code):
             continue
         if token == "::":
             reject("a path that does not start at an allowed name")
-        if token == "|" and before in CLOSURE_BEFORE:
-            reject("a closure, which can become a function pointer whose address differs between the backends")
+        if token in ("|", "||"):
+            if not operand(before):
+                reject("a closure, which can become a function pointer whose address differs between the backends")
+            i += 1
+            continue
         if not IDENT.fullmatch(token):
             i += 1
             continue
@@ -214,15 +299,21 @@ def allowlisted(code):
             if path not in PATHS:
                 reject("the path `{}`, which is not on the portable allowlist".format(path))
             call = after_generics(tokens, j + 1) if turbofish else j
-            if path in FUNCTION_PATHS and tokens[call:call + 1] != ["("]:
+            if path in FUNCTION_PATHS | CONSTRUCTORS and tokens[call:call + 1] != ["("]:
                 reject("the function `{}` as a value, whose address differs between the backends".format(path))
             i = j + 1 if turbofish else j
             continue
         if name[0].isupper():
             if name not in TYPES and name not in defined:
                 reject("the name `{}`, which is not on the portable allowlist".format(name))
+            if name in CONSTRUCTORS and after != "(":
+                reject("the constructor `{}` as a value, whose address differs between the backends".format(name))
         elif name in NOT_PORTABLE:
             reject("the type `{}`, whose width or representation differs between the backends".format(name))
+        elif name in PRELUDE_FUNCTIONS:
+            reject("the prelude function `{}`, which can observe a pointer width or layout".format(name))
+        elif name not in local_names and name not in PRIMITIVES:
+            reject("the name `{}`, which the file does not declare".format(name))
         elif name in local_fns and after != "(" and before != "fn":
             reject("the function `{}` as a value, whose address differs between the backends".format(name))
         i += 1
@@ -346,7 +437,8 @@ def _host_allowit(rustc, digest):
 
 
 def _rustc(rustc, args, what):
-    command = [rustc, "--edition=2024", "-C", "overflow-checks=on"] + args
+    # Function pointer comparisons depend on code layout and optimization, so they deny.
+    command = [rustc, "--edition=2024", "-C", "overflow-checks=on", "-D", "unpredictable_function_pointer_comparisons"] + args
     try:
         result = subprocess.run(command, capture_output=True, text=True)
     except FileNotFoundError:
