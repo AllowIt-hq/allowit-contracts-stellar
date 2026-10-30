@@ -75,7 +75,8 @@ does not compile the file; run the std-only compile described there before deplo
 Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`
 (unsigned 64-bit integers), `recipients` and `tokens` (address lists). A missing field or null is
-unset. The standard preflight skips an unset selected rule; full policy code denies it.
+unset. The standard preflight skips an unset selected rule; full policy code denies it. The tool
+accepts such a packet and prints a warning.
 Legacy names such as `per_transfer`, `daily_limit` or `max_calls` reject. Negative caps reject at
 configuration. Code changes defer the new tier validation to delegated admission.
 Duplicate JSON keys reject. Fund the wallet only with its

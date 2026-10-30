@@ -9,6 +9,7 @@ import os
 import re
 import struct
 import subprocess
+import sys
 from pathlib import Path
 from stellar_sdk import Address, Network, xdr, StrKey, TransactionEnvelope, InvokeHostFunction, Preconditions, TimeBounds
 from wallet_admin import admin as verify_admin, fetch, owner_only, PASSPHRASE
@@ -190,6 +191,11 @@ def policy_rules(value, tier, source_path):
         raise ValueError("Rules must be the standard prefix derived from the policy source: " + json.dumps(expected))
     if tier == "custom" and value["source_digest"] != hashlib.sha256(source).hexdigest():
         raise ValueError("Custom source_digest must be the SHA-256 of the policy source")
+    # Valid configuration: the owner can set the field later without code redeployment.
+    unset = [rule for rule in value["rules"] if (value.get("grant") or {}).get(rule) is None]
+    if unset:
+        print("Warning: the standard preflight skips prefix rules whose Grant field is unset: " + ", ".join(unset)
+              + ". The full policy denies them with MissingGrant.", file=sys.stderr)
     return value
 
 

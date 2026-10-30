@@ -492,9 +492,18 @@ class ContractAdmin(unittest.TestCase):
                                    policy_source=str(policy), arguments=json.dumps({"deployment": deployment}))
             with self.assertRaisesRegex(ValueError, "standard prefix"):
                 ca.command(args)
+            # An unset prefix field is valid configuration. Only the standard preflight skips it, so
+            # the tooling warns without rejecting.
             deployment["rules"] = ["recipients", "expiry"]
             args.arguments = json.dumps({"deployment": deployment})
-            self.assertIn("deploy_policy", ca.command(args))
+            with patch("sys.stderr", new=StringIO()) as stderr:
+                self.assertIn("deploy_policy", ca.command(args))
+            self.assertIn("unset: recipients, expiry", stderr.getvalue())
+            deployment["grant"] = {"recipients": [KEYS[3]], "expiry": 2000000000}
+            args.arguments = json.dumps({"deployment": deployment})
+            with patch("sys.stderr", new=StringIO()) as stderr:
+                self.assertIn("deploy_policy", ca.command(args))
+            self.assertEqual(stderr.getvalue(), "")
 
     def test_policy_source_cannot_rebind_allowit(self):
         call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
