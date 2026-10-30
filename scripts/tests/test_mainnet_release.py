@@ -3,6 +3,7 @@ import copy
 import time
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -20,6 +21,11 @@ class ReleaseTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
+        # Unit fixtures describe this source checkout. Production release pins stay unchanged.
+        revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=release.ROOT, text=True).strip()
+        revision_patch = patch.object(release, 'DEFAULT_REVISION', revision)
+        revision_patch.start()
+        self.addCleanup(revision_patch.stop)
         keys = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 10)]
         self.plan = dict(schema=1, network='mainnet', network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
             source_revision=release.DEFAULT_REVISION, codegen_revision=json.loads((release.ROOT/'scripts/policy-codegen.json').read_text())['revision'],
