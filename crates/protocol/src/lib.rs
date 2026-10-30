@@ -1,8 +1,11 @@
 #![no_std]
+use allowit::{AllowitEnv, Error};
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, Map, String, Symbol, Val, Vec, contractclient, contractevent,
-    contracttype,
+    Address, Bytes, BytesN, Env, Symbol, contractclient, contractevent, contracttype,
 };
+
+/// Typed owner Grant and the protected accounting that rules read.
+pub use allowit::{AccountingHistory, Grant};
 
 /// Native transfer-profile argument encoding, fixed independently of policy source.
 pub const ARGUMENT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)";
@@ -10,159 +13,6 @@ pub const ARGUMENT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep41_transfer.v
 pub const SEP56_DEPOSIT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep56_deposit.v1:ScValMap(assets:i128,from:Address,min_shares:i128,operator:Address,receiver:Address,vault:Address)";
 pub const MAX_ARGUMENT_BYTES: u32 = 1024;
 pub const MAX_EXPENSE_BYTES: u32 = 1024;
-
-/// Owner-signed UTF-8 names mapped to exact native values. Values retain their representation.
-/// No names or limits are mandatory. Authored policy selects and validates the values it reads.
-pub type Grant = Map<String, Val>;
-
-/// Mutable UTF-8 named policy usage data. Native values and unknown keys remain exact.
-pub type Spent = Map<String, Val>;
-
-/// Validate a native String as UTF-8 without an artificial length limit or heap allocation.
-/// # Parameters
-/// - `value`: Exact native String bytes, which Soroban can represent even when not UTF-8.
-/// # Returns
-/// Returns true only for valid UTF-8. Chunk boundaries preserve incomplete multibyte sequences.
-pub fn utf8_string(value: &String) -> bool {
-    let bytes = value.to_bytes();
-    let mut buffer = [0u8; 259];
-    let mut carry = 0usize;
-    let mut offset = 0u32;
-    while offset < bytes.len() {
-        let end = bytes.len().min(offset.saturating_add(256));
-        let count = (end - offset) as usize;
-        bytes
-            .slice(offset..end)
-            .copy_into_slice(&mut buffer[carry..carry + count]);
-        let length = carry + count;
-        match core::str::from_utf8(&buffer[..length]) {
-            Ok(_) => carry = 0,
-            Err(error) => {
-                if error.error_len().is_some() {
-                    return false;
-                }
-                carry = length - error.valid_up_to();
-                buffer.copy_within(error.valid_up_to()..length, 0);
-            }
-        }
-        offset = end;
-    }
-    carry == 0
-}
-
-/// Validate the names of a Grant/Spent map without restricting its values or size.
-/// # Parameters
-/// - `env`: Native value environment owning this map.
-/// - `values`: Exact raw object represented by the named-map type.
-/// # Returns
-/// Returns false for non-String or non-UTF-8 top-level keys. Nested and unrelated values are untouched.
-pub fn named_values_valid(env: &Env, values: &Map<String, Val>) -> bool {
-    use soroban_sdk::TryFromVal;
-    let Ok(raw) = Map::<Val, Val>::try_from_val(env, &values.to_val()) else {
-        return false;
-    };
-    raw.iter()
-        .all(|(name, _)| String::try_from_val(env, &name).is_ok_and(|name| utf8_string(&name)))
-}
-
-/// Native helper failure collapsed by generated policy lowering into the custody policy-denied result.
-/// This zero-sized error is not serialized as a contract argument or state field.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PolicyFailure;
-impl From<PolicyFailure> for () {
-    fn from(_: PolicyFailure) {}
-}
-
-/// Scalar value available to authored policy property helpers.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PolicyValue {
-    /// Unsigned integer with checked arithmetic in policy evaluation.
-    U64(u64),
-    /// Boolean value with no numeric coercion.
-    Bool(bool),
-    /// Native UTF-8 string, preserved without numeric or Boolean coercion.
-    String(String),
-}
-
-impl PolicyValue {
-    /// Decode one raw grant scalar without coercion. Other valid native values remain unsupported by scalar helpers.
-    ///
-    /// # Parameters
-    /// - `env`: Host environment that owns the raw native value.
-    /// - `value`: Exact raw grant value selected by its authored key.
-    ///
-    /// # Returns
-    /// Returns its scalar value, or an error for every other native type.
-    pub fn from_raw(env: &Env, value: &Val) -> Result<Self, PolicyFailure> {
-        use soroban_sdk::TryFromVal;
-        if let Ok(value) = u64::try_from_val(env, value) {
-            Ok(Self::U64(value))
-        } else if let Ok(value) = bool::try_from_val(env, value) {
-            Ok(Self::Bool(value))
-        } else if let Ok(value) = String::try_from_val(env, value) {
-            if utf8_string(&value) {
-                Ok(Self::String(value))
-            } else {
-                Err(PolicyFailure)
-            }
-        } else {
-            Err(PolicyFailure)
-        }
-    }
-    /// Encode this supported scalar as its raw native value, without an enum wrapper.
-    /// # Parameters
-    /// - `env`: Host environment that owns the resulting native value.
-    /// # Returns
-    /// Returns exact U64, Boolean or native String data without coercion.
-    pub fn into_raw(self, env: &Env) -> Val {
-        use soroban_sdk::IntoVal;
-        match self {
-            Self::U64(value) => value.into_val(env),
-            Self::Bool(value) => value.into_val(env),
-            Self::String(value) => value.into_val(env),
-        }
-    }
-}
-
-/// Private selected-check capability for compiler-selected shared-engine checks.
-/// Authored source cannot select arbitrary methods or supply custody identity payloads.
-pub trait PolicyEngine {
-    /// Read the immutable request authenticated by custody.
-    /// # Returns
-    /// Returns copied request data and operation identity, without spending authority.
-    fn request(&self) -> EngineRequest;
-
-    /// Invoke one compiler-selected shared-engine check without committing its result.
-    /// # Parameters
-    /// - `method`: Fixed admitted engine method selected at authoring time.
-    /// - `spent`: Explicit current usage map selected by functional source chaining.
-    /// - `params`: Exact typed extra arguments emitted from authored source.
-    /// # Returns
-    /// Returns a decision and proposed map. Errors never trigger a local fallback.
-    fn engine_check(
-        &self,
-        method: &str,
-        spent: &Spent,
-        params: Vec<Val>,
-    ) -> Result<EngineResult, PolicyFailure>;
-}
-
-/// Internal normalized transfer used by custody admission. It is not a public wallet entrypoint.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransferRequest {
-    /// Exact intended destination, checked against local permissions and the actual transfer arguments.
-    pub recipient: Address,
-    /// Positive exact transfer amount in the installed asset's native i128 base units.
-    pub amount: i128,
-    /// Strict next execution sequence shared by delegated spending paths. It is distinct from the native authorization nonce.
-    pub nonce: u64,
-    /// Active ordered owner configuration version supplied by the custody wallet. It is not engine_version.
-    pub deployment_version: u64,
-    /// Exclusive Unix timestamp expiry in ledger seconds. Authored policy may add a stricter bound.
-    pub expires_at: u64,
-}
 
 /// Exact arguments of the admitted stellar::sep41_transfer operation.
 #[contracttype]
@@ -333,152 +183,24 @@ pub struct TransferReceipt {
     pub deployment_version: u64,
 }
 
-/// Authenticated observations consumed by statically compiled owner policy.
-/// Amounts use the admitted SAC's exact native units.
-#[derive(Clone)]
-pub struct PolicyContext {
-    /// Kernel-selected canonical operation name. Callers cannot substitute an action label.
-    pub operation: String,
-    /// Immutable installed SAC address authenticated by custody.
-    pub asset: Address,
-    /// Exact intended token destination, bound by custody to the native transfer.
-    pub recipient: Address,
-    /// Authenticated SAC label. The x402 path uses the label cached outside the active SAC call.
-    pub token: String,
-    /// Authenticated SAC decimal scale, fixed at seven by this custody profile.
-    pub decimals: u32,
-    /// Positive native i128 base units of the proposed gross underlying debit.
-    pub amount: i128,
-    /// Authenticated ledger close time in Unix seconds.
-    pub now: u64,
-}
-
-/// Protected custody accounting, separate from policy-authored mutable Spent data.
-/// Values include the proposed operation once. Missing price facts create explicit liabilities.
-#[contracttype]
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct AccountingHistory {
-    pub calls: u64,
-    pub spent: i128,
-    pub unpriced: bool,
-    pub day: u64,
-    pub day_spent: i128,
-    pub day_total: i128,
-    pub day_unpriced: bool,
-}
-
-/// Exact proposal copied by custody into every explicitly selected shared-engine check.
-/// This record grants no token authority and contains no caller-controlled accounting override.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EngineRequest {
-    /// Kernel-derived proposed protected history; authored Spent cannot override it.
-    pub history: AccountingHistory,
-    /// Custody contract that owns the transfer and named spent data.
-    pub wallet: Address,
-    /// Configured agent whose request custody authenticated.
-    pub agent: Address,
-    /// Immutable installed SAC address, distinct from its label.
-    pub asset: Address,
-    /// Authenticated SAC label supplied without an active-token callback.
-    pub token: String,
-    /// Authenticated native decimal scale, fixed at seven by custody.
-    pub decimals: u32,
-    /// Exact intended destination from the canonical transfer arguments.
-    pub recipient: Address,
-    /// Positive exact transfer amount in native i128 base units.
-    pub amount: i128,
-    /// Nonzero logical operation identity, used for once-per-operation engine accounting.
-    pub operation_id: BytesN<32>,
-    /// Current execution sequence checked by custody before policy evaluation.
-    pub nonce: u64,
-    /// Current owner configuration version checked by custody.
-    pub deployment_version: u64,
-    /// Exclusive request expiry in Unix ledger seconds.
-    pub expires_at: u64,
-    /// Authenticated ledger close time in Unix seconds.
-    pub now: u64,
-    /// Canonical XDR of kernel-checked ExpenseBounds. External facts remain server and selected-vault observations.
-    pub expense: Option<Bytes>,
-}
-
-/// Shared copies supplied to each selected engine check, never mutable references into custody.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EngineState {
-    /// Complete immutable owner-signed configuration. Only the selected check interprets its needed keys.
-    pub grant: Map<String, Val>,
-    /// Complete current named usage map, including prior approved checks in this operation.
-    pub spent: Map<String, Val>,
-}
-
-/// Engine-owned business-state proposal. It contains no executable command or custody configuration.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EngineResult {
-    /// Predicate decision. Authored policy determines whether false denies or selects another branch.
-    pub approval: bool,
-    /// Proposed complete usage map. Custody applies it only on approval and rolls it back on enclosing failure.
-    pub spent: Map<String, Val>,
-}
-
-#[soroban_sdk::contracterror]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum EngineError {
-    InvalidState = 1,
-    InvalidParameter = 2,
-    Overflow = 3,
-}
-
+/// Shared stateless checker. Each method runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)`.
+/// It returns the passing constraint or the rule error. It holds no custody or state.
 #[contractclient(name = "EngineClient")]
 pub trait EngineInterface {
-    /// Run the selected canonical transaction_cap rule with authenticated request, owner Grant and current Spent.
-    fn transaction_cap(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the selected canonical spent_cap rule with authenticated request, owner Grant and current Spent.
-    fn spent_cap(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the selected canonical day_spent_cap rule with authenticated request, owner Grant and current Spent.
-    fn day_spent_cap(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the selected canonical day_total_cap rule with authenticated request, owner Grant and current Spent.
-    fn day_total_cap(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the selected canonical call_cap rule with authenticated request, owner Grant and current Spent.
-    fn call_cap(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the selected canonical recipients rule with authenticated request, owner Grant and current Spent.
-    fn recipients(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the selected canonical expiry rule with authenticated request, owner Grant and current Spent.
-    fn expiry(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the selected canonical tokens rule with authenticated request, owner Grant and current Spent.
-    fn tokens(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
+    /// Run canonical `transaction_cap`; returns the headroom left for this operation.
+    fn transaction_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
+    /// Run canonical `spent_cap`; returns the cumulative expense headroom.
+    fn spent_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
+    /// Run canonical `day_spent_cap`; returns the UTC-day expense headroom.
+    fn day_spent_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
+    /// Run canonical `day_total_cap`; returns the UTC-day gross headroom.
+    fn day_total_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
+    /// Run canonical `call_cap`; returns the operations left.
+    fn call_cap(env: Env, ctx: AllowitEnv) -> Result<u64, Error>;
+    /// Run canonical `recipients`; returns the matched recipient.
+    fn recipients(env: Env, ctx: AllowitEnv) -> Result<Address, Error>;
+    /// Run canonical `tokens`; returns the matched asset.
+    fn tokens(env: Env, ctx: AllowitEnv) -> Result<Address, Error>;
+    /// Run canonical `expiry`; returns the seconds left.
+    fn expiry(env: Env, ctx: AllowitEnv) -> Result<u64, Error>;
 }

@@ -1,11 +1,10 @@
 #![no_std]
 //! Owner-controlled custody mixins shared by fixed and bespoke policy wallets.
+use allowit::{AllowitEnv, Request};
 use allowit_wallet_protocol::{
-    ARGUMENT_SCHEMA_DESCRIPTOR, AccountingHistory, EngineRequest, EngineResult, EngineState,
-    ExecutionRequest, ExpenseBounds, Grant, MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, PolicyBinding,
-    PolicyContext, PolicyEngine, PolicyFailure, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR, Sep41TransferArgs,
-    Sep56DepositArgs, Sep56DepositEvent, Sep56DepositReceipt, Spent, TransferReceipt,
-    named_values_valid,
+    ARGUMENT_SCHEMA_DESCRIPTOR, AccountingHistory, ExecutionRequest, ExpenseBounds, Grant,
+    MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, PolicyBinding, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR,
+    Sep41TransferArgs, Sep56DepositArgs, Sep56DepositEvent, Sep56DepositReceipt, TransferReceipt,
 };
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, Executable, String, Symbol, TryFromVal, Val, Vec,
@@ -16,8 +15,6 @@ use soroban_sdk::{
     xdr::{FromXdr, ToXdr},
 };
 mod persistent;
-mod policy_storage;
-use policy_storage::NativePolicyStorage;
 const STATE_KEY: u32 = 0;
 pub const CONTRACT_VERSION: u32 = 1;
 
@@ -33,13 +30,13 @@ pub struct PolicyConfig {
     pub policy_instance: BytesN<32>,
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
-    /// Ordered explicit Common checks. Simple and Custom use an empty list.
+    /// Ordered owner-approved standard prefix. Simple and Custom use an empty list.
     pub rules: Vec<Symbol>,
-    pub grant: soroban_sdk::Map<String, Val>,
+    pub grant: Grant,
     pub x402_enabled: bool,
 }
 
-/// Complete owner update. It preserves asset, logical identity, nonce, pause and spent data.
+/// Complete owner update. It preserves asset, logical identity, nonce, pause and history.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyDeployment {
@@ -50,7 +47,7 @@ pub struct PolicyDeployment {
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     pub rules: Vec<Symbol>,
-    pub grant: soroban_sdk::Map<String, Val>,
+    pub grant: Grant,
     pub x402_enabled: bool,
     pub wasm_hash: Option<BytesN<32>>,
 }
@@ -68,7 +65,7 @@ pub struct State {
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     pub rules: Vec<Symbol>,
-    pub grant: soroban_sdk::Map<String, Val>,
+    pub grant: Grant,
     pub x402_enabled: bool,
     /// Authenticated SAC label cached before any active-token authorization callback.
     pub token: String,
@@ -98,10 +95,7 @@ pub enum Error {
     Expired = 7,
     InvalidAmount = 8,
     InvalidRecipient = 9,
-    BudgetExceeded = 10,
     Overflow = 11,
-    ClockRegression = 12,
-    EngineDenied = 13,
     InsufficientFunds = 14,
     InvalidEffects = 15,
     UnsupportedOperation = 16,
@@ -134,23 +128,16 @@ pub trait Policy {
     fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
         *digest == Self::argument_schema_digest(env)
     }
-    /// Evaluate the exact admitted operation. Existing fixed checks operate on its underlying debit.
-    fn check_operation(
-        env: &Env,
-        request: EngineRequest,
-        state: EngineState,
-        rules: &Vec<Symbol>,
-        _operation: &String,
-    ) -> Result<Spent, Error> {
-        Self::check(env, request, state, rules)
+    /// Check the owner-approved standard prefix. Only Common admits a nonempty list.
+    fn validate(_env: &Env, rules: &Vec<Symbol>) -> Result<(), Error> {
+        if rules.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::InvalidGrant)
+        }
     }
-    fn validate(env: &Env, rules: &Vec<Symbol>, grant: &Grant) -> Result<(), Error>;
-    fn check(
-        env: &Env,
-        request: EngineRequest,
-        state: EngineState,
-        rules: &Vec<Symbol>,
-    ) -> Result<Spent, Error>;
+    /// Evaluate the compiled checks on the kernel-built rule input. Pass values are discarded.
+    fn check(env: &Env, ctx: &AllowitEnv, rules: &Vec<Symbol>) -> Result<(), Error>;
 }
 
 /// Read initialized state and maintain its instance and code lifetime. Constructor initialization is explicit.
@@ -256,10 +243,8 @@ fn validate<P: Policy>(env: &Env, config: &PolicyConfig) -> Result<(), Error> {
     if P::source_digest(env).is_some_and(|digest| digest != config.source_digest) {
         return Err(Error::InvalidState);
     }
-    if !named_values_valid(env, &config.grant) {
-        return Err(Error::InvalidGrant);
-    }
-    P::validate(env, &config.rules, &config.grant)?;
+    config.grant.validate().map_err(|_| Error::InvalidGrant)?;
+    P::validate(env, &config.rules)?;
     if P::STANDARD_PREFIX
         && config.source_digest != checked_prefix::<P>(env, &config.asset, &config.rules)?
     {
@@ -643,6 +628,29 @@ fn next_history(
     }
     Ok(next)
 }
+/// Rule input: owner Grant, proposed protected history and authenticated request facts.
+/// Deposits name their vault as the recipient.
+fn rule_input(
+    state: &State,
+    history: &AccountingHistory,
+    operation: String,
+    args: &Sep41TransferArgs,
+    now: u64,
+    expires_at: u64,
+) -> AllowitEnv {
+    AllowitEnv {
+        grant: state.grant.clone(),
+        state: history.clone(),
+        request: Request {
+            operation,
+            asset: state.asset.clone(),
+            recipient: args.to.clone(),
+            amount: args.amount,
+            now,
+            expires_at,
+        },
+    }
+}
 fn admit<P: Policy>(
     env: &Env,
     execution: ExecutionRequest,
@@ -691,42 +699,16 @@ fn admit<P: Policy>(
     validate_expense(env, &state, &execution, operation)?;
     let nonce = state.nonce.checked_add(1).ok_or(Error::Overflow)?;
     let history = next_history(env, &state.history, &execution, args.amount, now)?;
-    let request = EngineRequest {
-        history: history.clone(),
-        wallet: args.from.clone(),
-        agent: state.agent.clone(),
-        asset: state.asset.clone(),
-        token: state.token.clone(),
-        decimals: 7,
-        recipient: args.to.clone(),
-        amount: args.amount,
-        operation_id: execution.operation_id.clone(),
-        expense: execution.expense.clone(),
-        nonce: execution.nonce,
-        deployment_version: execution.deployment_version,
-        expires_at: execution.expires_at,
+    P::validate(env, &state.rules)?;
+    let ctx = rule_input(
+        &state,
+        &history,
+        operation_name,
+        &args,
         now,
-    };
-    let storage = NativePolicyStorage {
-        env,
-        policy_instance: state.policy_instance.clone(),
-    };
-    let initial = storage.load().map_err(|_| Error::InvalidState)?;
-    P::validate(env, &state.rules, &state.grant)?;
-    let final_spent = P::check_operation(
-        env,
-        request,
-        EngineState {
-            grant: state.grant.clone(),
-            spent: initial.clone().unwrap_or_else(|| Spent::new(env)),
-        },
-        &state.rules,
-        &operation_name,
-    )?;
-    if !named_values_valid(env, &final_spent) {
-        return Err(Error::InvalidState);
-    }
-    storage.commit(&initial, &final_spent);
+        execution.expires_at,
+    );
+    P::check(env, &ctx, &state.rules)?;
     state.nonce = nonce;
     state.history = history;
     store(env, &state);
@@ -791,15 +773,6 @@ pub fn deposit_receipt(
 ) -> Result<Option<Sep56DepositReceipt>, Error> {
     load(env, None)?;
     Ok(persistent::load(env, &Key::Deposit(operation_id), None))
-}
-pub fn policy_spent(env: &Env) -> Result<Option<Spent>, Error> {
-    let state = load(env, None)?;
-    NativePolicyStorage {
-        env,
-        policy_instance: state.policy_instance,
-    }
-    .load()
-    .map_err(|_| Error::InvalidState)
 }
 pub fn execute<P: Policy>(
     env: &Env,
@@ -895,15 +868,10 @@ pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Resu
 struct UpgradeConfig;
 impl Policy for UpgradeConfig {
     const KIND: &'static str = "upgrade";
-    fn validate(_env: &Env, _rules: &Vec<Symbol>, _grant: &Grant) -> Result<(), Error> {
+    fn validate(_env: &Env, _rules: &Vec<Symbol>) -> Result<(), Error> {
         Ok(())
     }
-    fn check(
-        _env: &Env,
-        _request: EngineRequest,
-        _state: EngineState,
-        _rules: &Vec<Symbol>,
-    ) -> Result<Spent, Error> {
+    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Symbol>) -> Result<(), Error> {
         Err(Error::PolicyDenied)
     }
 }
@@ -1020,20 +988,8 @@ impl Policy for Simple {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
-    fn validate(_env: &Env, rules: &Vec<Symbol>, _grant: &Grant) -> Result<(), Error> {
-        if rules.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::InvalidGrant)
-        }
-    }
-    fn check(
-        _env: &Env,
-        _request: EngineRequest,
-        state: EngineState,
-        _rules: &Vec<Symbol>,
-    ) -> Result<Spent, Error> {
-        Ok(state.spent)
+    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Symbol>) -> Result<(), Error> {
+        Ok(())
     }
 }
 /// Fixed canonical rule set. The owner chooses every enforced rule explicitly.
@@ -1045,86 +1001,36 @@ impl Policy for Common {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
-    fn validate(env: &Env, rules: &Vec<Symbol>, grant: &Grant) -> Result<(), Error> {
+    fn validate(env: &Env, rules: &Vec<Symbol>) -> Result<(), Error> {
         for rule in rules.iter() {
-            allowit_policy_rules::validate_rule(env, &rule, grant)
-                .map_err(|_| Error::InvalidGrant)?;
+            rule_name(env, &rule)?;
         }
         Ok(())
     }
-    fn check(
-        env: &Env,
-        request: EngineRequest,
-        mut state: EngineState,
-        rules: &Vec<Symbol>,
-    ) -> Result<Spent, Error> {
-        let grant = state.grant.clone();
+    /// Run each prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;` in owner order.
+    /// An unset Grant field skips its rule here only; the full offchain policy denies it.
+    fn check(env: &Env, ctx: &AllowitEnv, rules: &Vec<Symbol>) -> Result<(), Error> {
         for rule in rules.iter() {
-            let name = if rule == Symbol::new(env, "transaction_cap") {
-                "transaction_cap"
-            } else if rule == Symbol::new(env, "spent_cap") {
-                "spent_cap"
-            } else if rule == Symbol::new(env, "day_spent_cap") {
-                "day_spent_cap"
-            } else if rule == Symbol::new(env, "day_total_cap") {
-                "day_total_cap"
-            } else if rule == Symbol::new(env, "call_cap") {
-                "call_cap"
-            } else if rule == Symbol::new(env, "recipients") {
-                "recipients"
-            } else if rule == Symbol::new(env, "expiry") {
-                "expiry"
-            } else if rule == Symbol::new(env, "tokens") {
-                "tokens"
-            } else {
-                return Err(Error::InvalidGrant);
-            };
-            let result =
-                allowit_policy_rules::check(env, request.clone(), state, name, Vec::new(env))
-                    .map_err(|_| Error::PolicyDenied)?;
-            if !result.approval {
-                return Err(Error::PolicyDenied);
-            }
-            state = EngineState {
-                grant: grant.clone(),
-                spent: result.spent,
-            };
-            // Each check receives the original owner Grant; final Spent alone advances.
+            allowit::preflight(ctx, rule_name(env, &rule)?)?;
         }
-        Ok(state.spent)
+        Ok(())
     }
 }
-
-/// Local-only capability supplied to generated bespoke policies. Shared fallback is unavailable.
-pub struct LocalPolicyHost(pub EngineRequest);
-impl PolicyEngine for LocalPolicyHost {
-    fn request(&self) -> EngineRequest {
-        self.0.clone()
-    }
-    fn engine_check(
-        &self,
-        _method: &str,
-        _spent: &Spent,
-        _params: Vec<Val>,
-    ) -> Result<EngineResult, PolicyFailure> {
-        Err(PolicyFailure)
-    }
+/// Canonical rule name of an owner-selected prefix symbol. Other names reject.
+fn rule_name(env: &Env, rule: &Symbol) -> Result<&'static str, Error> {
+    allowit::RULES
+        .into_iter()
+        .find(|name| Symbol::new(env, name) == *rule)
+        .ok_or(Error::InvalidGrant)
 }
-pub fn context(request: &EngineRequest) -> PolicyContext {
-    context_for_operation(
-        request,
-        &String::from_str(&request.wallet.env(), "stellar::sep41_transfer"),
-    )
-}
-pub fn context_for_operation(request: &EngineRequest, operation: &String) -> PolicyContext {
-    PolicyContext {
-        operation: operation.clone(),
-        asset: request.asset.clone(),
-        recipient: request.recipient.clone(),
-        token: request.token.clone(),
-        decimals: request.decimals,
-        amount: request.amount,
-        now: request.now,
+/// Rule denials collapse to PolicyDenied. Invalid owner configuration and accounting stay distinct.
+impl From<allowit::Error> for Error {
+    fn from(error: allowit::Error) -> Self {
+        match error {
+            allowit::Error::MissingGrant | allowit::Error::InvalidParameter => Error::InvalidGrant,
+            allowit::Error::InvalidState => Error::InvalidState,
+            _ => Error::PolicyDenied,
+        }
     }
 }
 
@@ -1158,14 +1064,6 @@ macro_rules! policy_wallet {
                 operation_id: soroban_sdk::BytesN<32>,
             ) -> Result<Option<allowit_wallet_protocol::Sep56DepositReceipt>, $crate::Error> {
                 $crate::deposit_receipt(&env, operation_id)
-            }
-            pub fn policy_spent(
-                env: soroban_sdk::Env,
-            ) -> Result<
-                Option<soroban_sdk::Map<soroban_sdk::String, soroban_sdk::Val>>,
-                $crate::Error,
-            > {
-                $crate::policy_spent(&env)
             }
             pub fn execute(
                 env: soroban_sdk::Env,

@@ -9,3 +9,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 soroban-sdk.workspace = true
+allowit = { path = "../allowit" }

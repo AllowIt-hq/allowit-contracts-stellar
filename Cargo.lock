@@ -31,7 +31,6 @@ dependencies = [
 name = "allowit-common-policy-engine"
 version = "0.1.0"
 dependencies = [
- "allowit-policy-rules",
  "allowit-policy-wallet",
  "allowit-wallet-protocol",
  "ed25519-dalek",
@@ -42,10 +41,11 @@ dependencies = [
 name = "allowit-custom-policy"
 version = "0.1.0"
 dependencies = [
- "allowit-policy-rules",
+ "allowit",
  "allowit-policy-wallet",
  "allowit-wallet-protocol",
  "ed25519-dalek",
+ "sha2",
  "soroban-sdk",
 ]
 
@@ -53,14 +53,7 @@ dependencies = [
 name = "allowit-engine-parent"
 version = "0.1.0"
 dependencies = [
- "allowit-wallet-protocol",
- "soroban-sdk",
-]
-
-[[package]]
-name = "allowit-policy-rules"
-version = "0.1.0"
-dependencies = [
+ "allowit",
  "allowit-wallet-protocol",
  "soroban-sdk",
 ]
@@ -69,7 +62,7 @@ dependencies = [
 name = "allowit-policy-wallet"
 version = "0.1.0"
 dependencies = [
- "allowit-policy-rules",
+ "allowit",
  "allowit-sep56-test-vault",
  "allowit-wallet-protocol",
  "ed25519-dalek",
@@ -87,7 +80,6 @@ dependencies = [
 name = "allowit-simple-policy-engine"
 version = "0.1.0"
 dependencies = [
- "allowit-policy-rules",
  "allowit-policy-wallet",
  "allowit-wallet-protocol",
  "ed25519-dalek",
@@ -98,7 +90,7 @@ dependencies = [
 name = "allowit-wallet-engine"
 version = "0.1.0"
 dependencies = [
- "allowit-policy-rules",
+ "allowit",
  "allowit-wallet-protocol",
  "soroban-sdk",
 ]
@@ -107,6 +99,7 @@ dependencies = [
 name = "allowit-wallet-protocol"
 version = "0.1.0"
 dependencies = [
+ "allowit",
  "soroban-sdk",
 ]
 

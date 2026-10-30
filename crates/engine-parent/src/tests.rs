@@ -1,5 +1,6 @@
 use super::*;
-use allowit_wallet_protocol::{EngineClient, EngineRequest, EngineState, Grant, Spent};
+use allowit::{AccountingHistory, AllowitEnv, Grant, Request};
+use allowit_wallet_protocol::EngineClient;
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
@@ -53,46 +54,30 @@ impl Fixture {
         }]);
     }
 }
-fn context(env: &Env) -> (EngineRequest, EngineState) {
-    let mut grant = Grant::new(env);
-    grant.set(
-        String::from_str(env, "transaction_cap"),
-        10u64.into_val(env),
-    );
-    (
-        EngineRequest {
-            history: allowit_wallet_protocol::AccountingHistory {
-                calls: 1,
-                spent: 5,
-                day_spent: 5,
-                day_total: 43,
-                ..Default::default()
-            },
-            expense: None,
-            wallet: Address::generate(env),
-            agent: Address::generate(env),
+fn context(env: &Env) -> AllowitEnv {
+    AllowitEnv {
+        grant: Grant {
+            transaction_cap: Some(10),
+            ..Default::default()
+        },
+        state: AccountingHistory {
+            calls: 1,
+            ..Default::default()
+        },
+        request: Request {
+            operation: String::from_str(env, "stellar::sep41_transfer"),
             asset: Address::generate(env),
-            token: String::from_str(env, "USDC"),
-            decimals: 7,
             recipient: Address::generate(env),
             amount: 1,
-            operation_id: BytesN::from_array(env, &[1; 32]),
-            nonce: 0,
-            deployment_version: 0,
-            expires_at: 200,
             now: 100,
+            expires_at: 200,
         },
-        EngineState {
-            grant,
-            spent: Spent::new(env),
-        },
-    )
+    }
 }
 fn approved(env: &Env, engine: &Address) -> bool {
-    let (request, state) = context(env);
     EngineClient::new(env, engine)
-        .transaction_cap(&request, &state)
-        .approval
+        .try_transaction_cap(&context(env))
+        .is_ok_and(|left| left == Ok(9))
 }
 
 #[test]
@@ -219,12 +204,7 @@ fn compiled_parent_self_upgrade_preserves_state_and_admin_gate() {
 fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     let f = Fixture::new(true);
     let engine = f.client().engine();
-    let context = context(&f.env);
-    assert!(
-        EngineClient::new(&f.env, &engine)
-            .transaction_cap(&context.0, &context.1)
-            .approval
-    );
+    assert!(approved(&f.env, &engine));
     let deny = f
         .env
         .deployer()
@@ -237,10 +217,9 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     );
     f.client().upgrade_engine(&deny, &0);
     assert_eq!(f.client().engine(), engine);
-    assert!(
-        !EngineClient::new(&f.env, &engine)
-            .transaction_cap(&context.0, &context.1)
-            .approval
+    assert_eq!(
+        EngineClient::new(&f.env, &engine).try_transaction_cap(&context(&f.env)),
+        Err(Ok(allowit::Error::InvalidState))
     );
     assert_eq!(f.client().state().version, 1);
     // A later authorized release can restore the engine, preserving identity.
@@ -250,11 +229,7 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
         (f.engine_hash.clone(), 1u64).into_val(&f.env),
     );
     f.client().upgrade_engine(&f.engine_hash, &1);
-    assert!(
-        EngineClient::new(&f.env, &engine)
-            .transaction_cap(&context.0, &context.1)
-            .approval
-    );
+    assert!(approved(&f.env, &engine));
     assert_eq!(f.client().state().version, 2);
 }
 

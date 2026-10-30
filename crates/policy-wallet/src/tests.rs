@@ -79,31 +79,16 @@ impl Fixture {
             env.register_stellar_asset_contract_v2(Address::generate(&env))
                 .address()
         };
-        let mut grant = Grant::new(&env);
-        for (name, value) in [
-            ("transaction_cap", 100i128),
-            ("day_spent_cap", 150),
-            ("spent_cap", 250),
-        ] {
-            grant.set(String::from_str(&env, name), value.into_val(&env));
-        }
-        grant.set(
-            String::from_str(&env, "day_total_cap"),
-            150i128.into_val(&env),
-        );
-        grant.set(
-            String::from_str(&env, "tokens"),
-            vec![&env, asset.clone()].into_val(&env),
-        );
-        grant.set(String::from_str(&env, "call_cap"), 3u64.into_val(&env));
-        grant.set(
-            String::from_str(&env, "expiry"),
-            1_000_000u64.into_val(&env),
-        );
-        grant.set(
-            String::from_str(&env, "recipients"),
-            vec![&env, recipient.clone()].into_val(&env),
-        );
+        let grant = Grant {
+            transaction_cap: Some(100),
+            spent_cap: Some(250),
+            day_spent_cap: Some(150),
+            day_total_cap: Some(150),
+            call_cap: Some(3),
+            recipients: Some(vec![&env, recipient.clone()]),
+            tokens: Some(vec![&env, asset.clone()]),
+            expiry: Some(1_000_000),
+        };
         let mut rules = Vec::new(&env);
         if wasm == COMMON {
             for rule in [
@@ -270,16 +255,8 @@ impl Fixture {
         );
         self.client().execute(&e)
     }
-    pub(super) fn used(&self, name: &str) -> i128 {
-        let value = self
-            .client()
-            .policy_spent()
-            .unwrap()
-            .get(String::from_str(&self.env, name))
-            .unwrap();
-        i128::try_from_val(&self.env, &value)
-            .or_else(|_| u64::try_from_val(&self.env, &value).map(i128::from))
-            .unwrap()
+    pub(super) fn history(&self) -> AccountingHistory {
+        self.client().state().history
     }
     pub(super) fn balance(&self) -> i128 {
         token::Client::new(&self.env, &self.asset).balance(&self.wallet)
@@ -376,7 +353,7 @@ fn simple_requires_both_signers_and_does_not_infer_rules_from_grant() {
     }
     assert_eq!(f.transfer(200).amount, 200);
     assert_eq!(f.balance(), 800);
-    assert!(f.client().policy_spent().is_none());
+    assert_eq!(f.history().calls, 1);
     assert_eq!(
         f.client().policy_binding().engine_kind,
         Symbol::new(&f.env, "simple_policy_engine")
@@ -387,10 +364,10 @@ fn common_rules_bound_transfers_and_commit_usage_once() {
     let f = Fixture::new(COMMON, false);
     f.transfer(100);
     f.transfer(50);
-    assert_eq!(f.used("day_spent"), 150);
-    assert_eq!(f.used("spent"), 150);
-    assert_eq!(f.used("calls"), 2);
-    let before = f.client().policy_spent();
+    assert_eq!(f.history().day_spent, 150);
+    assert_eq!(f.history().spent, 150);
+    assert_eq!(f.history().calls, 2);
+    let before = f.history();
     let e = f.execution(1);
     f.auth(
         &[&f.agent, &f.server],
@@ -398,17 +375,30 @@ fn common_rules_bound_transfers_and_commit_usage_once() {
         (e.clone(),).into_val(&f.env),
     );
     assert_eq!(f.client().try_execute(&e), Err(Ok(Error::PolicyDenied)));
-    assert_eq!(f.client().policy_spent(), before);
+    assert_eq!(f.history(), before);
     assert_eq!(f.client().state().nonce, 2);
     f.env.ledger().with_mut(|l| l.timestamp = 172_800);
     f.transfer(100);
-    assert_eq!(f.used("day_spent"), 100);
-    assert_eq!(f.used("spent"), 250);
+    assert_eq!(f.history().day_spent, 100);
+    assert_eq!(f.history().spent, 250);
 }
 #[test]
-fn common_accepts_null_missing_parameters_and_rejects_unknown_or_wrong_nonnull_values() {
+fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
     let f = Fixture::new(COMMON, false);
-    for name in ["unknown", "daily_cap", "total_cap", "recipient", "token"] {
+    for name in [
+        "unknown",
+        "daily_cap",
+        "total_cap",
+        "recipient",
+        "token",
+        "set_cap_per_day",
+        "cap_per_transaction",
+        "require_recipient",
+        "require_asset",
+        "allow_actions",
+        "state_remove",
+        "fail",
+    ] {
         let mut p = f.deployment();
         p.rules = vec![&f.env, Symbol::new(&f.env, name)];
         f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
@@ -417,19 +407,14 @@ fn common_accepts_null_missing_parameters_and_rejects_unknown_or_wrong_nonnull_v
             Err(Ok(Error::InvalidGrant))
         );
     }
-    for name in [
-        "transaction_cap",
-        "spent_cap",
-        "day_spent_cap",
-        "day_total_cap",
-        "call_cap",
-        "expiry",
-        "recipients",
-        "tokens",
-    ] {
+    for field in 0..4 {
         let mut p = f.deployment();
-        p.grant
-            .set(String::from_str(&f.env, name), true.into_val(&f.env));
+        *[
+            &mut p.grant.transaction_cap,
+            &mut p.grant.spent_cap,
+            &mut p.grant.day_spent_cap,
+            &mut p.grant.day_total_cap,
+        ][field] = Some(-1);
         f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
         assert_eq!(
             f.client().try_deploy_policy(&p),
@@ -437,27 +422,75 @@ fn common_accepts_null_missing_parameters_and_rejects_unknown_or_wrong_nonnull_v
         );
     }
     let mut p = f.deployment();
-    p.grant.remove(String::from_str(&f.env, "spent_cap"));
-    p.grant
-        .set(String::from_str(&f.env, "day_spent_cap"), Val::VOID.into());
+    p.grant = Grant::default();
     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
     f.client().deploy_policy(&p);
-    assert!(
-        f.client()
-            .state()
-            .grant
-            .get(String::from_str(&f.env, "spent_cap"))
-            .is_none()
+    assert_eq!(f.client().state().grant, Grant::default());
+    // Every selected rule is skipped by the standard preflight when its field is unset.
+    assert_eq!(f.transfer(500).amount, 500);
+}
+#[test]
+fn custom_policy_denies_an_unset_grant_field_that_common_preflight_skips() {
+    for wasm in [COMMON, CUSTOM] {
+        let f = Fixture::new(wasm, false);
+        let mut p = f.deployment();
+        p.grant.expiry = None;
+        f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+        f.client().deploy_policy(&p);
+        let e = f.execution(10);
+        f.auth(
+            &[&f.agent, &f.server],
+            "execute",
+            (e.clone(),).into_val(&f.env),
+        );
+        if wasm == CUSTOM {
+            assert_eq!(f.client().try_execute(&e), Err(Ok(Error::InvalidGrant)));
+            assert_eq!(f.history(), AccountingHistory::default());
+        } else {
+            f.client().execute(&e);
+            assert_eq!(f.history().calls, 1);
+        }
+    }
+}
+#[test]
+fn untyped_or_legacy_grant_packets_do_not_decode() {
+    use soroban_sdk::Map;
+    let f = Fixture::new(COMMON, false);
+    let p = f.deployment();
+    let mut legacy = Map::<String, Val>::new(&f.env);
+    legacy.set(
+        String::from_str(&f.env, "per_transfer"),
+        10i128.into_val(&f.env),
     );
+    let typed: Val = p.grant.clone().into_val(&f.env);
+    let mut fields = Map::<Symbol, Val>::try_from_val(&f.env, &typed).unwrap();
+    fields.set(Symbol::new(&f.env, "call_cap"), true.into_val(&f.env));
+    let packet: Val = p.clone().into_val(&f.env);
+    for grant in [legacy.into_val(&f.env), fields.into_val(&f.env)] {
+        let mut raw = Map::<Symbol, Val>::try_from_val(&f.env, &packet).unwrap();
+        raw.set(Symbol::new(&f.env, "grant"), grant);
+        let args: Vec<Val> = (raw,).into_val(&f.env);
+        f.auth(&[&f.owner], "deploy_policy", args.clone());
+        assert!(
+            f.env
+                .try_invoke_contract::<(), Error>(
+                    &f.wallet,
+                    &Symbol::new(&f.env, "deploy_policy"),
+                    args
+                )
+                .is_err()
+        );
+        assert_eq!(f.client().state().deployment_version, 0);
+    }
 }
 #[test]
 fn custom_sample_executes_compiled_initial_rule_prefix() {
     let f = Fixture::new(CUSTOM, false);
     f.transfer(20);
     f.transfer(30);
-    assert_eq!(f.used("day_spent"), 50);
-    assert_eq!(f.used("spent"), 50);
-    assert_eq!(f.client().state().history.calls, 2);
+    assert_eq!(f.history().day_spent, 50);
+    assert_eq!(f.history().spent, 50);
+    assert_eq!(f.history().calls, 2);
     assert_eq!(
         f.client().policy_binding().engine_kind,
         Symbol::new(&f.env, "custom_policy")
@@ -508,7 +541,7 @@ fn exact_request_replay_pause_and_expiry_are_independent_of_business_rules() {
 fn owner_packet_requires_current_and_candidate_authorization_and_preserves_usage() {
     let f = Fixture::new(COMMON, false);
     f.transfer(10);
-    let before = f.client().policy_spent();
+    let before = f.history();
     let next = Address::generate(&f.env);
     let mut p = f.deployment();
     p.owner = next.clone();
@@ -521,7 +554,7 @@ fn owner_packet_requires_current_and_candidate_authorization_and_preserves_usage
     );
     f.client().deploy_policy(&p);
     assert_eq!(f.client().state().owner, next);
-    assert_eq!(f.client().policy_spent(), before);
+    assert_eq!(f.history(), before);
     assert_eq!(f.client().state().nonce, 1);
     f.auth(&[&next], "deploy_policy", (p.clone(),).into_val(&f.env));
     assert_eq!(
@@ -535,7 +568,7 @@ fn real_x402_requires_both_signatures_and_commits_with_native_effects() {
         let f = Fixture::new(wasm, true);
         let e = f.execution(10);
         let entry = f.host_entry(e.clone(), 10, 1);
-        f.env.set_auths(&[entry.clone()]);
+        f.env.set_auths(core::slice::from_ref(&entry));
         token::Client::new(&f.env, &f.asset).transfer(&f.wallet, &f.recipient, &10);
         assert_eq!(f.balance(), 990);
         assert_eq!(f.client().state().nonce, 1);
@@ -630,7 +663,7 @@ fn owner_passthrough_supports_exact_nested_auth_without_agent_access() {
     f.client().invoke(&forwarder, &function, &args, &auth);
     assert_eq!(f.balance(), 800);
     assert_eq!(f.client().state().nonce, 0);
-    assert!(f.client().policy_spent().is_none());
+    assert_eq!(f.history(), AccountingHistory::default());
     let changed: Vec<Val> = (
         f.asset.clone(),
         f.wallet.clone(),
@@ -925,10 +958,7 @@ fn upgraded_tiers_validate_retained_rules_and_owner_can_correct_configuration() 
                 .to_bytes();
         }
         if target == COMMON {
-            p.grant.set(
-                String::from_str(&f.env, "day_spent_cap"),
-                true.into_val(&f.env),
-            );
+            p.grant.day_spent_cap = Some(-1);
         }
         if target == SIMPLE {
             p.source_digest = standard_prefix_digest(
@@ -958,10 +988,7 @@ fn upgraded_tiers_validate_retained_rules_and_owner_can_correct_configuration() 
         assert_eq!(f.client().try_execute(&e), Err(Ok(Error::InvalidGrant)));
         let mut fixed = f.deployment();
         if target == COMMON {
-            fixed.grant.set(
-                String::from_str(&f.env, "day_spent_cap"),
-                150i128.into_val(&f.env),
-            );
+            fixed.grant.day_spent_cap = Some(150);
         } else {
             fixed.rules = Vec::new(&f.env);
             if target == SIMPLE {
@@ -1158,26 +1185,8 @@ fn common_empty_rule_constructor_is_an_explicit_simple_configuration() {
     f.env.mock_auths(&[]);
     f.transfer(200);
     assert_eq!(f.balance(), 800);
-    assert!(f.client().policy_spent().is_none());
+    assert_eq!(f.history().calls, 1);
     assert_eq!(f.client().state().nonce, 1);
-}
-
-#[test]
-fn common_rejects_non_address_recipient_elements_at_deployment() {
-    let f = Fixture::new(COMMON, false);
-    let invalid: [Val; 2] = [true.into_val(&f.env), 1u64.into_val(&f.env)];
-    for bad in invalid {
-        let mut p = f.deployment();
-        p.grant.set(
-            String::from_str(&f.env, "recipients"),
-            vec![&f.env, bad].into_val(&f.env),
-        );
-        f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
-        assert_eq!(
-            f.client().try_deploy_policy(&p),
-            Err(Ok(Error::InvalidGrant))
-        );
-    }
 }
 
 #[test]
@@ -1232,4 +1241,105 @@ fn full_source_identity_is_covered_by_x402_approvals_and_custom_binding() {
         f.client().try_execute(&e),
         Err(Ok(Error::InvalidInvocation))
     );
+}
+
+fn execute_as_actors(f: &Fixture, e: &ExecutionRequest) -> Result<TransferReceipt, Error> {
+    f.auth(
+        &[&f.agent, &f.server],
+        "execute",
+        (e.clone(),).into_val(&f.env),
+    );
+    match f.client().try_execute(e) {
+        Ok(receipt) => Ok(receipt.unwrap()),
+        Err(error) => Err(error.unwrap()),
+    }
+}
+
+#[test]
+fn replayed_operation_with_changed_amount_or_expense_is_rejected_without_charging() {
+    for wasm in [COMMON, CUSTOM] {
+        let f = Fixture::new(wasm, false);
+        let first = f.execution(10);
+        execute_as_actors(&f, &first).unwrap();
+        let before = f.client().state();
+        for changed_expense in [false, true] {
+            // A fresh nonce cannot reuse the consumed logical operation with other economic facts.
+            let mut e = f.execution(if changed_expense { 10 } else { 11 });
+            e.operation_id = first.operation_id.clone();
+            if changed_expense {
+                let mut cost =
+                    ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+                cost.gas_units = 1;
+                cost.max_fee_stroops = 1;
+                cost.spent_units = 11;
+                e.expense = Some(cost.to_xdr(&f.env));
+            }
+            assert_eq!(execute_as_actors(&f, &e), Err(Error::Replay));
+            assert_eq!(f.client().state(), before);
+            assert_eq!(f.balance(), 990);
+        }
+    }
+}
+
+#[test]
+fn repeated_prefix_rules_read_one_proposed_history_and_charge_once() {
+    let f = Fixture::new(COMMON, false);
+    let mut p = f.deployment();
+    p.rules = Vec::new(&f.env);
+    for rule in [
+        "spent_cap",
+        "spent_cap",
+        "day_total_cap",
+        "call_cap",
+        "call_cap",
+    ] {
+        p.rules.push_back(Symbol::new(&f.env, rule));
+    }
+    p.source_digest = standard_prefix_digest(
+        &f.env,
+        &Symbol::new(&f.env, "common_policy_engine"),
+        &f.env
+            .crypto()
+            .sha256(&Bytes::from_slice(&f.env, COMMON))
+            .to_bytes(),
+        &f.asset,
+        &p.rules,
+    );
+    p.grant.spent_cap = Some(30);
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&p);
+    f.transfer(20);
+    // The boundary passes although spent_cap runs twice.
+    f.transfer(10);
+    assert_eq!(f.history().spent, 30);
+    assert_eq!(f.history().day_total, 30);
+    assert_eq!(f.history().calls, 2);
+    let before = f.client().state();
+    assert_eq!(
+        execute_as_actors(&f, &f.execution(1)),
+        Err(Error::PolicyDenied)
+    );
+    assert_eq!(f.client().state(), before);
+}
+
+#[test]
+fn clock_regression_and_cross_day_expense_reject_before_rules_run() {
+    let f = Fixture::new(COMMON, false);
+    f.transfer(10);
+    let before = f.client().state();
+    assert_eq!(before.history.day, 1);
+    // Rules never see accounting of another day: the kernel rejects a backward ledger day.
+    f.env.ledger().with_mut(|l| l.timestamp -= 86_400);
+    assert_eq!(
+        execute_as_actors(&f, &f.execution(10)),
+        Err(Error::InvalidState)
+    );
+    assert_eq!(f.client().state(), before);
+    f.env.ledger().with_mut(|l| l.timestamp += 86_400);
+    let mut e = f.execution(10);
+    let mut cost = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+    cost.day += 1;
+    e.expense = Some(cost.to_xdr(&f.env));
+    assert_eq!(execute_as_actors(&f, &e), Err(Error::InvalidInvocation));
+    assert_eq!(f.client().state(), before);
 }

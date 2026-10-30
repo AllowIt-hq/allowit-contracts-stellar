@@ -39,10 +39,10 @@ impl Vault {
     }
     pub fn preview_redeem(env: Env, shares: i128) -> i128 {
         let behavior: u32 = env.storage().instance().get(&1u32).unwrap();
-        if behavior == 12 {
-            if let Some(receiver) = env.storage().instance().get::<_, Address>(&3u32) {
-                env.storage().persistent().set(&receiver, &0i128);
-            }
+        if behavior == 12
+            && let Some(receiver) = env.storage().instance().get::<_, Address>(&3u32)
+        {
+            env.storage().persistent().set(&receiver, &0i128);
         }
         if behavior == 11 { shares - 2 } else { shares }
     }
