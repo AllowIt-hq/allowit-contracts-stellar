@@ -37,7 +37,9 @@
 //! root, which authored policy names.
 //!
 //! The offchain server depends on `allowit = { default-features = false, features = ["std"] }`
-//! and must not unify `soroban`: enabling both is a compile error.
+//! and must not unify `soroban`: enabling both is a compile error. The server must also build
+//! with `overflow-checks = true`, as the contract release profile does, so that integer overflow
+//! in authored code panics and denies on both backends instead of wrapping on the host.
 #[cfg(feature = "std")]
 extern crate alloc;
 

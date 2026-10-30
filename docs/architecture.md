@@ -117,11 +117,17 @@ slice index or the result of `count()`, are 32 bits onchain and 64 bits on the h
 lexical gate nor the two compiles can see an inferred type. Authored code must not compute with
 such values; it reads lists only through `recipients` and `tokens`.
 
+Integer overflow must behave the same: it panics, so the operation denies. The contract release
+profile sets `overflow-checks = true`. The offchain server must build with `overflow-checks = true`
+in every profile that evaluates policy, because Cargo's default release profile wraps on overflow.
+The std-only compile, the smoke and the portability test pass `-Coverflow-checks=on` explicitly.
+
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec`, `Env` and contract types. Feature `std` uses heap strings and vectors
 for the host evaluator; addresses are unordered StrKey newtypes and the environment is a host
 `AllowitEnv`. The selected backend backs the crate root that authored policy names. The offchain
-server depends on `allowit = { default-features = false, features = ["std"] }`. Enabling both backends is a compile error, so a server cannot silently
+server depends on `allowit = { default-features = false, features = ["std"] }` and builds with
+`overflow-checks = true`. Enabling both backends is a compile error, so a server cannot silently
 unify `soroban` through another crate.
 
 The portability test, `crates/policy-wallet/src/portability_tests.rs`, runs one shared vector set,

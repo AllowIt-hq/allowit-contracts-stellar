@@ -93,9 +93,11 @@ fn host_lines() -> List<Text> {
         );
         Text::from_utf8(output.stdout).unwrap()
     };
+    // Overflow checks are explicit, as in the contract release profile and the offchain server.
     run(Command::new(&rustc)
         .args([
             "--edition=2024",
+            "-Coverflow-checks=on",
             "--crate-type=rlib",
             "--crate-name=allowit",
         ])
@@ -107,7 +109,12 @@ fn host_lines() -> List<Text> {
         ])
         .arg(&lib));
     run(Command::new(&rustc)
-        .args(["--edition=2024", "--test", "--extern"])
+        .args([
+            "--edition=2024",
+            "-Coverflow-checks=on",
+            "--test",
+            "--extern",
+        ])
         .arg(format!("allowit={}", lib.display()))
         .args(["scripts/policy-smoke.rs", "-o"])
         .arg(&bin));
