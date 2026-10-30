@@ -3,14 +3,13 @@
 //! It holds no custody, Grant or accounting. No policy wallet or tool here calls it.
 //! `AllowitContext` carries the contract `Env`, so it is not a contract value. Each method takes
 //! the other context fields and builds the context with its own `Env`.
-use allowit::{
-    AllowitAccountingHistory, AllowitContext, AllowitError, AllowitGrant, AllowitRequest,
-};
+use allowit::{AllowitContext, AllowitError, AllowitGrant, AllowitRequest, AllowitStateMap};
 use soroban_sdk::{Address, Env, contract, contractimpl, panic_with_error};
 #[contract]
 pub struct AllowitEngine;
 /// Engine executable release, independent of parent administration. Version 3 takes the context
-/// fields `grant`, `state` and `request` as separate arguments. It replaces the release 1 ABI,
+/// fields `grant`, `state` (the free-form current policy state) and `request` as separate
+/// arguments, because the context carries the contract `Env`. It replaces the release 1 ABI,
 /// `(request: EngineRequest, state: EngineState)`; release 2 was never released.
 const ENGINE_VERSION: u32 = 3;
 /// Contract error code of the test fixture veto. It is outside `allowit::AllowitError`.
@@ -26,7 +25,7 @@ fn vetoed(env: &Env) {
 fn context(
     env: Env,
     grant: AllowitGrant,
-    state: AllowitAccountingHistory,
+    state: AllowitStateMap,
     request: AllowitRequest,
 ) -> AllowitContext {
     vetoed(&env);
@@ -48,7 +47,7 @@ impl AllowitEngine {
     pub fn transaction_cap(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
         let ctx = context(env, grant, state, request);
@@ -58,7 +57,7 @@ impl AllowitEngine {
     pub fn spent_cap(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
         let ctx = context(env, grant, state, request);
@@ -68,7 +67,7 @@ impl AllowitEngine {
     pub fn day_spent_cap(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
         let ctx = context(env, grant, state, request);
@@ -78,7 +77,7 @@ impl AllowitEngine {
     pub fn day_total_cap(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
         let ctx = context(env, grant, state, request);
@@ -88,7 +87,7 @@ impl AllowitEngine {
     pub fn call_cap(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<u64, AllowitError> {
         let ctx = context(env, grant, state, request);
@@ -98,7 +97,7 @@ impl AllowitEngine {
     pub fn recipients(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<Address, AllowitError> {
         let ctx = context(env, grant, state, request);
@@ -108,7 +107,7 @@ impl AllowitEngine {
     pub fn tokens(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<Address, AllowitError> {
         let ctx = context(env, grant, state, request);
@@ -118,7 +117,7 @@ impl AllowitEngine {
     pub fn expiry(
         env: Env,
         grant: AllowitGrant,
-        state: AllowitAccountingHistory,
+        state: AllowitStateMap,
         request: AllowitRequest,
     ) -> Result<u64, AllowitError> {
         let ctx = context(env, grant, state, request);

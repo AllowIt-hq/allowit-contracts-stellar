@@ -33,7 +33,7 @@ if binding(contract, "ARGUMENT_SCHEMA_HASH") != hashlib.sha256(SCHEMA).digest():
     raise SystemExit("Custom policy argument schema differs")
 # The only alternative module is the `test-catching` fixture, which deployment tooling rejects.
 POLICY_MODULE = ('#[cfg(not(feature = "test-catching"))]\n#[path = "../policy/policy.rs"]\nmod policy;\n'
-                 '/// Test fixture only: a policy that catches rule failures, so tests exercise the onchain record.\n'
+                 '/// Test fixture only: a policy that catches a rule error, continues and writes its own state.\n'
                  '#[cfg(feature = "test-catching")]\n#[path = "catching_policy.rs"]\nmod policy;\n')
 if contract.count("mod policy;") != 2 or POLICY_MODULE not in contract or "/source_hash.rs" not in contract:
     raise SystemExit("Custom policy must compile and hash its authored source verbatim")

@@ -131,9 +131,9 @@ class ReleaseTests(unittest.TestCase):
         packet.update(expected_receipt=expected,expected_effects=dict(wallet=self.plan['asset'],wallet_balance=20000,recipient_balance=50,calls=0,spent_total=0))
         meta=SimpleNamespace(v=4,v4=SimpleNamespace(soroban_meta=SimpleNamespace(return_value=value)))
         response=dict(status='SUCCESS',envelopeXdr=packet['unsigned_xdr'],resultMetaXdr='mock',resultXdr=xdr.TransactionResult(xdr.Int64(100),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr())
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(history=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[10000,10050]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[10000,10050]):
             self.assertEqual(release.settle(self.plan,packet)['status'],'success')
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(history=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[9999]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[9999]):
             with self.assertRaisesRegex(ValueError,'balances or counters'):release.settle(self.plan,packet)
 
     def test_funding_settlement_checks_exact_principal_and_fee(self):
@@ -186,12 +186,12 @@ class ReleaseTests(unittest.TestCase):
             tx.transaction.soroban_data=xdr.SorobanTransactionData(xdr.SorobanTransactionDataExt(0),xdr.SorobanResources(xdr.LedgerFootprint([],[]),xdr.Uint32(100),xdr.Uint32(0),xdr.Uint32(0)),xdr.Int64(123))
             if mutate: mutate(tx)
             return tx.to_xdr()
-        with patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.wa,'owner_only'),patch.object(release,'rpc',return_value={'sequence':100}),patch.object(release.ca,'cli_run',side_effect=simulate),patch.object(release,'read_contract',return_value=dict(history=dict(calls=0,spent=0))),patch.object(release,'balance',side_effect=[20000,50]):
+        with patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.wa,'owner_only'),patch.object(release,'rpc',return_value={'sequence':100}),patch.object(release.ca,'cli_run',side_effect=simulate),patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=0,spent=0))),patch.object(release,'balance',side_effect=[20000,50]):
             return release.complete_execute(self.plan,packet,signed.to_xdr())
 
     def test_execute_prepare_retains_unsigned_server_request_and_original_effects(self):
         packet,_,state,binding=self.execution_packet()
-        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']),patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']) as prepare,patch.object(release,'balance',side_effect=[20000,50]),patch.object(release,'read_contract',return_value=dict(history=dict(calls=0,spent=0))),patch.object(release,'rpc',return_value={'sequence':100}):
+        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']),patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']) as prepare,patch.object(release,'balance',side_effect=[20000,50]),patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=0,spent=0))),patch.object(release,'rpc',return_value={'sequence':100}):
             result=release.prepare(self.plan,self.base,'execute',parent=self.plan['asset'],wallet=self.plan['asset'],operation_id='ab'*32)
         self.assertFalse(result['signing_ready'])
         self.assertEqual(result['expected_effects']['recipient_balance'],50)
@@ -267,8 +267,8 @@ class ReleaseTests(unittest.TestCase):
                 if value is None: return scval.to_void()
                 if name in ('recipients','tokens'): return scval.to_vec([scval.to_address(a) for a in value])
                 return scval.to_uint64(value) if name in ('call_cap','expiry') else scval.to_int128(value)
-            history=scval.to_struct({k:scval.to_uint64(0) if k in ('calls','day') else scval.to_bool(False) if 'unpriced' in k else scval.to_int128(0) for k in ('calls','spent','unpriced','day','day_spent','day_total','day_unpriced')})
-            return scval.to_struct(dict(history=history,contract_version=scval.to_uint32(release.ca.WALLET_CONTRACT_VERSION),
+            policy_state=scval.to_struct({k:scval.to_uint64(0) if k in ('calls','day') else scval.to_bool(False) if 'unpriced' in k else scval.to_int128(0) for k in ('calls','spent','unpriced','day','day_spent','day_total','day_unpriced')})
+            return scval.to_struct(dict(policy_state=policy_state,contract_version=scval.to_uint32(release.ca.WALLET_CONTRACT_VERSION),
                 owner=scval.to_address(self.plan['owner']),agent=scval.to_address(self.plan['agent']),server=scval.to_address(self.plan['server']),
                 asset=scval.to_address(self.plan['asset']),policy_instance=scval.to_bytes(bytes.fromhex(self.plan['policy_instance'])),
                 source_digest=scval.to_bytes(bytes.fromhex(expected['source_digest'])),

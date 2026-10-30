@@ -3,21 +3,25 @@
 //! custom, standard and simple contracts.
 extern crate std;
 use super::*;
-use allowit::{
-    AllowitAccountingHistory, AllowitError, AllowitGrant, AllowitOperation, AllowitRequest,
-};
-use soroban_sdk::{Address, Bytes, testutils::Address as _, vec};
+use allowit::{AllowitGrant, AllowitOperation, AllowitRequest, AllowitStandardState};
+use soroban_sdk::{Address, Bytes, Map, testutils::Address as _, vec};
 
 #[test]
-fn custom_runner_maps_the_policy_result_and_reads_only_its_own_rule_failures() {
+fn custom_runner_maps_the_policy_result() {
     let env = Env::default();
     let recipient = Address::generate(&env);
     let asset = Address::generate(&env);
+    let mut state = Map::new(&env);
+    let current = AllowitStandardState {
+        spent: 5,
+        ..Default::default()
+    };
+    current.write(&env, &mut state).unwrap();
     let ctx = AllowitContext {
         env: env.clone(),
         grant: AllowitGrant {
             transaction_cap: Some(10),
-            spent_cap: Some(10),
+            spent_cap: Some(15),
             day_spent_cap: Some(10),
             day_total_cap: Some(10),
             call_cap: Some(1),
@@ -25,13 +29,7 @@ fn custom_runner_maps_the_policy_result_and_reads_only_its_own_rule_failures() {
             tokens: Some(vec![&env, asset.clone()]),
             expiry: Some(100),
         },
-        state: AllowitAccountingHistory {
-            calls: 1,
-            spent: 10,
-            day_spent: 10,
-            day_total: 10,
-            ..Default::default()
-        },
+        state,
         request: AllowitRequest {
             operation: AllowitOperation::sep41_transfer,
             asset,
@@ -39,23 +37,25 @@ fn custom_runner_maps_the_policy_result_and_reads_only_its_own_rule_failures() {
             amount: 10,
             now: 10,
             expires_at: 20,
+            spent_units: 10,
+            gas_units: 0,
+            unpriced: false,
         },
     };
     let rules = Vec::new(&env);
     assert_eq!(AllowitCustom::check(&ctx, &rules), Ok(()));
     let mut denied = ctx.clone();
-    denied.grant.spent_cap = Some(9);
+    denied.grant.spent_cap = Some(14);
     assert_eq!(
         AllowitCustom::check(&denied, &rules),
         Err(AllowitWalletError::PolicyDenied)
     );
+    let mut unset = ctx.clone();
+    unset.grant.expiry = None;
     assert_eq!(
-        allowit::run(&denied, policy::execute),
-        Err(AllowitError::SpentCapExceeded)
+        AllowitCustom::check(&unset, &rules),
+        Err(AllowitWalletError::InvalidGrant)
     );
-    // A rule failure outside the policy run, earlier in the same invocation, does not deny it.
-    assert!(allowit::spent_cap(&denied, &denied.grant.spent_cap).is_err());
-    assert_eq!(AllowitCustom::check(&ctx, &rules), Ok(()));
 }
 
 #[test]

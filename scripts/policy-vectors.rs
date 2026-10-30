@@ -13,8 +13,10 @@ pub const ADDRESSES: usize = 4;
 const SECONDS_PER_DAY: u64 = 86_400;
 /// Request time of the base vector.
 pub const NOW: u64 = 2 * SECONDS_PER_DAY + 100;
+/// State key that the catching policy counts its caught daily cap errors in.
+pub const OVER: &str = "over_day_cap";
 
-/// One rule input: Grant, proposed history and request.
+/// One rule input: Grant, current state before the operation, and request.
 #[derive(Clone, Debug)]
 pub struct Vector {
     pub name: &'static str,
@@ -31,15 +33,22 @@ pub struct Vector {
     pub day_spent: i128,
     pub day_total: i128,
     pub day_unpriced: bool,
+    /// The catching policy's own state key, if set.
+    pub over: Option<u64>,
     pub deposit: bool,
     pub asset: usize,
     pub recipient: usize,
     pub amount: i128,
     pub now: u64,
     pub expires_at: u64,
+    pub spent_units: i128,
+    pub gas_units: i128,
+    /// The request carries expense bounds.
+    pub priced: bool,
 }
 
-/// A vector that passes every rule with headroom left.
+/// A vector that passes every rule with headroom left. After it, spent and day_spent are 45 and
+/// day_total is 43.
 pub fn base() -> Vector {
     Vector {
         name: "base",
@@ -48,19 +57,23 @@ pub fn base() -> Vector {
         recipients: Some(vec![RECIPIENT, VAULT]),
         tokens: Some(vec![ASSET]),
         expiry: Some(NOW + 1000),
-        calls: 1,
-        spent: 45,
+        calls: 0,
+        spent: 5,
         unpriced: false,
         day: NOW / SECONDS_PER_DAY,
-        day_spent: 45,
-        day_total: 43,
+        day_spent: 5,
+        day_total: 3,
         day_unpriced: false,
+        over: None,
         deposit: false,
         asset: ASSET,
         recipient: RECIPIENT,
         amount: 40,
         now: NOW,
         expires_at: NOW + 400,
+        spent_units: 40,
+        gas_units: 0,
+        priced: true,
     }
 }
 
@@ -72,7 +85,7 @@ fn edit(name: &'static str, change: fn(&mut Vector)) -> Vector {
 }
 
 /// The shared vector set. Some vectors are host-only because the wallet kernel cannot produce
-/// them, such as another UTC day or a deposit into the transfer-only custom contract.
+/// them, such as a deposit into the transfer-only custom contract.
 pub fn vectors() -> Vec<Vector> {
     vec![
         base(),
@@ -80,6 +93,16 @@ pub fn vectors() -> Vec<Vector> {
             v.caps = [Some(40), Some(45), Some(45), Some(43)];
             v.call_cap = Some(1);
             v.expiry = Some(v.expires_at);
+        }),
+        edit("with_gas", |v| {
+            v.gas_units = 3;
+            v.spent_units = 43;
+            v.caps = [Some(40), Some(48), Some(48), Some(46)];
+        }),
+        edit("with_gas_over_day_total_cap", |v| {
+            v.gas_units = 3;
+            v.spent_units = 43;
+            v.caps[3] = Some(45);
         }),
         edit("to_vault", |v| v.recipient = VAULT),
         edit("deposit", |v| {
@@ -99,15 +122,38 @@ pub fn vectors() -> Vec<Vector> {
         edit("over_transaction_cap", |v| v.caps[0] = Some(39)),
         edit("over_spent_cap", |v| v.caps[1] = Some(44)),
         edit("over_day_spent_cap", |v| v.caps[2] = Some(44)),
+        edit("over_day_spent_cap_counted_once", |v| {
+            v.caps[2] = Some(44);
+            v.over = Some(1);
+        }),
+        edit("over_day_spent_cap_counted_twice", |v| {
+            v.caps[2] = Some(44);
+            v.over = Some(2);
+        }),
         edit("over_day_total_cap", |v| v.caps[3] = Some(42)),
         edit("zero_call_cap", |v| v.call_cap = Some(0)),
-        edit("over_call_cap", |v| v.calls = 4),
+        edit("over_call_cap", |v| v.calls = 3),
         edit("unpriced_lifetime", |v| v.unpriced = true),
         edit("unpriced_today", |v| {
             v.unpriced = true;
             v.day_unpriced = true;
         }),
-        edit("another_day", |v| v.day -= 1),
+        edit("unpriced_request", |v| {
+            v.priced = false;
+            v.spent_units = 0;
+        }),
+        edit("unpriced_request_without_cost_caps", |v| {
+            v.priced = false;
+            v.spent_units = 0;
+            v.caps = [Some(100), None, None, None];
+        }),
+        edit("earlier_day_rolls_over", |v| {
+            v.day -= 1;
+            v.day_spent = 499;
+            v.day_total = 599;
+            v.day_unpriced = true;
+        }),
+        edit("later_day", |v| v.day += 1),
         edit("empty_allowlists", |v| {
             v.recipients = Some(Vec::new());
             v.tokens = Some(Vec::new());
@@ -124,6 +170,7 @@ pub fn vectors() -> Vec<Vector> {
         edit("negative_cap", |v| v.caps[0] = Some(-1)),
         edit("zero_amount", |v| v.amount = 0),
         edit("negative_spent", |v| v.spent = -1),
+        edit("negative_request_units", |v| v.spent_units = -1),
         edit("unset_transaction_cap", |v| v.caps[0] = None),
         edit("unset_spent_cap", |v| v.caps[1] = None),
         edit("unset_day_spent_cap", |v| v.caps[2] = None),
@@ -150,8 +197,25 @@ pub fn show<T: std::fmt::Display>(result: Result<T, u32>) -> String {
     }
 }
 
+/// Text of a state map's standard values and the catching policy's key, identical on both backends.
+#[allow(clippy::too_many_arguments)]
+pub fn state_line(
+    calls: u64,
+    spent: i128,
+    unpriced: bool,
+    day: u64,
+    day_spent: i128,
+    day_total: i128,
+    day_unpriced: bool,
+    over: Option<u64>,
+) -> String {
+    let over = over.map_or(String::from("-"), |n| format!("{n}"));
+    format!("{calls}/{spent}/{unpriced}/{day}/{day_spent}/{day_total}/{day_unpriced}/{over}")
+}
+
 /// Every outcome a policy author can observe on one vector: the sample, branch and catching
-/// policies through `allowit::run`, each rule, and the standard preflight runner.
+/// policies, each rule, the standard preflight runner, and the post-flight state without and with
+/// the catching policy's writes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
     pub policy: Result<(), u32>,
@@ -161,24 +225,26 @@ pub struct Outcome {
     pub rules: Vec<Result<String, u32>>,
     /// Preflight results in Grant field order.
     pub preflight: Vec<Result<(), u32>>,
+    /// `post_flight` with no policy writes, as `state_line`.
+    pub next: Result<String, u32>,
+    /// `post_flight` after the catching policy passed and wrote its key.
+    pub catching_next: Result<String, u32>,
 }
 
 impl Outcome {
     /// One output line of the host smoke.
     pub fn line(&self, name: &str) -> String {
         let list = |items: Vec<String>| items.join(",");
+        let unit = |r: &Result<(), u32>| show(r.map(|()| "()"));
         format!(
-            "vector {name} policy={} branch={} catching={} rules={} preflight={}",
-            show(self.policy.map(|()| "()")),
-            show(self.branch.map(|()| "()")),
-            show(self.catching.map(|()| "()")),
+            "vector {name} policy={} branch={} catching={} rules={} preflight={} next={} catching_next={}",
+            unit(&self.policy),
+            unit(&self.branch),
+            unit(&self.catching),
             list(self.rules.iter().cloned().map(show).collect()),
-            list(
-                self.preflight
-                    .iter()
-                    .map(|r| show(r.map(|()| "()")))
-                    .collect()
-            ),
+            list(self.preflight.iter().map(unit).collect()),
+            show(self.next.clone()),
+            show(self.catching_next.clone()),
         )
     }
 }

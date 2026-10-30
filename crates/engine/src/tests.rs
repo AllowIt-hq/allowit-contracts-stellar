@@ -1,7 +1,17 @@
 use super::*;
-use allowit::{AllowitOperation, AllowitRule};
-use soroban_sdk::{testutils::Address as _, vec};
+use allowit::{AllowitOperation, AllowitRule, AllowitStandardState};
+use soroban_sdk::{Map, testutils::Address as _, vec};
+/// Current state before a 40-unit priced transfer: after it, spent is 45 and day_total 43.
 fn fixture(env: &Env) -> AllowitContext {
+    let mut state = Map::new(env);
+    let current = AllowitStandardState {
+        calls: 1,
+        spent: 5,
+        day_spent: 5,
+        day_total: 3,
+        ..Default::default()
+    };
+    current.write(env, &mut state).unwrap();
     let asset = Address::generate(env);
     let recipient = Address::generate(env);
     AllowitContext {
@@ -16,13 +26,7 @@ fn fixture(env: &Env) -> AllowitContext {
             tokens: Some(vec![env, asset.clone()]),
             expiry: Some(1_000),
         },
-        state: AllowitAccountingHistory {
-            calls: 1,
-            spent: 45,
-            day_spent: 45,
-            day_total: 43,
-            ..Default::default()
-        },
+        state,
         request: AllowitRequest {
             operation: AllowitOperation::sep41_transfer,
             asset,
@@ -30,6 +34,9 @@ fn fixture(env: &Env) -> AllowitContext {
             amount: 40,
             now: 100,
             expires_at: 500,
+            spent_units: 40,
+            gas_units: 0,
+            unpriced: false,
         },
     }
 }
@@ -113,7 +120,7 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
                 let v = allowit::call_cap(c, &g.call_cap);
                 assert_eq!(
                     (client.call_cap(&c.grant, &c.state, &c.request), v),
-                    (2, Ok(2))
+                    (1, Ok(1))
                 );
             }
             AllowitRule::recipients => {

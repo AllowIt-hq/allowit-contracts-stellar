@@ -1,7 +1,5 @@
 use super::*;
-use allowit::{
-    AllowitAccountingHistory, AllowitContext, AllowitGrant, AllowitOperation, AllowitRequest,
-};
+use allowit::{AllowitContext, AllowitGrant, AllowitOperation, AllowitRequest};
 use allowit_wallet_engine::AllowitEngineClient;
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
@@ -63,10 +61,7 @@ fn context(env: &Env) -> AllowitContext {
             transaction_cap: Some(10),
             ..Default::default()
         },
-        state: AllowitAccountingHistory {
-            calls: 1,
-            ..Default::default()
-        },
+        state: soroban_sdk::Map::new(env),
         request: AllowitRequest {
             operation: AllowitOperation::sep41_transfer,
             asset: Address::generate(env),
@@ -74,6 +69,9 @@ fn context(env: &Env) -> AllowitContext {
             amount: 1,
             now: 100,
             expires_at: 200,
+            spent_units: 1,
+            gas_units: 0,
+            unpriced: false,
         },
     }
 }

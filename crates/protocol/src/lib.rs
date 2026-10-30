@@ -1,8 +1,8 @@
 #![no_std]
 use soroban_sdk::{Address, Bytes, BytesN, Symbol, contractevent, contracttype};
 
-/// Typed owner Grant and the protected accounting that rules read.
-pub use allowit::{AllowitAccountingHistory, AllowitGrant};
+/// Typed owner Grant that rules read.
+pub use allowit::AllowitGrant;
 
 /// Native transfer-profile argument encoding, fixed independently of policy source.
 pub const ARGUMENT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)";

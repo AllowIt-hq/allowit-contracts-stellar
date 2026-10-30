@@ -14,39 +14,63 @@
 //! }
 //! ```
 //!
-//! Rules check only the facts they read. Each returns its passing constraint or an
-//! `AllowitError`. An unset Grant field is `MissingGrant`. A failed rule also records its error
-//! for the running evaluation: on the host in a thread-local of the evaluating thread, onchain in
-//! the memory of the running contract instance. Neither lives in `ctx.env`, so policy code that
-//! replaces or clones `ctx.env` cannot drop it. `run` runs a complete policy: a failed rule ends
-//! the run with a denial, even if the policy catches the error. The standard contract runs only
-//! the leading canonical calls, supplied by the owner as `rules`, through `preflight`, which skips
-//! unset fields. `scripts/contract_admin.py` derives `rules` from the source.
+//! `AllowitContext` is plain data: `env`, `grant`, `state` and `request`. `state` is the current
+//! policy state, before this operation: one free-form map with standard keys (`spent`,
+//! `day_spent`, `day_total`, `calls`, `day`, `unpriced`, `day_unpriced`) and policy-defined keys.
+//! Rules add the request's own contribution to the current values, so each rule is written once
+//! and reads current state. Each rule returns its passing constraint or an `AllowitError`; an
+//! unset Grant field is `MissingGrant`. Only an error that the policy propagates with `?` ends the
+//! run. A policy may catch a rule error, read it and continue.
 //!
-//! `AllowitContext` is plain data: `env`, `grant`, `state` and `request`. Portable authored code
-//! uses rule calls, typed scalar fields and enum comparisons such as
-//! `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list methods differ (for
-//! example `len` returns `u32` onchain and `usize` on the host), so authored code reads lists only
-//! through `recipients` and `tokens`. Authored code reads `ctx.env` only as a bare field and does
-//! not call its methods, because the two environments have none in common.
+//! After approval, the wallet and the server run the same `post_flight`: it rolls the UTC day
+//! over, counts the call, adds spent and gross amounts, marks unpriced operations, then applies
+//! the policy's own `set_state` writes. The standard contract runs the leading canonical calls,
+//! supplied by the owner as `rules`, through `preflight`, which skips unset fields.
+//!
+//! Portable authored code uses rule calls, `get_state` and `set_state`, typed scalar fields and
+//! enum comparisons. `scripts/policy_source.py` admits only an allowlist of names, paths and
+//! methods that give the same result on both backends.
 //!
 //! Types and rule logic are written once in `core.rs` and compiled per backend. Each backend binds
-//! `Address`, `AllowitEnv` and `Vec`. Feature `soroban` (default) uses host values, contract types
-//! and the Soroban `Env`, and records rule failures in the memory of the running contract
-//! instance, not in ledger storage. Feature `std` uses unordered StrKey addresses, heap vectors
-//! and a stateless host `AllowitEnv`, and records rule failures in a thread-local. The selected backend backs the crate
-//! root, which authored policy names.
+//! `Address`, `AllowitEnv`, `AllowitStateMap` and `Vec`. Feature `soroban` (default) uses host
+//! values, contract types and the Soroban `Env`, and buffers policy writes in contract temporary
+//! storage until `post_flight`. Feature `std` uses StrKey addresses, heap maps and vectors, and a
+//! host `AllowitEnv` that buffers policy writes. The selected backend backs the crate root, which
+//! authored policy names.
+//!
+//! The server-only enrichment functions (`price`, `fetch`, `internet_search`,
+//! `marketplace_search`, `systemone`, `request_screening`, `clear_systemone_context`) exist only in
+//! the host backend. A Custom policy that calls one does not compile onchain.
 //!
 //! The offchain server depends on `allowit = { default-features = false, features = ["std"] }`
 //! and must not unify `soroban`: enabling both is a compile error. The server must also build
 //! with `overflow-checks = true`, as the contract release profile does, so that integer overflow
 //! in authored code panics and denies on both backends instead of wrapping on the host.
+//!
+//! Crate boundary: `core.rs` with the host backend becomes `sdk/core`; the Soroban backend with
+//! the policy wallet crates becomes `stellar/core`.
+//!
+//! ```
+//! use allowit::prelude::*;
+//! /// Control for the test below: the same policy without the server-only call compiles onchain.
+//! pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+//!     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ```compile_fail,E0425
+//! use allowit::prelude::*;
+//! /// A Custom policy that calls a server-only function does not build onchain.
+//! pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+//!     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+//!     let _ = allowit::price(ctx, &ctx.request.asset, ctx.request.amount)?;
+//!     Ok(())
+//! }
+//! ```
 #[cfg(feature = "std")]
 extern crate alloc;
-
-// The host backend, and the Soroban backend in native builds, keep the rule-failure record in a
-// thread-local.
-#[cfg(any(feature = "std", all(feature = "soroban", not(target_family = "wasm"))))]
+#[cfg(feature = "std")]
 extern crate std;
 
 #[cfg(not(any(feature = "soroban", feature = "std")))]
@@ -61,7 +85,9 @@ compile_error!(
 #[cfg(feature = "soroban")]
 pub mod soroban {
     pub use soroban_sdk::Address;
-    use soroban_sdk::{Env as AllowitEnv, Vec};
+    use soroban_sdk::{Env as AllowitEnv, IntoVal, Map, Symbol, TryFromVal, Val, Vec};
+    /// Free-form policy state: standard and policy-defined keys.
+    pub type AllowitStateMap = Map<Symbol, Val>;
     macro_rules! value {
         ($item:item) => {
             #[soroban_sdk::contracttype]
@@ -76,63 +102,82 @@ pub mod soroban {
     }
     include!("core.rs");
 
-    /// Code of the first rule failure in this contract instance, or zero. Soroban runs every
-    /// contract invocation in a new VM instance, so the value starts at zero and dies with the
-    /// invocation. It is not ledger state: recording a failure reads and writes no storage entry,
-    /// so it adds nothing to the transaction footprint. Authored code cannot name it.
-    #[cfg(target_family = "wasm")]
-    static FAILURE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    /// A state value: `i128`, `u64` or `bool`.
+    pub trait AllowitValue: IntoVal<AllowitEnv, Val> + TryFromVal<AllowitEnv, Val> {}
+    impl AllowitValue for i128 {}
+    impl AllowitValue for u64 {}
+    impl AllowitValue for bool {}
 
-    #[cfg(target_family = "wasm")]
-    fn exchange(code: u32) -> u32 {
-        FAILURE.swap(code, core::sync::atomic::Ordering::Relaxed)
-    }
+    /// Temporary-storage key of the running operation's policy writes. `post_flight` removes it,
+    /// and a failed operation rolls it back, so it never outlives the transaction.
+    const WRITES: Symbol = soroban_sdk::symbol_short!("allowit_w");
 
-    // Native tests run every contract frame of a test on one thread, and tests in parallel.
-    #[cfg(not(target_family = "wasm"))]
-    std::thread_local! {
-        static FAILURE: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    fn exchange(code: u32) -> u32 {
-        FAILURE.with(|failure| failure.replace(code))
-    }
-
-    /// Record the first rule failure of the running contract instance.
-    fn record(error: AllowitError) {
-        let first = exchange(error as u32);
-        if first != 0 {
-            exchange(first);
+    /// The symbol of a valid state key.
+    fn symbol(env: &AllowitEnv, key: &str) -> Result<Symbol> {
+        if key_ok(key) {
+            Ok(Symbol::new(env, key))
+        } else {
+            Err(AllowitError::InvalidParameter)
         }
     }
 
-    /// Replace the recorded rule failure of the running contract instance; return the old one.
-    fn swap(failure: Option<AllowitError>) -> Option<AllowitError> {
-        let code = exchange(failure.map_or(0, |error| error as u32));
-        Some(match code {
-            0 => return None,
-            1 => AllowitError::MissingGrant,
-            2 => AllowitError::TransactionCapExceeded,
-            3 => AllowitError::SpentCapExceeded,
-            4 => AllowitError::DaySpentCapExceeded,
-            5 => AllowitError::DayTotalCapExceeded,
-            6 => AllowitError::CallCapExceeded,
-            7 => AllowitError::RecipientNotAllowed,
-            8 => AllowitError::TokenNotAllowed,
-            9 => AllowitError::Expired,
-            10 => AllowitError::Unpriced,
-            11 => AllowitError::InvalidParameter,
-            // `InvalidState` (12). Only `record` and `swap` write a code.
-            _ => AllowitError::InvalidState,
-        })
+    /// The value of `key`, or `None`. A value of another type is `InvalidState`.
+    pub(crate) fn read<V: AllowitValue>(
+        env: &AllowitEnv,
+        state: &AllowitStateMap,
+        key: &str,
+    ) -> Result<Option<V>> {
+        match state.get(symbol(env, key)?) {
+            None => Ok(None),
+            Some(raw) => V::try_from_val(env, &raw)
+                .map(Some)
+                .map_err(|_| AllowitError::InvalidState),
+        }
+    }
+
+    /// Set `key` to `value` in `state`.
+    fn write<V: AllowitValue>(
+        env: &AllowitEnv,
+        state: &mut AllowitStateMap,
+        key: &str,
+        value: V,
+    ) -> Result {
+        state.set(symbol(env, key)?, value.into_val(env));
+        Ok(())
+    }
+
+    /// Buffer one policy write for `post_flight`.
+    fn record<V: AllowitValue>(env: &AllowitEnv, key: &str, value: V) -> Result {
+        let store = env.storage().temporary();
+        let mut writes = store.get(&WRITES).unwrap_or_else(|| Map::new(env));
+        write(env, &mut writes, key, value)?;
+        store.set(&WRITES, &writes);
+        Ok(())
+    }
+
+    /// Remove and return the buffered policy writes.
+    fn take_writes(env: &AllowitEnv) -> AllowitStateMap {
+        let store = env.storage().temporary();
+        let writes = store.get(&WRITES).unwrap_or_else(|| Map::new(env));
+        if !writes.is_empty() {
+            store.remove(&WRITES);
+        }
+        writes
+    }
+
+    /// Apply `writes` over `state`.
+    fn merge(state: &mut AllowitStateMap, writes: AllowitStateMap) {
+        for (key, value) in writes.iter() {
+            state.set(key, value);
+        }
     }
 }
 
 /// Host backend for the offchain server and SDK evaluator. Addresses are StrKey strings.
 #[cfg(feature = "std")]
 pub mod host {
-    use alloc::{string::String, vec::Vec};
+    use alloc::{collections::BTreeMap, string::String, vec::Vec};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     /// Exact Stellar account or contract identity, held as its StrKey text. It compares only for
     /// equality. Soroban orders addresses by `ScAddress`, so accounts sort before contracts, while
@@ -152,44 +197,67 @@ pub mod host {
             &self.0
         }
     }
-    use core::cell::Cell;
 
-    /// Host environment of one policy evaluation. It carries no state: the rule-failure record
-    /// is a thread-local of the evaluating thread, as onchain it is memory of the running
-    /// contract instance. So replacing `ctx.env`, cloning it or creating another `AllowitEnv`
-    /// inside policy code cannot drop a recorded failure.
+    /// One state value, as the Soroban backend holds it in a `Val`.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AllowitVal {
+        I128(i128),
+        U64(u64),
+        Bool(bool),
+    }
+
+    /// Free-form policy state: standard and policy-defined keys.
+    pub type AllowitStateMap = BTreeMap<String, AllowitVal>;
+
+    /// Host environment of one policy evaluation. It buffers the policy's `set_state` writes for
+    /// `post_flight`; clones share the buffer.
     #[derive(Clone, Debug)]
     pub struct AllowitEnv {
-        _private: (),
+        writes: Arc<Mutex<AllowitStateMap>>,
     }
 
     impl AllowitEnv {
-        /// The environment of a new evaluation.
+        /// The environment of a new evaluation, with no buffered writes.
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
-            Self { _private: () }
+            Self {
+                writes: Arc::new(Mutex::new(BTreeMap::new())),
+            }
+        }
+
+        /// The write buffer. A panic while it was held leaves no partial write, so it stays usable.
+        fn buffer(&self) -> MutexGuard<'_, AllowitStateMap> {
+            self.writes
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
         }
     }
 
-    // `run` clears the record when it starts and restores the outer record when it returns, so
-    // evaluations on one thread do not see each other's failures.
-    std::thread_local! {
-        static FAILURE: Cell<Option<AllowitError>> = const { Cell::new(None) };
+    /// A state value: `i128`, `u64` or `bool`.
+    pub trait AllowitValue: Sized {
+        /// This value as a state entry.
+        fn to_val(self) -> AllowitVal;
+        /// The value of a state entry of this type, or `None`.
+        fn from_val(val: &AllowitVal) -> Option<Self>;
     }
-
-    /// Record the first rule failure of the evaluation running on this thread.
-    fn record(error: AllowitError) {
-        FAILURE.with(|failure| {
-            if failure.get().is_none() {
-                failure.set(Some(error));
+    // One `AllowitValue` impl per state value type.
+    macro_rules! values {
+        ($($t:ty => $v:ident),*) => {$(
+            impl AllowitValue for $t {
+                fn to_val(self) -> AllowitVal {
+                    AllowitVal::$v(self)
+                }
+                fn from_val(val: &AllowitVal) -> Option<Self> {
+                    match val {
+                        AllowitVal::$v(value) => Some(*value),
+                        _ => None,
+                    }
+                }
             }
-        });
+        )*};
     }
+    values!(i128 => I128, u64 => U64, bool => Bool);
 
-    /// Replace the recorded rule failure of this thread; return the old one.
-    fn swap(failure: Option<AllowitError>) -> Option<AllowitError> {
-        FAILURE.with(|cell| cell.replace(failure))
-    }
     macro_rules! value {
         ($item:item) => {
             $item
@@ -201,6 +269,87 @@ pub mod host {
         };
     }
     include!("core.rs");
+
+    /// The value of `key`, or `None`. A value of another type is `InvalidState`.
+    pub(crate) fn read<V: AllowitValue>(
+        _env: &AllowitEnv,
+        state: &AllowitStateMap,
+        key: &str,
+    ) -> Result<Option<V>> {
+        if !key_ok(key) {
+            return Err(AllowitError::InvalidParameter);
+        }
+        state
+            .get(key)
+            .map(|val| V::from_val(val).ok_or(AllowitError::InvalidState))
+            .transpose()
+    }
+
+    /// Set `key` to `value` in `state`.
+    fn write<V: AllowitValue>(
+        _env: &AllowitEnv,
+        state: &mut AllowitStateMap,
+        key: &str,
+        value: V,
+    ) -> Result {
+        if !key_ok(key) {
+            return Err(AllowitError::InvalidParameter);
+        }
+        state.insert(String::from(key), value.to_val());
+        Ok(())
+    }
+
+    /// Buffer one policy write for `post_flight`.
+    fn record<V: AllowitValue>(env: &AllowitEnv, key: &str, value: V) -> Result {
+        write(env, &mut env.buffer(), key, value)
+    }
+
+    /// Remove and return the buffered policy writes.
+    fn take_writes(env: &AllowitEnv) -> AllowitStateMap {
+        core::mem::take(&mut *env.buffer())
+    }
+
+    /// Apply `writes` over `state`.
+    fn merge(state: &mut AllowitStateMap, writes: AllowitStateMap) {
+        state.extend(writes);
+    }
+
+    /// Server-only enrichment. Each function is an API stub that the offchain server fills; here
+    /// it is `Unsupported`. The Soroban backend has none of them, so onchain policy cannot call one.
+    pub mod server {
+        use super::{Address, AllowitContext, AllowitError, Result};
+        use alloc::string::String;
+
+        /// Price `amount` of `asset` in the grant's accounting unit.
+        pub fn price(_ctx: &AllowitContext, _asset: &Address, _amount: i128) -> Result<i128> {
+            Err(AllowitError::Unsupported)
+        }
+        /// Fetch the text at `url`.
+        pub fn fetch(_ctx: &AllowitContext, _url: &str) -> Result<String> {
+            Err(AllowitError::Unsupported)
+        }
+        /// Search the internet for `query`.
+        pub fn internet_search(_ctx: &AllowitContext, _query: &str) -> Result<String> {
+            Err(AllowitError::Unsupported)
+        }
+        /// Search marketplaces for `query`.
+        pub fn marketplace_search(_ctx: &AllowitContext, _query: &str) -> Result<String> {
+            Err(AllowitError::Unsupported)
+        }
+        /// Ask SystemOne `prompt` within the evaluation's SystemOne context.
+        pub fn systemone(_ctx: &AllowitContext, _prompt: &str) -> Result<String> {
+            Err(AllowitError::Unsupported)
+        }
+        /// Screen the request; `true` passes.
+        pub fn request_screening(_ctx: &AllowitContext) -> Result<bool> {
+            Err(AllowitError::Unsupported)
+        }
+        /// Clear the evaluation's SystemOne context.
+        pub fn clear_systemone_context(_ctx: &AllowitContext) -> Result {
+            Err(AllowitError::Unsupported)
+        }
+    }
+    pub use server::*;
 }
 
 #[cfg(feature = "soroban")]

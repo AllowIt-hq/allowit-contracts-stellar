@@ -1,6 +1,7 @@
-// Shared types and rules, included once per backend. `Address`, `AllowitEnv` and `Vec` come from
-// the including module, with `record` and `swap`. Field types keep those names so Soroban
-// contract specs name native types.
+// Shared types and rules, included once per backend. The including module supplies `Address`,
+// `AllowitEnv`, `AllowitStateMap`, `AllowitValue` and `Vec`, and the state primitives `read`,
+// `write`, `record`, `take_writes` and `merge`. Field types keep those names so Soroban contract
+// specs name native types.
 
 /// UTC day length in seconds.
 pub const DAY: u64 = 86_400;
@@ -11,7 +12,7 @@ pub use types::*;
 /// `AllowitRule` variants keep the snake-case names of their functions and Grant fields.
 #[allow(non_camel_case_types)]
 mod types {
-    use super::{Address, AllowitEnv, Vec};
+    use super::{Address, AllowitEnv, AllowitStateMap, Vec};
 
     value! {
         /// Owner-signed typed rule parameters. `None` is unset: its rule denies with `MissingGrant`.
@@ -34,28 +35,6 @@ mod types {
             pub tokens: Option<Vec<Address>>,
             /// Exclusive Unix timestamp; the grant denies at and after it.
             pub expiry: Option<u64>,
-        }
-    }
-
-    value! {
-        /// Protected accounting proposed after this operation. Values include it once.
-        /// Missing price facts set unpriced liabilities instead of spent amounts.
-        #[derive(Clone, Debug, Default, Eq, PartialEq)]
-        pub struct AllowitAccountingHistory {
-            /// Successful operations, including this one.
-            pub calls: u64,
-            /// Lifetime irreversible expenses.
-            pub spent: i128,
-            /// A lifetime operation lacked price facts.
-            pub unpriced: bool,
-            /// UTC day of the daily values (Unix seconds / 86400).
-            pub day: u64,
-            /// Irreversible expenses on `day`.
-            pub day_spent: i128,
-            /// Gross amounts plus separate attributable gas on `day`.
-            pub day_total: i128,
-            /// An operation on `day` lacked price facts.
-            pub day_unpriced: bool,
         }
     }
 
@@ -84,6 +63,12 @@ mod types {
             pub now: u64,
             /// Exclusive request expiry in Unix seconds.
             pub expires_at: u64,
+            /// Irreversible expense of this operation from the validated expense bounds; zero when unpriced.
+            pub spent_units: i128,
+            /// Attributable gas of this operation from the validated expense bounds; zero when unpriced.
+            pub gas_units: i128,
+            /// The request carries no expense bounds.
+            pub unpriced: bool,
         }
     }
 
@@ -102,14 +87,14 @@ mod types {
         }
     }
 
-    /// Complete rule input, computed and supplied by the wallet or server. Plain data: `env` is
-    /// the backend environment, a Soroban `Env` onchain and an `AllowitEnv` on the host. The
-    /// rule-failure record does not live in `env`.
+    /// Complete rule input, supplied by the wallet or server. Plain data: `env` is the backend
+    /// environment, a Soroban `Env` onchain and an `AllowitEnv` on the host; `state` is the current
+    /// policy state, before this operation.
     #[derive(Clone)]
     pub struct AllowitContext {
         pub env: AllowitEnv,
         pub grant: AllowitGrant,
-        pub state: AllowitAccountingHistory,
+        pub state: AllowitStateMap,
         pub request: AllowitRequest,
     }
 
@@ -130,10 +115,14 @@ mod types {
             Expired = 9,
             /// Selected expense accounting has an unpriced liability.
             Unpriced = 10,
-            /// Negative cap or nonpositive transaction amount.
+            /// Negative cap, nonpositive amount, negative request units or invalid state key.
             InvalidParameter = 11,
-            /// Read accounting is negative or belongs to another day.
+            /// Read state is negative, of another type, or belongs to a later day.
             InvalidState = 12,
+            /// An accounting sum leaves its integer range.
+            Overflow = 13,
+            /// A server-only function this evaluator does not provide.
+            Unsupported = 14,
         }
     }
 }
@@ -144,35 +133,122 @@ pub type Result<T = ()> = core::result::Result<T, AllowitError>;
 /// Names used by authored policy.
 pub mod prelude {
     pub use super::{
-        Address, AllowitAccountingHistory, AllowitContext, AllowitError, AllowitGrant,
-        AllowitOperation, AllowitRequest, Result,
+        Address, AllowitContext, AllowitError, AllowitGrant, AllowitOperation, AllowitRequest,
+        Result,
     };
 }
 
-/// Check one accounting cap against only the facts it reads. `current` is false for daily
-/// values of another UTC day.
+/// Standard state keys. `post_flight` writes them; policy writes apply after them.
+pub const SPENT: &str = "spent";
+pub const DAY_SPENT: &str = "day_spent";
+pub const DAY_TOTAL: &str = "day_total";
+pub const CALLS: &str = "calls";
+pub const DAY_KEY: &str = "day";
+pub const UNPRICED: &str = "unpriced";
+pub const DAY_UNPRICED: &str = "day_unpriced";
+
+/// Standard values of a state map. An absent key reads as zero or false.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AllowitStandardState {
+    /// Successful operations.
+    pub calls: u64,
+    /// Lifetime irreversible expenses.
+    pub spent: i128,
+    /// A lifetime operation lacked price facts.
+    pub unpriced: bool,
+    /// UTC day of the daily values (Unix seconds / 86400).
+    pub day: u64,
+    /// Irreversible expenses on `day`.
+    pub day_spent: i128,
+    /// Gross amounts plus separate attributable gas on `day`.
+    pub day_total: i128,
+    /// An operation on `day` lacked price facts.
+    pub day_unpriced: bool,
+}
+
+impl AllowitStandardState {
+    /// Decode the standard keys of `state`. A value of another type is `InvalidState`.
+    pub fn read(env: &AllowitEnv, state: &AllowitStateMap) -> Result<Self> {
+        Ok(Self {
+            calls: read(env, state, CALLS)?.unwrap_or_default(),
+            spent: read(env, state, SPENT)?.unwrap_or_default(),
+            unpriced: read(env, state, UNPRICED)?.unwrap_or_default(),
+            day: read(env, state, DAY_KEY)?.unwrap_or_default(),
+            day_spent: read(env, state, DAY_SPENT)?.unwrap_or_default(),
+            day_total: read(env, state, DAY_TOTAL)?.unwrap_or_default(),
+            day_unpriced: read(env, state, DAY_UNPRICED)?.unwrap_or_default(),
+        })
+    }
+
+    /// Write every standard key into `state`.
+    pub fn write(&self, env: &AllowitEnv, state: &mut AllowitStateMap) -> Result {
+        write(env, state, CALLS, self.calls)?;
+        write(env, state, SPENT, self.spent)?;
+        write(env, state, UNPRICED, self.unpriced)?;
+        write(env, state, DAY_KEY, self.day)?;
+        write(env, state, DAY_SPENT, self.day_spent)?;
+        write(env, state, DAY_TOTAL, self.day_total)?;
+        write(env, state, DAY_UNPRICED, self.day_unpriced)
+    }
+}
+
+/// A state key is 1 to 32 ASCII letters, digits or underscores, as a Soroban `Symbol` requires.
+fn key_ok(key: &str) -> bool {
+    (1..=32).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Checked sum of accounting values.
+fn sum(a: i128, b: i128) -> Result<i128> {
+    a.checked_add(b).ok_or(AllowitError::Overflow)
+}
+
+/// The request's own contribution: the sum of nonnegative request units.
+fn contribution(parts: &[i128]) -> Result<i128> {
+    parts.iter().try_fold(0, |total, part| {
+        if *part < 0 {
+            Err(AllowitError::InvalidParameter)
+        } else {
+            sum(total, *part)
+        }
+    })
+}
+
+/// Standard values of the current state.
+fn standard(ctx: &AllowitContext) -> Result<AllowitStandardState> {
+    AllowitStandardState::read(&ctx.env, &ctx.state)
+}
+
+/// Daily values `(day_spent, day_total, day_unpriced)` on the request's UTC day: those of an
+/// earlier day roll over to zero, and a later day is `InvalidState`.
+fn daily(ctx: &AllowitContext, s: &AllowitStandardState) -> Result<(i128, i128, bool)> {
+    let today = ctx.request.now / DAY;
+    if s.day > today {
+        Err(AllowitError::InvalidState)
+    } else if s.day < today {
+        Ok((0, 0, false))
+    } else {
+        Ok((s.day_spent, s.day_total, s.day_unpriced))
+    }
+}
+
+/// Check one accounting cap: `used + add <= cap`, against only the facts it reads.
 fn accounting(
     cap: i128,
     used: i128,
     unpriced: bool,
-    current: bool,
+    add: Result<i128>,
     exceeded: AllowitError,
 ) -> Result<i128> {
     if cap < 0 {
         return Err(AllowitError::InvalidParameter);
     }
-    if used < 0 || !current {
+    if used < 0 {
         return Err(AllowitError::InvalidState);
     }
     if unpriced {
         return Err(AllowitError::Unpriced);
     }
-    left(cap, used, exceeded)
-}
-
-/// Daily values belong to the request's UTC day.
-fn today(ctx: &AllowitContext) -> bool {
-    ctx.state.day == ctx.request.now / DAY
+    left(cap, sum(used, add?)?, exceeded)
 }
 
 /// Remaining headroom of a nonnegative cap.
@@ -184,24 +260,10 @@ fn left(cap: i128, used: i128, exceeded: AllowitError) -> Result<i128> {
     }
 }
 
-/// Record a failed rule for the running evaluation, so `run` denies even if the policy catches it.
-fn failed<T>(result: Result<T>) -> Result<T> {
-    if let Err(error) = &result {
-        record(*error);
-    }
-    result
-}
-
 /// Bound the gross amount of one operation.
 ///
-/// Returns `cap - request.amount`, the headroom left for this operation.
-/// A negative cap or nonpositive amount is `InvalidParameter`.
+/// Returns `cap - request.amount`. A negative cap or nonpositive amount is `InvalidParameter`.
 pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(check_transaction_cap(ctx, cap))
-}
-
-/// `transaction_cap` without recording a failure.
-fn check_transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
     if cap < 0 || ctx.request.amount <= 0 {
         return Err(AllowitError::InvalidParameter);
@@ -213,85 +275,64 @@ fn check_transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i12
     )
 }
 
-/// Bound cumulative irreversible expenses, including this operation.
+/// Bound cumulative irreversible expenses: `spent + request.spent_units <= cap`.
 ///
-/// Returns `cap - state.spent`. Lifetime unpriced history is `Unpriced`.
+/// Returns the headroom left after this operation. Lifetime or request unpriced is `Unpriced`.
 pub fn spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(check_spent_cap(ctx, cap))
-}
-
-/// `spent_cap` without recording a failure.
-fn check_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
-    let s = &ctx.state;
-    accounting(
-        cap,
-        s.spent,
-        s.unpriced,
-        true,
-        AllowitError::SpentCapExceeded,
-    )
+    let (s, r) = (standard(ctx)?, &ctx.request);
+    let add = contribution(&[r.spent_units]);
+    let e = AllowitError::SpentCapExceeded;
+    accounting(cap, s.spent, s.unpriced || r.unpriced, add, e)
 }
 
-/// Bound irreversible expenses on the request's UTC day, including this operation.
+/// Bound irreversible expenses on the request's UTC day: `day_spent + request.spent_units <= cap`.
+/// `day_spent` is zero when the state belongs to an earlier day.
 ///
-/// Returns `cap - state.day_spent`. Unpriced history for that day is `Unpriced`.
-/// `state.day` must equal `request.now / DAY`.
+/// Returns the headroom left after this operation. Unpriced today or in the request is `Unpriced`.
 pub fn day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(check_day_spent_cap(ctx, cap))
-}
-
-/// `day_spent_cap` without recording a failure.
-fn check_day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
-    let s = &ctx.state;
+    let (day_spent, _, day_unpriced) = daily(ctx, &standard(ctx)?)?;
+    let r = &ctx.request;
+    let add = contribution(&[r.spent_units]);
     let e = AllowitError::DaySpentCapExceeded;
-    accounting(cap, s.day_spent, s.day_unpriced, today(ctx), e)
+    accounting(cap, day_spent, day_unpriced || r.unpriced, add, e)
 }
 
-/// Bound gross amounts plus separate attributable gas on the request's UTC day.
-/// Embedded deposit conversion fees belong to principal and count once.
+/// Bound gross amounts plus separate attributable gas on the request's UTC day:
+/// `day_total + request.amount + request.gas_units <= cap`. Embedded deposit conversion fees
+/// belong to principal and count once.
 ///
-/// Returns `cap - state.day_total`. Unpriced history for that day is `Unpriced`.
-/// `state.day` must equal `request.now / DAY`.
+/// Returns the headroom left after this operation. Unpriced today or in the request is `Unpriced`.
 pub fn day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(check_day_total_cap(ctx, cap))
-}
-
-/// `day_total_cap` without recording a failure.
-fn check_day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
-    let s = &ctx.state;
+    let (_, day_total, day_unpriced) = daily(ctx, &standard(ctx)?)?;
+    let r = &ctx.request;
+    let add = contribution(&[r.amount, r.gas_units]);
     let e = AllowitError::DayTotalCapExceeded;
-    accounting(cap, s.day_total, s.day_unpriced, today(ctx), e)
+    accounting(cap, day_total, day_unpriced || r.unpriced, add, e)
 }
 
-/// Bound successful operations, including this one and those made while this rule was skipped.
+/// Bound successful operations, including those made while this rule was skipped:
+/// `calls + 1 <= cap`.
 ///
-/// Returns `cap - state.calls`. A zero cap always denies.
+/// Returns the operations left after this one. A zero cap always denies.
 pub fn call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
-    failed(check_call_cap(ctx, cap))
-}
-
-/// `call_cap` without recording a failure.
-fn check_call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
-    let calls = ctx.state.calls;
-    if cap == 0 || calls > cap {
+    let next = standard(ctx)?
+        .calls
+        .checked_add(1)
+        .ok_or(AllowitError::Overflow)?;
+    if next > cap {
         return Err(AllowitError::CallCapExceeded);
     }
-    Ok(cap - calls)
+    Ok(cap - next)
 }
 
 /// Require an exact permitted destination. Deposits name their vault as the recipient.
 ///
 /// Returns the matched `request.recipient`. An empty list denies.
 pub fn recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
-    failed(check_recipients(ctx, allowed))
-}
-
-/// `recipients` without recording a failure.
-fn check_recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
     let allowed = allowed.as_ref().ok_or(AllowitError::MissingGrant)?;
     let recipient = &ctx.request.recipient;
     if allowed.contains(recipient) {
@@ -305,11 +346,6 @@ fn check_recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Res
 ///
 /// Returns the matched `request.asset`. An empty list denies.
 pub fn tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
-    failed(check_tokens(ctx, allowed))
-}
-
-/// `tokens` without recording a failure.
-fn check_tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
     let allowed = allowed.as_ref().ok_or(AllowitError::MissingGrant)?;
     let asset = &ctx.request.asset;
     if allowed.contains(asset) {
@@ -323,11 +359,6 @@ fn check_tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<
 ///
 /// Returns `expiry - request.now`, the seconds the grant has left.
 pub fn expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
-    failed(check_expiry(ctx, expiry))
-}
-
-/// `expiry` without recording a failure.
-fn check_expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
     let expiry = expiry.ok_or(AllowitError::MissingGrant)?;
     let r = &ctx.request;
     if r.now < expiry && r.now < r.expires_at && r.expires_at <= expiry {
@@ -337,68 +368,74 @@ fn check_expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
     }
 }
 
+/// The current value of a state key, before this operation, or `None`. Writes of this run apply
+/// only in `post_flight`. A value of another type is `InvalidState`.
+pub fn get_state<V: AllowitValue>(ctx: &AllowitContext, key: &str) -> Result<Option<V>> {
+    read(&ctx.env, &ctx.state, key)
+}
+
+/// Record a policy write of `key`. `post_flight` applies it after the standard update, so it may
+/// replace a standard key. A key is 1 to 32 ASCII letters, digits or underscores.
+pub fn set_state<V: AllowitValue>(ctx: &AllowitContext, key: &str, value: V) -> Result {
+    record(&ctx.env, key, value)
+}
+
 /// Standard-contract preflight of one canonical prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`.
 /// Only this runner skips a rule whose Grant field is unset. It discards pass values.
 pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
-    let grant = &ctx.grant;
+    let g = &ctx.grant;
     match rule {
-        AllowitRule::transaction_cap => {
-            if grant.transaction_cap.is_some() {
-                transaction_cap(ctx, &grant.transaction_cap)?;
-            }
+        AllowitRule::transaction_cap if g.transaction_cap.is_some() => {
+            transaction_cap(ctx, &g.transaction_cap)?;
         }
-        AllowitRule::spent_cap => {
-            if grant.spent_cap.is_some() {
-                spent_cap(ctx, &grant.spent_cap)?;
-            }
+        AllowitRule::spent_cap if g.spent_cap.is_some() => {
+            spent_cap(ctx, &g.spent_cap)?;
         }
-        AllowitRule::day_spent_cap => {
-            if grant.day_spent_cap.is_some() {
-                day_spent_cap(ctx, &grant.day_spent_cap)?;
-            }
+        AllowitRule::day_spent_cap if g.day_spent_cap.is_some() => {
+            day_spent_cap(ctx, &g.day_spent_cap)?;
         }
-        AllowitRule::day_total_cap => {
-            if grant.day_total_cap.is_some() {
-                day_total_cap(ctx, &grant.day_total_cap)?;
-            }
+        AllowitRule::day_total_cap if g.day_total_cap.is_some() => {
+            day_total_cap(ctx, &g.day_total_cap)?;
         }
-        AllowitRule::call_cap => {
-            if grant.call_cap.is_some() {
-                call_cap(ctx, &grant.call_cap)?;
-            }
+        AllowitRule::call_cap if g.call_cap.is_some() => {
+            call_cap(ctx, &g.call_cap)?;
         }
-        AllowitRule::recipients => {
-            if grant.recipients.is_some() {
-                recipients(ctx, &grant.recipients)?;
-            }
+        AllowitRule::recipients if g.recipients.is_some() => {
+            recipients(ctx, &g.recipients)?;
         }
-        AllowitRule::tokens => {
-            if grant.tokens.is_some() {
-                tokens(ctx, &grant.tokens)?;
-            }
+        AllowitRule::tokens if g.tokens.is_some() => {
+            tokens(ctx, &g.tokens)?;
         }
-        AllowitRule::expiry => {
-            if grant.expiry.is_some() {
-                expiry(ctx, &grant.expiry)?;
-            }
+        AllowitRule::expiry if g.expiry.is_some() => {
+            expiry(ctx, &g.expiry)?;
         }
+        _ => {}
     }
     Ok(())
 }
 
-/// Run a complete authored policy, as `AllowitCustomPolicy` and the host evaluator do. A failed
-/// rule ends the run with a denial: when any rule failed during `execute`, `run` returns the first
-/// such rule error even if the policy caught it and returned `Ok`. A nested `run` keeps the outer
-/// record, so a policy cannot clear a failure by calling `run` itself.
-pub fn run(ctx: &AllowitContext, execute: fn(&AllowitContext) -> Result) -> Result {
-    let outer = swap(None);
-    let result = execute(ctx);
-    let failure = swap(None);
-    swap(outer.or(failure));
-    match failure {
-        Some(error) => Err(error),
-        None => result,
+/// State after an approved operation, computed by the wallet and the server alike: roll the UTC
+/// day over, count the call, add spent and gross amounts, mark an unpriced request, then apply the
+/// policy's buffered writes. It always clears the write buffer first.
+pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
+    let writes = take_writes(&ctx.env);
+    let mut s = standard(ctx)?;
+    let (day_spent, day_total, day_unpriced) = daily(ctx, &s)?;
+    let r = &ctx.request;
+    if s.spent < 0 || day_spent < 0 || day_total < 0 {
+        return Err(AllowitError::InvalidState);
     }
+    s.calls = s.calls.checked_add(1).ok_or(AllowitError::Overflow)?;
+    s.day = r.now / DAY;
+    s.spent = sum(s.spent, contribution(&[r.spent_units])?)?;
+    s.day_spent = sum(day_spent, contribution(&[r.spent_units])?)?;
+    s.day_total = sum(day_total, contribution(&[r.amount, r.gas_units])?)?;
+    s.unpriced |= r.unpriced;
+    s.day_unpriced = day_unpriced || r.unpriced;
+    let mut state = ctx.state.clone();
+    s.write(&ctx.env, &mut state)?;
+    merge(&mut state, writes);
+    Ok(state)
 }
 
 impl AllowitGrant {

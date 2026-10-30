@@ -2,10 +2,10 @@
 //! Owner-controlled custody mixins shared by fixed and bespoke policy wallets.
 use allowit::{AllowitContext, AllowitOperation, AllowitRequest, AllowitRule};
 use allowit_wallet_protocol::{
-    ARGUMENT_SCHEMA_DESCRIPTOR, AllowitAccountingHistory, AllowitExecutionRequest,
-    AllowitExpenseBounds, AllowitGrant, AllowitPolicyBinding, AllowitSep41TransferArgs,
-    AllowitSep56DepositArgs, AllowitSep56DepositEvent, AllowitSep56DepositReceipt,
-    AllowitTransferReceipt, MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR,
+    ARGUMENT_SCHEMA_DESCRIPTOR, AllowitExecutionRequest, AllowitExpenseBounds, AllowitGrant,
+    AllowitPolicyBinding, AllowitSep41TransferArgs, AllowitSep56DepositArgs,
+    AllowitSep56DepositEvent, AllowitSep56DepositReceipt, AllowitTransferReceipt,
+    MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR,
 };
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, Executable, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
@@ -17,11 +17,12 @@ use soroban_sdk::{
 };
 mod persistent;
 const STATE_KEY: u32 = 0;
-/// Version 2: typed Grant and `Vec<AllowitRule>` prefix. Version 1 stored an untyped Grant map.
-pub const CONTRACT_VERSION: u32 = 2;
+/// Version 3: free-form `policy_state` map. Version 2 stored a typed accounting history struct and
+/// version 1 an untyped Grant map. No layout migrates implicitly: the owner recovers funds.
+pub const CONTRACT_VERSION: u32 = 3;
 // Wasm metadata equal to CONTRACT_VERSION. Release tooling refuses a code change to Wasm that
 // declares another custody layout, or none (version 1), because that code cannot read State.
-soroban_sdk::contractmeta!(key = "allowit_custody_layout", val = "2");
+soroban_sdk::contractmeta!(key = "allowit_custody_layout", val = "3");
 
 /// Initial owner-signed configuration. Asset and policy_instance stay fixed after creation.
 #[contracttype]
@@ -41,7 +42,7 @@ pub struct AllowitPolicyConfig {
     pub x402_enabled: bool,
 }
 
-/// Complete owner update. It preserves asset, logical identity, nonce, pause and history.
+/// Complete owner update. It preserves asset, logical identity, nonce, pause and policy state.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllowitPolicyDeployment {
@@ -60,7 +61,8 @@ pub struct AllowitPolicyDeployment {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllowitState {
-    pub history: AllowitAccountingHistory,
+    /// Free-form policy state after the last operation: standard and policy-defined keys.
+    pub policy_state: Map<Symbol, Val>,
     pub contract_version: u32,
     pub owner: Address,
     pub agent: Address,
@@ -142,6 +144,7 @@ pub trait AllowitPolicy {
         }
     }
     /// Evaluate the compiled checks on the kernel-built rule input. Pass values are discarded.
+    /// Custom runs its own `execute`; the standard tiers run the owner's prefix.
     fn check(ctx: &AllowitContext, rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError>;
 }
 
@@ -154,7 +157,7 @@ fn load(env: &Env, initial: Option<AllowitState>) -> Result<AllowitState, Allowi
     let state =
         AllowitState::try_from_val(env, &raw).map_err(|_| AllowitWalletError::InvalidState)?;
     // Struct decoding ignores extra keys and reads absent Option keys as None. Only the exact
-    // canonical encoding of this layout is accepted, including nested Grant and history.
+    // canonical encoding of this layout is accepted, including the nested Grant.
     if state.contract_version != CONTRACT_VERSION || state.clone().to_xdr(env) != raw.to_xdr(env) {
         return Err(AllowitWalletError::InvalidState);
     }
@@ -171,8 +174,7 @@ fn store(env: &Env, state: &AllowitState) {
 }
 /// Stored fields that owner entrypoints keep. Struct decoding ignores the other State keys, so
 /// a stored Grant or rule list that no longer decodes never blocks recovery, passthrough or its
-/// replacement by an owner packet. Version 1 differs from version 2 only in Grant and rules.
-/// Protected history is read separately, only where it is carried over.
+/// replacement by an owner packet. Policy state is read separately, only where it is carried over.
 #[contracttype]
 struct KeptState {
     contract_version: u32,
@@ -195,20 +197,14 @@ fn kept(env: &Env) -> Result<KeptState, AllowitWalletError> {
     extend(env);
     Ok(kept)
 }
-/// Protected history carried into a new State. Struct decoding ignores extra keys, so only its
-/// exact canonical encoding is accepted.
-fn kept_history(env: &Env) -> Result<AllowitAccountingHistory, AllowitWalletError> {
+/// Policy state carried into a new State. Earlier layouts have none, so they do not migrate.
+fn kept_policy_state(env: &Env) -> Result<Map<Symbol, Val>, AllowitWalletError> {
     let fields = Map::<Symbol, Val>::try_from_val(env, &stored(env)?)
         .map_err(|_| AllowitWalletError::InvalidState)?;
     let raw = fields
-        .get(Symbol::new(env, "history"))
+        .get(Symbol::new(env, "policy_state"))
         .ok_or(AllowitWalletError::InvalidState)?;
-    let history = AllowitAccountingHistory::try_from_val(env, &raw)
-        .map_err(|_| AllowitWalletError::InvalidState)?;
-    if history.clone().to_xdr(env) != raw.to_xdr(env) {
-        return Err(AllowitWalletError::InvalidState);
-    }
-    Ok(history)
+    Map::try_from_val(env, &raw).map_err(|_| AllowitWalletError::InvalidState)
 }
 fn stored(env: &Env) -> Result<Val, AllowitWalletError> {
     env.storage()
@@ -541,10 +537,10 @@ fn decode_expense(
 fn validate_expense(
     env: &Env,
     state: &AllowitState,
-    execution: &AllowitExecutionRequest,
+    expense: Option<&AllowitExpenseBounds>,
     operation: &NativeOperation,
 ) -> Result<(), AllowitWalletError> {
-    let Some(expense) = decode_expense(env, execution.expense.as_ref())? else {
+    let Some(expense) = expense else {
         return Ok(());
     };
     if expense.asset != state.asset
@@ -675,80 +671,40 @@ fn deposit_tokens(
     }
     Ok(shares)
 }
-fn next_history(
-    env: &Env,
-    prior: &AllowitAccountingHistory,
-    execution: &AllowitExecutionRequest,
-    amount: i128,
-    now: u64,
-) -> Result<AllowitAccountingHistory, AllowitWalletError> {
-    let day = now / 86_400;
-    if prior.day > day || prior.spent < 0 || prior.day_spent < 0 || prior.day_total < 0 {
-        return Err(AllowitWalletError::InvalidState);
-    }
-    let mut next = prior.clone();
-    if next.day != day {
-        next.day = day;
-        next.day_spent = 0;
-        next.day_total = 0;
-        next.day_unpriced = false;
-    }
-    next.calls = next
-        .calls
-        .checked_add(1)
-        .ok_or(AllowitWalletError::Overflow)?;
-    next.day_total = next
-        .day_total
-        .checked_add(amount)
-        .ok_or(AllowitWalletError::Overflow)?;
-    if let Some(expense) = decode_expense(env, execution.expense.as_ref())? {
-        next.spent = next
-            .spent
-            .checked_add(expense.spent_units)
-            .ok_or(AllowitWalletError::Overflow)?;
-        next.day_spent = next
-            .day_spent
-            .checked_add(expense.spent_units)
-            .ok_or(AllowitWalletError::Overflow)?;
-        next.day_total = next
-            .day_total
-            .checked_add(expense.gas_units)
-            .ok_or(AllowitWalletError::Overflow)?;
-    } else {
-        next.unpriced = true;
-        next.day_unpriced = true;
-    }
-    Ok(next)
-}
-/// Rule input: contract environment, owner Grant, proposed protected history and authenticated
-/// request facts.
-/// Deposits name their vault as the recipient.
+/// Rule input: contract environment, owner Grant, current policy state and authenticated request
+/// facts. Deposits name their vault as the recipient. A request without expense bounds is unpriced.
 fn rule_input(
     env: &Env,
     state: &AllowitState,
-    history: &AllowitAccountingHistory,
-    operation: AllowitOperation,
-    args: &AllowitSep41TransferArgs,
+    operation: &NativeOperation,
+    expense: Option<&AllowitExpenseBounds>,
     now: u64,
     expires_at: u64,
 ) -> AllowitContext {
+    let args = operation.transfer(&state.asset);
     AllowitContext {
         env: env.clone(),
         grant: state.grant.clone(),
-        state: history.clone(),
+        state: state.policy_state.clone(),
         request: AllowitRequest {
-            operation,
+            operation: operation.kind(),
             asset: state.asset.clone(),
-            recipient: args.to.clone(),
+            recipient: args.to,
             amount: args.amount,
             now,
             expires_at,
+            spent_units: expense.map_or(0, |e| e.spent_units),
+            gas_units: expense.map_or(0, |e| e.gas_units),
+            unpriced: expense.is_none(),
         },
     }
 }
+/// Admit one delegated operation: check bindings, replay, pause, nonce and expense, run the
+/// policy, then write post-flight state, nonce and replay marker before any external call.
 fn admit<P: AllowitPolicy>(
     env: &Env,
     execution: AllowitExecutionRequest,
+    expense: Option<&AllowitExpenseBounds>,
     mut state: AllowitState,
     operation: &NativeOperation,
 ) -> Result<AllowitTransferReceipt, AllowitWalletError> {
@@ -792,25 +748,18 @@ fn admit<P: AllowitPolicy>(
     {
         return Err(AllowitWalletError::InvalidRecipient);
     }
-    validate_expense(env, &state, &execution, operation)?;
+    validate_expense(env, &state, expense, operation)?;
     let nonce = state
         .nonce
         .checked_add(1)
         .ok_or(AllowitWalletError::Overflow)?;
-    let history = next_history(env, &state.history, &execution, args.amount, now)?;
     P::validate(&state.rules)?;
-    let ctx = rule_input(
-        env,
-        &state,
-        &history,
-        operation.kind(),
-        &args,
-        now,
-        execution.expires_at,
-    );
+    let ctx = rule_input(env, &state, operation, expense, now, execution.expires_at);
     P::check(&ctx, &state.rules)?;
+    // The shared post-flight, then storage, precede token and vault calls. A later failure in
+    // this transaction rolls all of it back.
+    state.policy_state = allowit::post_flight(&ctx)?;
     state.nonce = nonce;
-    state.history = history;
     store(env, &state);
     let receipt = AllowitTransferReceipt {
         operation_id: execution.operation_id,
@@ -841,7 +790,7 @@ pub fn construct<P: AllowitPolicy>(
     load(
         env,
         Some(AllowitState {
-            history: AllowitAccountingHistory::default(),
+            policy_state: Map::new(env),
             contract_version: CONTRACT_VERSION,
             owner: config.owner,
             agent: config.agent,
@@ -862,6 +811,10 @@ pub fn construct<P: AllowitPolicy>(
 }
 pub fn state(env: &Env) -> Result<AllowitState, AllowitWalletError> {
     load(env, None)
+}
+/// Read the current free-form policy state: standard and policy-defined keys.
+pub fn policy_state(env: &Env) -> Result<Map<Symbol, Val>, AllowitWalletError> {
+    Ok(load(env, None)?.policy_state)
 }
 pub fn policy_binding<P: AllowitPolicy>(
     env: &Env,
@@ -892,7 +845,7 @@ pub fn execute<P: AllowitPolicy>(
     state.server.require_auth();
     let operation = decode_operation(env, &execution, &state)?;
     let expense = decode_expense(env, execution.expense.as_ref())?;
-    let receipt = admit::<P>(env, execution, state, &operation)?;
+    let receipt = admit::<P>(env, execution, expense.as_ref(), state, &operation)?;
     match operation {
         NativeOperation::Transfer(_) => {
             move_tokens(env, &receipt.token, &receipt.to, receipt.amount)?
@@ -943,7 +896,7 @@ pub fn deploy_policy<P: AllowitPolicy>(
     {
         return Err(AllowitWalletError::StaleRequest);
     }
-    let history = kept_history(env)?;
+    let policy_state = kept_policy_state(env)?;
     let config = AllowitPolicyConfig {
         owner: deployment.owner,
         agent: deployment.agent,
@@ -970,7 +923,7 @@ pub fn deploy_policy<P: AllowitPolicy>(
     store(
         env,
         &AllowitState {
-            history,
+            policy_state,
             contract_version: CONTRACT_VERSION,
             owner: config.owner,
             agent: config.agent,
@@ -1108,7 +1061,14 @@ pub fn check_auth<P: AllowitPolicy>(
         &digest.clone().into(),
         &authorization.server_signature,
     );
-    admit::<P>(env, authorization.execution, state, &operation)?;
+    let expense = decode_expense(env, authorization.execution.expense.as_ref())?;
+    admit::<P>(
+        env,
+        authorization.execution,
+        expense.as_ref(),
+        state,
+        &operation,
+    )?;
     Ok(())
 }
 
@@ -1147,7 +1107,7 @@ impl AllowitPolicy for AllowitCommon {
         Ok(())
     }
 }
-/// Rule denials collapse to PolicyDenied. Invalid owner configuration and accounting stay distinct.
+/// Rule denials collapse to PolicyDenied. Invalid owner configuration, state and overflow stay distinct.
 impl From<allowit::AllowitError> for AllowitWalletError {
     fn from(error: allowit::AllowitError) -> Self {
         match error {
@@ -1155,6 +1115,8 @@ impl From<allowit::AllowitError> for AllowitWalletError {
                 AllowitWalletError::InvalidGrant
             }
             allowit::AllowitError::InvalidState => AllowitWalletError::InvalidState,
+            allowit::AllowitError::Overflow => AllowitWalletError::Overflow,
+            allowit::AllowitError::Unsupported => AllowitWalletError::UnsupportedOperation,
             _ => AllowitWalletError::PolicyDenied,
         }
     }
@@ -1175,6 +1137,14 @@ macro_rules! policy_wallet {
                 env: soroban_sdk::Env,
             ) -> Result<$crate::AllowitState, $crate::AllowitWalletError> {
                 $crate::state(&env)
+            }
+            pub fn policy_state(
+                env: soroban_sdk::Env,
+            ) -> Result<
+                soroban_sdk::Map<soroban_sdk::Symbol, soroban_sdk::Val>,
+                $crate::AllowitWalletError,
+            > {
+                $crate::policy_state(&env)
             }
             pub fn policy_binding(
                 env: soroban_sdk::Env,

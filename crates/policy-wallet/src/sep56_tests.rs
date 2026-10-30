@@ -1,6 +1,8 @@
 //! Deposit tests execute compiled custody and hostile vault Wasm through the native host.
+extern crate std;
 use super::tests::*;
 use super::*;
+use allowit::AllowitStandardState;
 use soroban_sdk::{IntoVal, testutils::Address as _, vec};
 
 use allowit_sep56_test_vault::AllowitSep56TestVaultClient;
@@ -74,16 +76,22 @@ fn assert_unchanged(
     vault: &Address,
     op: &BytesN<32>,
     before: &AllowitState,
-    history: &AllowitAccountingHistory,
+    history: &AllowitStandardState,
 ) {
     assert_eq!(f.balance(), 1000);
     assert_eq!(
         AllowitSep56TestVaultClient::new(&f.env, vault).balance(&f.wallet),
         0
     );
-    assert_eq!(f.client().state().nonce, before.nonce);
+    assert_eq!(f.client().state(), *before);
     assert_eq!(f.history(), *history);
     assert_eq!(f.client().deposit_receipt(op), None);
+    // The replay marker written with the state rolled back too.
+    let marker = Key::Operation(op.clone());
+    assert!(
+        !f.env
+            .as_contract(&f.wallet, || f.env.storage().persistent().has(&marker))
+    );
 }
 
 #[test]
@@ -287,26 +295,31 @@ fn rule_input_carries_typed_operations_and_the_vault_as_recipient() {
         operator: f.wallet.clone(),
         min_shares: 5,
     });
-    let history = AllowitAccountingHistory {
-        calls: 1,
+    let expense = AllowitExpenseBounds {
+        asset: f.asset.clone(),
+        decimals: 7,
+        gas_units: 2,
+        conversion_units: 1,
+        spent_units: 3,
+        max_fee_stroops: 2,
+        observed_ledger: 1,
         day: 1,
-        ..Default::default()
     };
-    let ctx = rule_input(
-        &f.env,
-        &state,
-        &history,
-        deposit.kind(),
-        &deposit.transfer(&state.asset),
-        86_410,
-        86_500,
-    );
+    let ctx = rule_input(&f.env, &state, &deposit, Some(&expense), 86_410, 86_500);
     assert_eq!(ctx.request.operation, AllowitOperation::sep56_deposit);
     assert_eq!(ctx.request.recipient, vault);
     assert_eq!(ctx.request.asset, f.asset);
     assert_eq!(ctx.request.amount, 5);
-    assert_eq!(ctx.state, history);
+    assert_eq!((ctx.request.spent_units, ctx.request.gas_units), (3, 2));
+    assert!(!ctx.request.unpriced);
+    assert_eq!(ctx.state, state.policy_state);
     assert_eq!(ctx.grant, state.grant);
+    let unpriced = rule_input(&f.env, &state, &deposit, None, 86_410, 86_500);
+    assert!(unpriced.request.unpriced);
+    assert_eq!(
+        (unpriced.request.spent_units, unpriced.request.gas_units),
+        (0, 0)
+    );
     let transfer = NativeOperation::Transfer(AllowitSep41TransferArgs {
         token: f.asset.clone(),
         from: f.wallet.clone(),
@@ -576,7 +589,7 @@ fn owner_grant_update_preserves_prefix_code_usage_and_revokes_old_revision() {
     assert_eq!(f.history().spent, 70);
     assert_eq!(f.history().day_spent, 70);
     assert_eq!(f.history().day_total, 70);
-    assert_eq!(f.client().state().history.calls, 2);
+    assert_eq!(f.history().calls, 2);
     let mut d = f.deployment();
     d.grant.spent_cap = Some(75);
     d.grant.day_spent_cap = Some(75);
@@ -607,7 +620,7 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
     let mut e = f.execution(20);
     e.expense = None;
     execute(&f, &e).unwrap().unwrap();
-    let history = f.client().state().history;
+    let history = f.history();
     assert_eq!(history.calls, 1);
     assert_eq!(history.day_total, 20);
     assert_eq!(history.spent, 0); // Unpriced is an explicit liability, never a zero-cost assertion.
@@ -620,7 +633,7 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
         execute(&f, &f.execution(1)),
         Err(Ok(AllowitWalletError::PolicyDenied))
     );
-    assert_eq!(f.client().state().history, history);
+    assert_eq!(f.history(), history);
     let mut d = f.deployment();
     d.grant.spent_cap = None;
     d.grant.day_spent_cap = Some(1000);
@@ -633,7 +646,7 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
     );
     f.env.ledger().with_mut(|l| l.timestamp += 86_400);
     execute(&f, &f.execution(1)).unwrap().unwrap();
-    let history = f.client().state().history;
+    let history = f.history();
     assert_eq!(history.calls, 2);
     assert_eq!(history.day_total, 1);
     assert_eq!(history.day_spent, 1);
@@ -656,7 +669,7 @@ fn reenabled_call_cap_counts_operations_while_disabled() {
         execute(&f, &f.execution(1)),
         Err(Ok(AllowitWalletError::PolicyDenied))
     );
-    assert_eq!(f.client().state().history.calls, 2);
+    assert_eq!(f.history().calls, 2);
 }
 
 #[test]
@@ -710,4 +723,160 @@ fn issued_asset_normalized_gas_is_signed_and_keeps_native_amount_checks() {
         assert_eq!(f.balance(), 1000);
         assert_eq!(f.client().state().nonce, 0);
     }
+}
+
+/// The host refused a call into a contract already on the call stack.
+fn reentry_refused(env: &Env) -> bool {
+    let events = env.host().get_diagnostic_events().unwrap();
+    std::format!("{events:?}").contains("Contract re-entry is not allowed")
+}
+
+/// Install `recipients` as the Grant's allowlist through an owner packet.
+fn allow_recipients(f: &Fixture, recipients: &[&Address]) {
+    let mut d = f.deployment();
+    let mut list = Vec::new(&f.env);
+    for recipient in recipients {
+        list.push_back((*recipient).clone());
+    }
+    d.grant.recipients = Some(list);
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+}
+
+#[test]
+fn reentrant_vault_cannot_call_execute_back_and_the_operation_rolls_back() {
+    // Control: a harmless callback leaves the deposit valid.
+    let f = Fixture::new(COMMON, false);
+    let v = vault(&f, 13, None);
+    allow_recipient(&f, &v);
+    let callback = AllowitSep56TestVaultClient::new(&f.env, &v);
+    callback.set_callback(
+        &f.asset,
+        &Symbol::new(&f.env, "decimals"),
+        &Vec::new(&f.env),
+    );
+    assert!(execute(&f, &request(&f, &v, 50, 50)).is_ok());
+    // The vault calls `execute` back with a request that would be the valid next one.
+    let f = Fixture::new(COMMON, false);
+    let v = vault(&f, 13, None);
+    allow_recipient(&f, &v);
+    let e = request(&f, &v, 50, 50);
+    let mut inner = f.execution(10);
+    inner.nonce = 1;
+    inner.operation_id = BytesN::from_array(&f.env, &[7; 32]);
+    let callback = AllowitSep56TestVaultClient::new(&f.env, &v);
+    let args: Vec<Val> = (inner.clone(),).into_val(&f.env);
+    callback.set_callback(&f.wallet, &Symbol::new(&f.env, "execute"), &args);
+    let before = f.client().state();
+    let spent = f.history();
+    // Authorization never decides this case: every signer is mocked.
+    f.env.mock_all_auths_allowing_non_root_auth();
+    assert_eq!(
+        f.client().try_execute(&e),
+        Err(Err(soroban_sdk::InvokeError::Abort))
+    );
+    assert!(reentry_refused(&f.env));
+    f.env.mock_auths(&[]);
+    assert_unchanged(&f, &v, &e.operation_id, &before, &spent);
+    assert_eq!(f.client().deposit_receipt(&inner.operation_id), None);
+}
+
+#[test]
+fn reentrant_vault_cannot_use_the_x402_path_during_an_operation() {
+    use soroban_sdk::testutils::MockAuthInvoke;
+    let f = Fixture::new(COMMON, true);
+    add_account(&f.env, &f.akey);
+    add_account(&f.env, &f.skey);
+    let hostile = vault(&f, 13, None);
+    let honest = vault(&f, 0, None);
+    allow_recipients(&f, &[&hostile, &honest, &f.recipient]);
+    // The hostile vault pulls one more unit from the wallet through the token, which asks the
+    // wallet's x402 `__check_auth` for an agent and server approval.
+    let pull_args: Vec<Val> = (f.wallet.clone(), hostile.clone(), 1i128).into_val(&f.env);
+    AllowitSep56TestVaultClient::new(&f.env, &hostile).set_callback(
+        &f.asset,
+        &Symbol::new(&f.env, "transfer"),
+        &pull_args,
+    );
+    let pull = MockAuthInvoke {
+        contract: &f.asset,
+        fn_name: "transfer",
+        args: pull_args.clone(),
+        sub_invokes: &[],
+    };
+    let x402 = |id: u8, nonce: i64| {
+        let (mut approval, _) = x402_request(&f, &hostile, 1);
+        approval.operation_id = BytesN::from_array(&f.env, &[id; 32]);
+        f.signed_entry(&f.wallet, &pull, nonce, &|payload| {
+            f.authorization(approval.clone(), payload).into_val(&f.env)
+        })
+    };
+    let signer = |key: &ed25519_dalek::SigningKey, e: &AllowitExecutionRequest, nonce: i64| {
+        let account = if *key == f.akey { &f.agent } else { &f.server };
+        use ed25519_dalek::Signer;
+        let invoke = MockAuthInvoke {
+            contract: &f.wallet,
+            fn_name: "execute",
+            args: (e.clone(),).into_val(&f.env),
+            sub_invokes: &[],
+        };
+        f.signed_entry(account, &invoke, nonce, &|payload| {
+            let signature = AccountSignature {
+                public_key: BytesN::from_array(&f.env, &key.verifying_key().to_bytes()),
+                signature: BytesN::from_array(&f.env, &key.sign(&payload.to_array()).to_bytes()),
+            };
+            vec![&f.env, signature].into_val(&f.env)
+        })
+    };
+    // Control: the x402 approval alone authorizes the pull.
+    f.env.set_auths(&[x402(9, 31)]);
+    token::Client::new(&f.env, &f.asset).transfer(&f.wallet, &hostile, &1);
+    assert_eq!((f.balance(), f.client().state().nonce), (999, 1));
+    // Control: real agent and server entries authorize a deposit into an honest vault.
+    let e = request(&f, &honest, 50, 50);
+    f.env
+        .set_auths(&[signer(&f.akey, &e, 32), signer(&f.skey, &e, 33)]);
+    assert!(f.client().try_execute(&e).is_ok());
+    assert_eq!((f.balance(), f.client().state().nonce), (949, 2));
+    // The same signers and a fresh x402 approval for the pull cannot reenter the wallet while its
+    // deposit into the hostile vault runs. Everything rolls back.
+    let e = request(&f, &hostile, 50, 50);
+    f.env.set_auths(&[
+        signer(&f.akey, &e, 34),
+        signer(&f.skey, &e, 35),
+        x402(10, 36),
+    ]);
+    let before = f.client().state();
+    assert!(!reentry_refused(&f.env));
+    assert_eq!(
+        f.client().try_execute(&e),
+        Err(Err(soroban_sdk::InvokeError::Abort))
+    );
+    assert!(reentry_refused(&f.env));
+    assert_eq!(f.client().state(), before);
+    assert_eq!(f.balance(), 949);
+    assert_eq!(f.client().deposit_receipt(&e.operation_id), None);
+    let shares = AllowitSep56TestVaultClient::new(&f.env, &hostile).balance(&f.wallet);
+    assert_eq!(shares, 0);
+}
+
+#[test]
+fn deposit_effect_failure_after_the_state_write_rolls_back_state_nonce_and_replay_marker() {
+    // The vault values the minted shares two units low; the conversion bound admits one.
+    let f = Fixture::new_native(COMMON);
+    let v = vault(&f, 11, None);
+    allow_recipient(&f, &v);
+    let mut e = request(&f, &v, 50, 50);
+    set_cost(&f, &mut e, 3, 1);
+    let before = f.client().state();
+    let spent = f.history();
+    assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::InvalidEffects)));
+    assert_unchanged(&f, &v, &e.operation_id, &before, &spent);
+    // The same operation then runs once with an honest bound.
+    let mut e2 = request(&f, &v, 50, 50);
+    e2.operation_id = e.operation_id.clone();
+    set_cost(&f, &mut e2, 3, 2);
+    assert!(execute(&f, &e2).is_ok());
+    assert_eq!(f.history().calls, 1);
+    assert_eq!(f.client().state().nonce, 1);
 }

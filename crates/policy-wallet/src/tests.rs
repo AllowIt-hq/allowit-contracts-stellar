@@ -1,5 +1,6 @@
 extern crate std;
 use super::*;
+use allowit::AllowitStandardState;
 use allowit_wallet_protocol::AllowitPolicyInvocation;
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
@@ -30,8 +31,44 @@ pub(super) struct Fixture {
     pub(super) server: Address,
     pub(super) asset: Address,
     pub(super) recipient: Address,
-    akey: SigningKey,
-    skey: SigningKey,
+    pub(super) akey: SigningKey,
+    pub(super) skey: SigningKey,
+}
+/// A classic account of `key` with master weight one, so native account authorization works.
+pub(super) fn add_account(env: &Env, key: &SigningKey) -> Address {
+    use soroban_sdk::xdr as x;
+    let account_id = x::AccountId(x::PublicKey::PublicKeyTypeEd25519(x::Uint256(
+        key.verifying_key().to_bytes(),
+    )));
+    let ledger_key = std::rc::Rc::new(x::LedgerKey::Account(x::LedgerKeyAccount {
+        account_id: account_id.clone(),
+    }));
+    let entry = std::rc::Rc::new(x::LedgerEntry {
+        data: x::LedgerEntryData::Account(x::AccountEntry {
+            account_id,
+            balance: 1_000_000_000,
+            flags: 0,
+            home_domain: Default::default(),
+            inflation_dest: None,
+            num_sub_entries: 0,
+            seq_num: x::SequenceNumber(0),
+            thresholds: x::Thresholds([1; 4]),
+            signers: Default::default(),
+            ext: x::AccountEntryExt::V0,
+        }),
+        last_modified_ledger_seq: 100,
+        ext: x::LedgerEntryExt::V0,
+    });
+    env.host()
+        .add_ledger_entry(&ledger_key, &entry, None)
+        .unwrap();
+    address(env, key)
+}
+/// Native signature of a classic account over an authorization payload.
+#[contracttype]
+pub(super) struct AccountSignature {
+    pub(super) public_key: BytesN<32>,
+    pub(super) signature: BytesN<64>,
 }
 fn address(env: &Env, key: &SigningKey) -> Address {
     let mut bytes = Bytes::from_slice(env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -145,32 +182,8 @@ impl Fixture {
         };
         let wallet = env.register(wasm, (config,));
         if native {
-            use soroban_sdk::xdr as x;
             let funding_key = SigningKey::from_bytes(&[44; 32]);
-            let funder = address(&env, &funding_key);
-            let account_id = x::AccountId(x::PublicKey::PublicKeyTypeEd25519(x::Uint256(
-                funding_key.verifying_key().to_bytes(),
-            )));
-            let key = std::rc::Rc::new(x::LedgerKey::Account(x::LedgerKeyAccount {
-                account_id: account_id.clone(),
-            }));
-            let entry = std::rc::Rc::new(x::LedgerEntry {
-                data: x::LedgerEntryData::Account(x::AccountEntry {
-                    account_id,
-                    balance: 1_000_000_000,
-                    flags: 0,
-                    home_domain: Default::default(),
-                    inflation_dest: None,
-                    num_sub_entries: 0,
-                    seq_num: x::SequenceNumber(0),
-                    thresholds: x::Thresholds([1; 4]),
-                    signers: Default::default(),
-                    ext: x::AccountEntryExt::V0,
-                }),
-                last_modified_ledger_seq: 100,
-                ext: x::LedgerEntryExt::V0,
-            });
-            env.host().add_ledger_entry(&key, &entry, None).unwrap();
+            let funder = add_account(&env, &funding_key);
             token::Client::new(&env, &asset).transfer(&funder, &wallet, &1_000);
         } else {
             StellarAssetClient::new(&env, &asset).mint(&wallet, &1_000);
@@ -287,8 +300,9 @@ impl Fixture {
         );
         self.client().execute(&e)
     }
-    pub(super) fn history(&self) -> AllowitAccountingHistory {
-        self.client().state().history
+    /// Standard values of the stored policy state.
+    pub(super) fn history(&self) -> AllowitStandardState {
+        AllowitStandardState::read(&self.env, &self.client().policy_state()).unwrap()
     }
     pub(super) fn balance(&self) -> i128 {
         token::Client::new(&self.env, &self.asset).balance(&self.wallet)
@@ -324,7 +338,7 @@ impl Fixture {
             wasm_hash: None,
         }
     }
-    fn authorization(
+    pub(super) fn authorization(
         &self,
         execution: AllowitExecutionRequest,
         payload: &BytesN<32>,
@@ -355,14 +369,27 @@ impl Fixture {
         amount: i128,
         nonce: i64,
     ) -> soroban_sdk::xdr::SorobanAuthorizationEntry {
-        use soroban_sdk::xdr::{self, WriteXdr};
-        let invocation: xdr::SorobanAuthorizedInvocation = (&MockAuthInvoke {
+        let invoke = MockAuthInvoke {
             contract: &self.asset,
             fn_name: "transfer",
             args: (self.wallet.clone(), self.recipient.clone(), amount).into_val(&self.env),
             sub_invokes: &[],
+        };
+        self.signed_entry(&self.wallet, &invoke, nonce, &|payload| {
+            self.authorization(execution.clone(), payload)
+                .into_val(&self.env)
         })
-            .into();
+    }
+    /// A native authorization entry of `address` for `invoke`, signed by `sign` over its payload.
+    pub(super) fn signed_entry(
+        &self,
+        address: &Address,
+        invoke: &MockAuthInvoke,
+        nonce: i64,
+        sign: &dyn Fn(&BytesN<32>) -> Val,
+    ) -> soroban_sdk::xdr::SorobanAuthorizationEntry {
+        use soroban_sdk::xdr::{self, WriteXdr};
+        let invocation: xdr::SorobanAuthorizedInvocation = invoke.into();
         let preimage =
             xdr::HashIdPreimage::SorobanAuthorization(xdr::HashIdPreimageSorobanAuthorization {
                 network_id: xdr::Hash(self.env.ledger().network_id().to_array()),
@@ -378,10 +405,10 @@ impl Fixture {
                 &preimage.to_xdr(xdr::Limits::none()).unwrap(),
             ))
             .to_bytes();
-        let signature: Val = self.authorization(execution, &payload).into_val(&self.env);
+        let signature = sign(&payload);
         xdr::SorobanAuthorizationEntry {
             credentials: xdr::SorobanCredentials::Address(xdr::SorobanAddressCredentials {
-                address: (&self.wallet).into(),
+                address: address.into(),
                 nonce,
                 signature_expiration_ledger: 100,
                 signature: signature.try_into_val(&self.env).unwrap(),
@@ -545,7 +572,7 @@ fn custom_policy_denies_an_unset_grant_field_that_common_preflight_skips() {
                 f.client().try_execute(&e),
                 Err(Ok(AllowitWalletError::InvalidGrant))
             );
-            assert_eq!(f.history(), AllowitAccountingHistory::default());
+            assert_eq!(f.history(), AllowitStandardState::default());
         } else {
             f.client().execute(&e);
             assert_eq!(f.history().calls, 1);
@@ -826,7 +853,7 @@ fn owner_passthrough_supports_exact_nested_auth_without_agent_access() {
     f.client().invoke(&forwarder, &function, &args, &auth);
     assert_eq!(f.balance(), 800);
     assert_eq!(f.client().state().nonce, 0);
-    assert_eq!(f.history(), AllowitAccountingHistory::default());
+    assert_eq!(f.history(), AllowitStandardState::default());
     let changed: Vec<Val> = (
         f.asset.clone(),
         f.wallet.clone(),
@@ -969,10 +996,8 @@ fn custom_source_and_unknown_storage_layout_reject() {
                     Symbol::new(&f.env, "grant"),
                     nested("grant").into_val(&f.env),
                 ),
-                3 => raw.set(
-                    Symbol::new(&f.env, "history"),
-                    nested("history").into_val(&f.env),
-                ),
+                // Policy state must be a map.
+                3 => raw.set(Symbol::new(&f.env, "policy_state"), 5u32.into_val(&f.env)),
                 // A legacy empty Grant map would otherwise decode as an all-unset typed Grant.
                 _ => raw.set(
                     Symbol::new(&f.env, "grant"),
@@ -992,11 +1017,24 @@ fn custom_source_and_unknown_storage_layout_reject() {
     }
 }
 
-/// Version 1 layout: untyped Grant map and symbol rules.
+/// Accounting history of layouts 1 and 2, stored as a struct.
+#[contracttype]
+#[derive(Clone)]
+struct LegacyHistory {
+    calls: u64,
+    spent: i128,
+    unpriced: bool,
+    day: u64,
+    day_spent: i128,
+    day_total: i128,
+    day_unpriced: bool,
+}
+
+/// Version 1 layout: untyped Grant map, symbol rules and a history struct.
 #[contracttype]
 #[derive(Clone)]
 struct LegacyState {
-    history: AllowitAccountingHistory,
+    history: LegacyHistory,
     contract_version: u32,
     owner: Address,
     agent: Address,
@@ -1014,7 +1052,7 @@ struct LegacyState {
 }
 
 #[test]
-fn upgraded_legacy_layout_keeps_owner_recovery_and_accepts_a_typed_owner_packet() {
+fn earlier_layouts_keep_owner_recovery_and_do_not_migrate_implicitly() {
     let f = Fixture::new(COMMON, false);
     f.transfer(10);
     let current = f.client().state();
@@ -1024,7 +1062,15 @@ fn upgraded_legacy_layout_keeps_owner_recovery_and_accepts_a_typed_owner_packet(
         5i128.into_val(&f.env),
     );
     let mut legacy = LegacyState {
-        history: current.history.clone(),
+        history: LegacyHistory {
+            calls: 1,
+            spent: 10,
+            unpriced: false,
+            day: 1,
+            day_spent: 10,
+            day_total: 10,
+            day_unpriced: false,
+        },
         contract_version: 1,
         owner: current.owner.clone(),
         agent: current.agent.clone(),
@@ -1046,7 +1092,7 @@ fn upgraded_legacy_layout_keeps_owner_recovery_and_accepts_a_typed_owner_packet(
         })
     };
     install(&legacy);
-    // The state written by an in-place upgrade from a version 1 release does not decode.
+    // The state written by an in-place upgrade from an earlier release does not decode.
     assert!(f.client().try_state().is_err());
     // Only the owner recovers funds from it.
     f.auth(
@@ -1062,7 +1108,7 @@ fn upgraded_legacy_layout_keeps_owner_recovery_and_accepts_a_typed_owner_packet(
     );
     f.client().recover(&f.recipient, &7);
     assert_eq!(f.balance(), 983);
-    // A complete owner packet replaces Grant and rules and keeps history and nonce.
+    // A complete owner packet does not convert an earlier history into policy state.
     let p = AllowitPolicyDeployment {
         deployment_version: current.deployment_version + 1,
         owner: current.owner.clone(),
@@ -1074,32 +1120,16 @@ fn upgraded_legacy_layout_keeps_owner_recovery_and_accepts_a_typed_owner_packet(
         x402_enabled: false,
         wasm_hash: None,
     };
-    // Struct decoding would ignore an extra history key. Only canonical history carries over.
-    f.env.as_contract(&f.wallet, || {
-        let encoded: Val = legacy.clone().into_val(&f.env);
-        let mut raw = Map::<Symbol, Val>::try_from_val(&f.env, &encoded).unwrap();
-        let key = Symbol::new(&f.env, "history");
-        let mut history =
-            Map::<Symbol, Val>::try_from_val(&f.env, &raw.get(key.clone()).unwrap()).unwrap();
-        history.set(Symbol::new(&f.env, "per_transfer"), 5i128.into_val(&f.env));
-        raw.set(key, history.into_val(&f.env));
-        f.env.storage().instance().set(&STATE_KEY, &raw);
-    });
-    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
-    assert_eq!(
-        f.client().try_deploy_policy(&p),
-        Err(Ok(AllowitWalletError::InvalidState))
-    );
-    install(&legacy);
-    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
-    f.client().deploy_policy(&p);
-    let migrated = f.client().state();
-    assert_eq!(migrated.contract_version, CONTRACT_VERSION);
-    assert_eq!(migrated.history, current.history);
-    assert_eq!(migrated.nonce, current.nonce);
-    assert_eq!(migrated.grant, current.grant);
-    f.transfer(10);
-    assert_eq!(f.history().calls, 2);
+    for version in [1, 2] {
+        legacy.contract_version = version;
+        install(&legacy);
+        f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+        assert_eq!(
+            f.client().try_deploy_policy(&p),
+            Err(Ok(AllowitWalletError::InvalidState))
+        );
+        assert!(f.client().try_state().is_err());
+    }
     // A later layout may change kept fields, so even owner recovery rejects it.
     legacy.contract_version = CONTRACT_VERSION + 1;
     install(&legacy);
@@ -1403,7 +1433,11 @@ fn operation_replay_rejects_even_with_a_new_host_payload() {
 }
 
 /// A transfer execution to an arbitrary destination with its matching token context.
-fn x402_request(f: &Fixture, to: &Address, amount: i128) -> (AllowitExecutionRequest, Context) {
+pub(super) fn x402_request(
+    f: &Fixture,
+    to: &Address,
+    amount: i128,
+) -> (AllowitExecutionRequest, Context) {
     let mut e = f.execution(amount);
     e.invocation.arguments = AllowitSep41TransferArgs {
         token: f.asset.clone(),
@@ -1475,7 +1509,7 @@ fn x402_enforces_compiled_business_rules_without_committing() {
         );
         assert_eq!(f.balance(), 1_000);
         assert_eq!(f.client().state().nonce, 0);
-        assert_eq!(f.history(), AllowitAccountingHistory::default());
+        assert_eq!(f.history(), AllowitStandardState::default());
     }
 }
 
@@ -1570,7 +1604,7 @@ fn x402_rejects_a_canonical_deposit_authorization_for_a_token_transfer() {
             Err(Ok(AllowitWalletError::UnsupportedOperation))
         );
         assert_eq!(f.client().state().nonce, 0);
-        assert_eq!(f.history(), AllowitAccountingHistory::default());
+        assert_eq!(f.history(), AllowitStandardState::default());
     }
 }
 
@@ -1599,7 +1633,7 @@ fn upgraded_standard_wallet_must_rebind_its_prefix_to_the_new_module() {
         f.client().try_execute(&e),
         Err(Ok(AllowitWalletError::InvalidState))
     );
-    assert_eq!(f.history(), AllowitAccountingHistory::default());
+    assert_eq!(f.history(), AllowitStandardState::default());
     let mut fixed = f.deployment();
     fixed.source_digest = standard_prefix_digest(
         &f.env,
@@ -1978,7 +2012,7 @@ fn replayed_operation_with_changed_amount_or_expense_is_rejected_without_chargin
 }
 
 #[test]
-fn repeated_prefix_rules_read_one_proposed_history_and_charge_once() {
+fn repeated_prefix_rules_read_one_current_state_and_charge_once() {
     let f = Fixture::new(COMMON, false);
     let mut p = f.deployment();
     p.rules = Vec::new(&f.env);
@@ -2023,7 +2057,7 @@ fn clock_regression_and_cross_day_expense_reject_before_rules_run() {
     let f = Fixture::new(COMMON, false);
     f.transfer(10);
     let before = f.client().state();
-    assert_eq!(before.history.day, 1);
+    assert_eq!(f.history().day, 1);
     // Rules never see accounting of another day: the kernel rejects a backward ledger day.
     f.env.ledger().with_mut(|l| l.timestamp -= 86_400);
     assert_eq!(

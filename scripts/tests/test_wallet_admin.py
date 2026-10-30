@@ -209,9 +209,9 @@ class ContractAdmin(unittest.TestCase):
                 ca.deployment(dict(deployment, rules=[removed]))
         with self.assertRaises(ValueError):
             ca.public_json('{"custom":1,"custom":2}')
-        # Owner packets encode the typed layout only; a version 1 Grant-map wallet is refused.
-        self.assertEqual(ca.wallet_layout({"contract_version": 2})["contract_version"], 2)
-        for state in ({"contract_version": 1}, {"contract_version": 3}, {}):
+        # Owner packets encode the current layout only; earlier and later layouts are refused.
+        self.assertEqual(ca.wallet_layout({"contract_version": 3})["contract_version"], 3)
+        for state in ({"contract_version": 1}, {"contract_version": 2}, {"contract_version": 4}, {}):
             with self.assertRaisesRegex(ValueError, "layout"):
                 ca.wallet_layout(state)
 
@@ -784,8 +784,8 @@ class ContractAdmin(unittest.TestCase):
             policy.write_text(allowed + source("", head))
             ca.host_compile(policy)
 
-    def test_wallet_code_changes_require_custody_layout_2(self):
-        self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"2"))), 2)
+    def test_wallet_code_changes_require_custody_layout_3(self):
+        self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"3"))), 3)
         # The version 1 release declares only SDK metadata.
         self.assertIsNone(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"))))
         self.assertIsNone(ca.custody_layout(b"\0asm\x01\0\0\0"))
@@ -810,10 +810,11 @@ class ContractAdmin(unittest.TestCase):
                 args.wasm, args.arguments = str(path), json.dumps({"deployment": deployment})
                 return ca.command(args)
 
-            self.assertIn("deploy_policy", prepare(meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"2"))))
-            # The old Map-Grant release, a future layout and an unpinned file reject.
+            self.assertIn("deploy_policy", prepare(meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"3"))))
+            # The old Map-Grant and history releases, a future layout and an unpinned file reject.
             for wasm_bytes, wasm_hash in ((meta_wasm((b"rsver", b"1.98.0")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"1")), None),
-                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"3")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"2")), "11" * 32)):
+                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"2")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"4")), None),
+                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"3")), "11" * 32)):
                 with self.subTest(wasm=wasm_bytes), self.assertRaises(ValueError):
                     prepare(wasm_bytes, wasm_hash)
             args.wasm = None
@@ -825,7 +826,7 @@ class ContractAdmin(unittest.TestCase):
             self.assertIn("deploy_policy", ca.command(args))
 
     @unittest.skipUnless((ROOT / "target/wasm32v1-none/release/allowit_common_policy_engine.wasm").exists(), "contracts not built")
-    def test_built_wallet_wasm_declares_custody_layout_2(self):
+    def test_built_wallet_wasm_declares_custody_layout_3(self):
         for name in ("simple_policy_engine", "common_policy_engine", "custom_policy"):
             wasm = (ROOT / "target/wasm32v1-none/release" / ("allowit_" + name + ".wasm")).read_bytes()
             self.assertEqual(ca.custody_layout(wasm), ca.WALLET_CONTRACT_VERSION)

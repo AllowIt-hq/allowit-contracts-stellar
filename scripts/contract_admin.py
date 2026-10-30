@@ -78,8 +78,9 @@ def pinned_wasm(path, expected_hash):
     return expected_hash
 
 
-# Custody State layout this tool encodes: typed Grant and Vec<AllowitRule> prefix. Version 1 stored a Grant map.
-WALLET_CONTRACT_VERSION = 2
+# Custody State layout this tool encodes: typed Grant, Vec<AllowitRule> prefix and a free-form policy_state map.
+# Version 2 stored a typed history struct and version 1 a Grant map; neither migrates.
+WALLET_CONTRACT_VERSION = 3
 
 
 CUSTODY_LAYOUT_KEY = b"allowit_custody_layout"
@@ -141,13 +142,13 @@ def wallet_code(wasm_hash, path):
         return
     pinned_wasm(path, wasm_hash)
     if custody_layout(Path(path).read_bytes()) != WALLET_CONTRACT_VERSION:
-        raise ValueError("New wallet code must declare custody layout 2; recover funds before any layout change")
+        raise ValueError("New wallet code must declare custody layout {}; recover funds before any layout change".format(WALLET_CONTRACT_VERSION))
 
 
 def wallet_layout(state):
     """Refuse an owner packet for another stored layout. Recovery does not depend on the layout."""
     if state.get("contract_version") != WALLET_CONTRACT_VERSION:
-        raise ValueError("Wallet state is not layout version 2; recover its funds or redeploy it")
+        raise ValueError("Wallet state is not layout version {}; recover its funds or redeploy it".format(WALLET_CONTRACT_VERSION))
     return state
 
 

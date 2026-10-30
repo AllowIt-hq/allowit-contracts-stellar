@@ -141,9 +141,9 @@ def wallet_config(plan):
 
 
 def usage(plan, wallet):
-    """Protected custody history: successful calls and lifetime irreversible expenses."""
-    history = read_contract(plan, wallet, "state")["history"]
-    return int(history["calls"]), int(history["spent"])
+    """Standard policy state: successful calls and lifetime irreversible expenses. Absent keys are zero."""
+    state = read_contract(plan, wallet, "state")["policy_state"]
+    return int(state.get("calls", 0)), int(state.get("spent", 0))
 
 
 def server_entry(envelope, plan, signed):

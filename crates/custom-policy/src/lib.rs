@@ -8,7 +8,7 @@ use soroban_sdk::{BytesN, Env, Vec};
 #[cfg(not(feature = "test-catching"))]
 #[path = "../policy/policy.rs"]
 mod policy;
-/// Test fixture only: a policy that catches rule failures, so tests exercise the onchain record.
+/// Test fixture only: a policy that catches a rule error, continues and writes its own state.
 #[cfg(feature = "test-catching")]
 #[path = "catching_policy.rs"]
 mod policy;
@@ -32,10 +32,9 @@ impl AllowitPolicy for AllowitCustom {
     fn argument_schema_digest(env: &Env) -> BytesN<32> {
         BytesN::from_array(env, &ARGUMENT_SCHEMA_HASH)
     }
-    /// Run the complete authored policy. An unset Grant field denies, and so does any failed rule
-    /// that the policy caught.
+    /// Run the complete authored policy. Only an error it returns denies.
     fn check(ctx: &AllowitContext, _rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
-        Ok(allowit::run(ctx, policy::execute)?)
+        Ok(policy::execute(ctx)?)
     }
 }
 allowit_policy_wallet::policy_wallet!(AllowitCustomPolicy, AllowitCustom);

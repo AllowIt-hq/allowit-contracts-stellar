@@ -3,19 +3,22 @@
 //! 1. the host backend: `scripts/policy-smoke.rs` compiled with plain `rustc` against `allowit`
 //!    with only the `std` feature, so a policy that names `soroban_sdk` or a wallet crate fails;
 //! 2. `AllowitCustomPolicy`: the Soroban backend of the same sources, then the real custom Wasm,
-//!    and the `test-catching` fixture Wasm, which compiles the catching policy, so the onchain
-//!    rule-failure record must deny the failures that the policy catches;
+//!    and the `test-catching` fixture Wasm, whose policy catches a daily cap error, continues and
+//!    writes its own state key;
 //! 3. `AllowitCommonPolicyEngine`: the real standard Wasm with the policy's leading-rule prefix;
 //! 4. `AllowitSimplePolicyEngine`: the real simple Wasm, which has no rules.
 //!
-//! Host and Soroban outcomes must be identical on every pass value and error. The custom contract
-//! must return the mapped policy result, and the catching fixture the mapped catching result. The standard contract must return the mapped first
-//! prefix preflight error, which skips unset Grant fields. The simple contract must accept every
-//! vector that the kernel accepts. Kernel violations reject identically in every contract.
+//! Host and Soroban outcomes must be identical on every pass value, error and post-flight state.
+//! Each vector holds the current state before the operation. The custom contract must return the
+//! mapped policy result, and the catching fixture the mapped catching result. The standard
+//! contract must return the mapped first prefix preflight error, which skips unset Grant fields.
+//! The simple contract runs no rules. Every contract then returns the shared post-flight result
+//! and stores exactly the post-flight state that the host computed. Kernel violations reject
+//! identically in every contract.
 extern crate std;
 use super::tests::{CATCHING, COMMON, CUSTOM, Fixture, SIMPLE};
 use super::*;
-use allowit::AllowitError;
+use allowit::{AllowitError, AllowitStandardState};
 use allowit_wallet_protocol::AllowitPolicyInvocation;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -53,7 +56,7 @@ const RULES: [AllowitRule; 8] = [
     AllowitRule::expiry,
 ];
 /// Every rule error, indexed by its code minus one.
-const ERRORS: [AllowitError; 12] = [
+const ERRORS: [AllowitError; 14] = [
     AllowitError::MissingGrant,
     AllowitError::TransactionCapExceeded,
     AllowitError::SpentCapExceeded,
@@ -66,6 +69,8 @@ const ERRORS: [AllowitError; 12] = [
     AllowitError::Unpriced,
     AllowitError::InvalidParameter,
     AllowitError::InvalidState,
+    AllowitError::Overflow,
+    AllowitError::Unsupported,
 ];
 /// The wallet error of a rule error code.
 fn wallet_error(code: u32) -> u32 {
@@ -155,8 +160,10 @@ fn grant(env: &Env, universe: &[Address], v: &Vector) -> AllowitGrant {
         expiry: v.expiry,
     }
 }
-fn history(v: &Vector) -> AllowitAccountingHistory {
-    AllowitAccountingHistory {
+/// The current state map of a vector, with the catching policy's key when set.
+fn state_map(env: &Env, v: &Vector) -> Map<Symbol, Val> {
+    let mut state = Map::new(env);
+    let s = AllowitStandardState {
         calls: v.calls,
         spent: v.spent,
         unpriced: v.unpriced,
@@ -164,13 +171,35 @@ fn history(v: &Vector) -> AllowitAccountingHistory {
         day_spent: v.day_spent,
         day_total: v.day_total,
         day_unpriced: v.day_unpriced,
+    };
+    s.write(env, &mut state).unwrap();
+    if let Some(over) = v.over {
+        state.set(Symbol::new(env, vectors::OVER), over.into_val(env));
     }
+    state
+}
+/// A state map as `vectors::state_line`.
+fn line(env: &Env, state: &Map<Symbol, Val>) -> Text {
+    let s = AllowitStandardState::read(env, state).unwrap();
+    let over = state
+        .get(Symbol::new(env, vectors::OVER))
+        .map(|raw| u64::try_from_val(env, &raw).unwrap());
+    vectors::state_line(
+        s.calls,
+        s.spent,
+        s.unpriced,
+        s.day,
+        s.day_spent,
+        s.day_total,
+        s.day_unpriced,
+        over,
+    )
 }
 fn context(env: &Env, universe: &[Address], v: &Vector) -> AllowitContext {
     AllowitContext {
         env: env.clone(),
         grant: grant(env, universe, v),
-        state: history(v),
+        state: state_map(env, v),
         request: AllowitRequest {
             operation: if v.deposit {
                 AllowitOperation::sep56_deposit
@@ -182,41 +211,57 @@ fn context(env: &Env, universe: &[Address], v: &Vector) -> AllowitContext {
             amount: v.amount,
             now: v.now,
             expires_at: v.expires_at,
+            spent_units: v.spent_units,
+            gas_units: v.gas_units,
+            unpriced: !v.priced,
         },
     }
 }
-/// Soroban backend outcome. Each policy run reads only its own rule failures.
-fn soroban_outcome(env: &Env, universe: &[Address], v: &Vector) -> Outcome {
-    let c = context(env, universe, v);
-    let g = &c.grant;
-    let code = |e: AllowitError| e as u32;
-    let index = |a: Address| format!("@{}", universe.iter().position(|x| *x == a).unwrap());
-    let run =
-        |execute: fn(&AllowitContext) -> allowit::Result| allowit::run(&c, execute).map_err(code);
-    let rules: List<Result<Text, u32>> = [
-        allowit::transaction_cap(&c, &g.transaction_cap).map(|v| v.to_string()),
-        allowit::spent_cap(&c, &g.spent_cap).map(|v| v.to_string()),
-        allowit::day_spent_cap(&c, &g.day_spent_cap).map(|v| v.to_string()),
-        allowit::day_total_cap(&c, &g.day_total_cap).map(|v| v.to_string()),
-        allowit::call_cap(&c, &g.call_cap).map(|v| v.to_string()),
-        allowit::recipients(&c, &g.recipients).map(index),
-        allowit::tokens(&c, &g.tokens).map(index),
-        allowit::expiry(&c, &g.expiry).map(|v| v.to_string()),
-    ]
-    .into_iter()
-    .map(|r| r.map_err(code))
-    .collect();
-    let preflight = RULES
+/// Soroban backend outcome, inside a contract so policy writes have temporary storage.
+fn soroban_outcome(env: &Env, contract: &Address, universe: &[Address], v: &Vector) -> Outcome {
+    env.as_contract(contract, || {
+        let c = context(env, universe, v);
+        let g = &c.grant;
+        let code = |e: AllowitError| e as u32;
+        let index = |a: Address| format!("@{}", universe.iter().position(|x| *x == a).unwrap());
+        let next = || {
+            allowit::post_flight(&c)
+                .map(|state| line(env, &state))
+                .map_err(code)
+        };
+        let rules: List<Result<Text, u32>> = [
+            allowit::transaction_cap(&c, &g.transaction_cap).map(|v| v.to_string()),
+            allowit::spent_cap(&c, &g.spent_cap).map(|v| v.to_string()),
+            allowit::day_spent_cap(&c, &g.day_spent_cap).map(|v| v.to_string()),
+            allowit::day_total_cap(&c, &g.day_total_cap).map(|v| v.to_string()),
+            allowit::call_cap(&c, &g.call_cap).map(|v| v.to_string()),
+            allowit::recipients(&c, &g.recipients).map(index),
+            allowit::tokens(&c, &g.tokens).map(index),
+            allowit::expiry(&c, &g.expiry).map(|v| v.to_string()),
+        ]
         .into_iter()
-        .map(|rule| allowit::preflight(&c, rule).map_err(code))
+        .map(|r| r.map_err(code))
         .collect();
-    Outcome {
-        policy: run(sample::execute),
-        branch: run(branch::execute),
-        catching: run(catching::execute),
-        rules,
-        preflight,
-    }
+        let preflight = RULES
+            .into_iter()
+            .map(|rule| allowit::preflight(&c, rule).map_err(code))
+            .collect();
+        let policy = sample::execute(&c).map_err(code);
+        let branch = branch::execute(&c).map_err(code);
+        let plain = next();
+        // The catching policy may write; post-flight consumes the writes in either case.
+        let catching = catching::execute(&c).map_err(code);
+        let catching_next = next();
+        Outcome {
+            policy,
+            branch,
+            catching,
+            rules,
+            preflight,
+            next: plain,
+            catching_next: catching.and(catching_next),
+        }
+    })
 }
 
 /// The leading canonical calls of the sample policy, as `scripts/policy_source.py` derives them
@@ -246,30 +291,20 @@ fn sample_prefix() -> List<AllowitRule> {
     rules
 }
 
-/// Wallet history before the operation, and whether the operation carries expense bounds, such
-/// that the kernel proposes exactly the vector's history. `None` when the kernel or owner
-/// configuration cannot produce the vector.
-fn kernel_input(v: &Vector) -> Option<(AllowitAccountingHistory, bool)> {
-    let priced = !v.day_unpriced;
-    let gross = |value: i128| (value >= 0).then_some(value);
-    let spent = |value: i128| gross(if priced { value - v.amount } else { value });
-    let realizable = !v.deposit
+/// Whether the kernel and owner configuration can produce the vector: a transfer of the installed
+/// asset whose expense bounds, when priced, attest principal plus gas.
+fn realizable(v: &Vector) -> bool {
+    let cost = if v.priced {
+        v.gas_units >= 0 && v.spent_units == v.amount + v.gas_units
+    } else {
+        v.spent_units == 0 && v.gas_units == 0
+    };
+    !v.deposit
         && v.asset == vectors::ASSET
         && v.amount > 0
         && v.expires_at > v.now
-        && v.day == v.now / 86_400
-        && (priced || v.unpriced)
-        && v.caps.iter().flatten().all(|cap| *cap >= 0);
-    let prior = AllowitAccountingHistory {
-        calls: v.calls.checked_sub(1)?,
-        spent: spent(v.spent)?,
-        unpriced: v.unpriced && priced,
-        day: v.day,
-        day_spent: spent(v.day_spent)?,
-        day_total: gross(v.day_total - v.amount)?,
-        day_unpriced: false,
-    };
-    realizable.then_some((prior, priced))
+        && cost
+        && v.caps.iter().flatten().all(|cap| *cap >= 0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -333,20 +368,20 @@ impl Wallet {
             operations: core::cell::Cell::new(0),
         }
     }
-    /// Install the vector's Grant and the prior history, and move the ledger to the request time.
+    /// Install the vector's Grant and current state, and move the ledger to the request time.
     /// The owner can change Grant values without code redeployment.
-    fn seed(&self, v: &Vector, prior: &AllowitAccountingHistory, paused: bool) {
+    fn seed(&self, v: &Vector, paused: bool) {
         let env = &self.f.env;
         env.ledger().with_mut(|l| l.timestamp = v.now);
         env.as_contract(&self.f.wallet, || {
             let mut s = state(env).unwrap();
             s.grant = grant(env, &self.universe, v);
-            s.history = prior.clone();
+            s.policy_state = state_map(env, v);
             s.paused = paused;
             store(env, &s);
         });
     }
-    fn request(&self, v: &Vector, priced: bool) -> AllowitExecutionRequest {
+    fn request(&self, v: &Vector) -> AllowitExecutionRequest {
         let env = &self.f.env;
         let s = self.f.client().state();
         let b = self.f.client().policy_binding();
@@ -357,10 +392,10 @@ impl Wallet {
         let expense = AllowitExpenseBounds {
             asset: self.f.asset.clone(),
             decimals: 7,
-            gas_units: 0,
+            gas_units: v.gas_units,
             conversion_units: 0,
-            spent_units: v.amount,
-            max_fee_stroops: 0,
+            spent_units: v.spent_units,
+            max_fee_stroops: u32::try_from(v.gas_units).unwrap(),
             observed_ledger: 1,
             day: v.now / 86_400,
         };
@@ -370,7 +405,7 @@ impl Wallet {
             } else {
                 BytesN::from_array(env, &[9; 32])
             },
-            expense: priced.then(|| expense.to_xdr(env)),
+            expense: v.priced.then(|| expense.to_xdr(env)),
             policy_instance: b.policy_instance,
             operation_id: BytesN::from_array(env, &id),
             nonce: s.nonce,
@@ -415,54 +450,66 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
     let prefix = sample_prefix();
     assert_eq!(prefix, RULES);
     let mut realized = 0;
-    // Realized vectors whose rule failure the catching policy catches and the record denies.
+    // Realized vectors where the catching policy caught a rule error and the operation succeeded.
     let mut caught = List::new();
     for (v, host) in all.iter().zip(&host) {
-        // 1 and 2: the host smoke and the Soroban backend agree on every pass value and error.
-        let outcome = soroban_outcome(&custom.f.env, &custom.universe, v);
+        // 1 and 2: the host smoke and the Soroban backend agree on every pass value, error and
+        // post-flight state.
+        let outcome = soroban_outcome(&custom.f.env, &custom.f.wallet, &custom.universe, v);
         assert_eq!(*host, outcome.line(v.name));
-        let Some((prior, priced)) = kernel_input(v) else {
+        if !realizable(v) {
             continue;
-        };
-        realized += 1;
-        let expected_custom = outcome.policy.map_err(wallet_error);
-        let expected_catching = outcome.catching.map_err(wallet_error);
-        let direct = catching::execute(&context(&custom.f.env, &custom.universe, v));
-        if direct.is_ok() && outcome.catching.is_err() {
-            caught.push(v.name);
         }
+        realized += 1;
+        let next = outcome.next.clone().map(|_| ());
         let first_prefix_error = prefix
             .iter()
             .map(|rule| outcome.preflight[RULES.iter().position(|r| r == rule).unwrap()])
             .find(Result::is_err);
-        let expected_common = first_prefix_error.unwrap_or(Ok(())).map_err(wallet_error);
+        let expected = |tier: Tier| {
+            match tier {
+                Tier::Custom => outcome.policy.and(next),
+                Tier::Common => first_prefix_error.unwrap_or(Ok(())).and(next),
+                Tier::Simple => next,
+                Tier::Catching => outcome.catching_next.clone().map(|_| ()),
+            }
+            .map_err(wallet_error)
+        };
         let unset = v.caps.contains(&None)
             || v.call_cap.is_none()
             || v.recipients.is_none()
             || v.tokens.is_none()
             || v.expiry.is_none();
         if !unset {
-            assert_eq!(expected_common, expected_custom, "{}", v.name);
+            assert_eq!(expected(Tier::Common), expected(Tier::Custom), "{}", v.name);
+        }
+        if outcome.catching.is_ok() && outcome.policy.is_err() {
+            caught.push(v.name);
         }
         for wallet in &wallets {
-            wallet.seed(v, &prior, false);
-            let result = wallet.execute(&wallet.request(v, priced));
-            let expected = match wallet.tier {
-                Tier::Custom => expected_custom,
-                Tier::Common => expected_common,
-                Tier::Simple => Ok(()),
-                Tier::Catching => expected_catching,
-            };
-            assert_eq!(result, expected, "{} {:?}", v.name, wallet.tier);
-            // The kernel proposed exactly the history that the host evaluated.
+            wallet.seed(v, false);
+            let result = wallet.execute(&wallet.request(v));
+            assert_eq!(
+                result,
+                expected(wallet.tier),
+                "{} {:?}",
+                v.name,
+                wallet.tier
+            );
+            // The contract stored exactly the post-flight state that the host computed.
             if result.is_ok() {
-                assert_eq!(wallet.f.client().state().history, history(v), "{}", v.name);
+                let stored = line(&wallet.f.env, &wallet.f.client().policy_state());
+                let want = match wallet.tier {
+                    Tier::Catching => outcome.catching_next.clone(),
+                    _ => outcome.next.clone(),
+                };
+                assert_eq!(Ok(stored), want, "{} {:?}", v.name, wallet.tier);
             }
         }
     }
-    assert_eq!(realized, 24);
-    // The deployed catching Wasm denied these only through the onchain rule-failure record.
-    for name in ["over_spent_cap", "over_day_spent_cap"] {
+    assert_eq!(realized, 33);
+    // The deployed catching Wasm let these continue after a caught rule error and wrote its key.
+    for name in ["over_day_spent_cap", "over_day_spent_cap_counted_once"] {
         assert!(caught.contains(&name), "{name} {caught:?}");
     }
 }
@@ -471,13 +518,13 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
 fn kernel_violations_reject_identically_in_every_contract() {
     use AllowitWalletError as W;
     let v = vectors::base();
-    let (prior, _) = kernel_input(&v).unwrap();
+    assert!(realizable(&v));
     for wallet in TIERS.map(Wallet::new) {
         let env = &wallet.f.env;
         let tier = wallet.tier;
         let reject = |change: &dyn Fn(&mut AllowitExecutionRequest), paused: bool| {
-            wallet.seed(&v, &prior, paused);
-            let mut e = wallet.request(&v, true);
+            wallet.seed(&v, paused);
+            let mut e = wallet.request(&v);
             change(&mut e);
             wallet.execute(&e)
         };
@@ -512,10 +559,10 @@ fn kernel_violations_reject_identically_in_every_contract() {
         );
         assert_eq!(reject(&|_| {}, true), Err(W::Paused as u32), "{tier:?}");
         // The same request passes, then its single-use operation ID rejects.
-        wallet.seed(&v, &prior, false);
-        let e = wallet.request(&v, true);
+        wallet.seed(&v, false);
+        let e = wallet.request(&v);
         assert_eq!(wallet.execute(&e), Ok(()), "{tier:?}");
-        let mut replay = wallet.request(&v, true);
+        let mut replay = wallet.request(&v);
         replay.operation_id = e.operation_id;
         assert_eq!(wallet.execute(&replay), Err(W::Replay as u32), "{tier:?}");
     }

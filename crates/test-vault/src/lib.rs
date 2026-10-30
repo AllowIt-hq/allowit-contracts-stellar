@@ -1,7 +1,8 @@
 #![no_std]
 //! Test-only hostile SEP-56 vault. Never use this fixture as a deployed asset vault.
 use soroban_sdk::{
-    Address, BytesN, ContractExecutable, Env, contract, contractevent, contractimpl, token,
+    Address, BytesN, ContractExecutable, Env, Symbol, Val, Vec, contract, contractevent,
+    contractimpl, token,
 };
 #[contractevent(topics=["mint"])]
 pub struct AllowitShareMint {
@@ -52,6 +53,12 @@ impl AllowitSep56TestVault {
     pub fn set_upgrade(env: Env, hash: BytesN<32>) {
         env.storage().instance().set(&2u32, &hash);
     }
+    /// Behavior 13 makes this call from inside `deposit`, after the vault pulls the assets.
+    pub fn set_callback(env: Env, contract: Address, function: Symbol, args: Vec<Val>) {
+        env.storage()
+            .instance()
+            .set(&5u32, &(contract, function, args));
+    }
     pub fn balance(env: Env, owner: Address) -> i128 {
         env.storage().persistent().get(&owner).unwrap_or(0)
     }
@@ -80,6 +87,13 @@ impl AllowitSep56TestVault {
             // A second gross debit followed by a refund must fail even though net balance would match.
             token.transfer(&from, &vault, &assets);
             token.transfer(&vault, &from, &assets);
+        }
+        if behavior == 13 {
+            // A vault can call back into the wallet, or into a token that asks the wallet to
+            // authorize, while the wallet's operation runs.
+            let (contract, function, args): (Address, Symbol, Vec<Val>) =
+                env.storage().instance().get(&5u32).unwrap();
+            env.invoke_contract::<Val>(&contract, &function, args);
         }
         if behavior == 8 {
             let hash: BytesN<32> = env.storage().instance().get(&2u32).unwrap();
