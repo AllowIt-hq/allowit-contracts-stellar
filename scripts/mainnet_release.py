@@ -29,10 +29,19 @@ WALLET_KIND = "common_policy_engine"
 POLICY_DENIED = 18
 BUILD_SCRIPTS = ("build-contracts.sh", "check-policy-bindings.py")
 
-# The smoke policy is entirely one standard prefix of canonical calls.
-RULES = ["recipients", "transaction_cap", "day_total_cap", "spent_cap", "call_cap", "expiry"]
-SMOKE_SOURCE = ("use allowit::prelude::*;\npub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n"
-    + "".join(f"    allowit::{rule}(ctx, &ctx.grant.{rule})?;\n" for rule in RULES) + "    Ok(())\n}\n").encode()
+# The smoke policy is entirely one standard prefix of canonical calls. Its rules derive from the source.
+SMOKE_SOURCE = b"""use allowit::prelude::*;
+pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
+    allowit::recipients(ctx, &ctx.grant.recipients)?;
+    allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
+    allowit::day_total_cap(ctx, &ctx.grant.day_total_cap)?;
+    allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+    allowit::call_cap(ctx, &ctx.grant.call_cap)?;
+    allowit::expiry(ctx, &ctx.grant.expiry)?;
+    Ok(())
+}
+"""
+RULES = ca.standard_prefix(SMOKE_SOURCE.decode())
 
 
 # Bind every delegated CLI operation to the same endpoint and passphrase as direct RPC reads.
@@ -342,6 +351,13 @@ def read_contract(plan, contract, method):
     return plain(value)
 
 
+def rule_names(rules):
+    """Decoded Vec<Rule>. Each unit enum variant decodes as a one-symbol list."""
+    if not isinstance(rules, list) or any(not isinstance(rule, list) or len(rule) != 1 or not isinstance(rule[0], str) for rule in rules):
+        raise ValueError("Wallet rules are not a Vec<Rule>")
+    return [rule[0] for rule in rules]
+
+
 def wallet_state(plan, wallet, parent):
     ca.contract(wallet)
     ca.contract(parent)
@@ -359,7 +375,7 @@ def wallet_state(plan, wallet, parent):
     if parent_state["owner"] != plan["admin"]:
         raise ValueError("Parent authority differs from the plan")
     expected = wallet_config(plan)
-    if state["owner"] != plan["owner"] or state["agent"] != plan["agent"] or state["server"] != plan["server"] or state["asset"] != plan["asset"] or state["rules"] != RULES or state["x402_enabled"] or state["grant"] != expected["grant"]:
+    if state["owner"] != plan["owner"] or state["agent"] != plan["agent"] or state["server"] != plan["server"] or state["asset"] != plan["asset"] or rule_names(state["rules"]) != RULES or state["x402_enabled"] or state["grant"] != expected["grant"]:
         raise ValueError("Wallet authority or grant differs from the plan")
     if state["paused"]:
         raise ValueError("Wallet is paused")
@@ -367,7 +383,7 @@ def wallet_state(plan, wallet, parent):
         raise ValueError("Wallet policy identity or executable differs from the plan")
     if binding["source_digest"] != expected["source_digest"] or binding["engine_kind"] != WALLET_KIND or int(binding["contract_version"]) != ca.WALLET_CONTRACT_VERSION:
         raise ValueError("Installed compiled policy differs from the plan")
-    if binding["entrypoint"] != "_execute" or binding["argument_schema_digest"] != digest(SCHEMA):
+    if binding["entrypoint"] != "execute" or binding["argument_schema_digest"] != digest(SCHEMA):
         raise ValueError("Wallet does not use the admitted transfer ABI")
     return state, binding
 

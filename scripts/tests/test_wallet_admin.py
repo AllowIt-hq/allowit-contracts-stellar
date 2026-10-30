@@ -16,6 +16,12 @@ import contract_admin as ca
 from stellar_sdk import Keypair, TransactionEnvelope, Account, TransactionBuilder, Address, StrKey, xdr, scval
 
 KEYS = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 6)]
+ROOT = Path(__file__).resolve().parents[2]
+HEAD = "use allowit::prelude::*;\npub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n"
+
+
+def source(body, head=HEAD):
+    return head + body + "    Ok(())\n}\n"
 
 
 def state():
@@ -377,7 +383,9 @@ class ContractAdmin(unittest.TestCase):
             values = {"expiry": 2000000000}
             config = {"owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "asset": asset,
                 "source_digest": "22" * 32, "rules": [], "grant": values, "x402_enabled": False, "policy_instance": "11" * 32}
-            args = SimpleNamespace(action="deploy-wallet", network="testnet", allow_mainnet=False,
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(source(""))
+            args = SimpleNamespace(action="deploy-wallet", network="testnet", allow_mainnet=False, tier="simple", policy_source=str(policy),
                 source=KEYS[0], config=json.dumps(config), wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest())
             command = ca.command(args)
             self.assertEqual(json.loads(command[command.index("--config") + 1])["policy_instance"], "11" * 32)
@@ -386,6 +394,64 @@ class ContractAdmin(unittest.TestCase):
                 args.config = json.dumps(config)
                 with self.assertRaises(ValueError):
                     ca.command(args)
+
+    def test_standard_prefix_is_derived_from_policy_source_statements(self):
+        sample = (ROOT / "crates/custom-policy/policy/policy.rs").read_text()
+        self.assertEqual(ca.standard_prefix(sample), list(ca.GRANT_FIELDS))
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        vectors = [
+            # A mismatched Grant reference ends the prefix; later calls run offchain or in Custom.
+            (call("recipients") + "    allowit::spent_cap(ctx, &ctx.grant.day_spent_cap)?;\n" + call("expiry"), ["recipients"]),
+            # Statements, not lines: a split call, two calls on one line and comments.
+            ("    allowit::spent_cap(\n        ctx,\n        &ctx.grant.spent_cap,\n    )?;\n" + call("expiry").rstrip() + call("tokens"), ["spent_cap", "expiry", "tokens"]),
+            ("    // limits\n" + call("call_cap") + "    /* then */ " + call("call_cap"), ["call_cap", "call_cap"]),
+            # Any other statement ends the prefix.
+            ("    let left = allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n" + call("expiry"), []),
+            (call("expiry") + "    if ctx.request.operation == Operation::sep56_deposit {\n" + call("spent_cap") + "    }\n", ["expiry"]),
+            (call("expiry") + "    allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n" + call("tokens"), ["expiry"]),
+        ]
+        vectors += [(call(name) + call("expiry"), []) for name in
+                    ("set_cap_per_day", "cap_per_transaction", "require_recipient", "require_asset", "allow_actions", "state_remove", "fail")]
+        for body, expected in vectors:
+            with self.subTest(body=body):
+                self.assertEqual(ca.standard_prefix(source(body)), expected)
+        explicit = HEAD.replace("allowit::Result {", "allowit::Result<()> {")
+        self.assertEqual(ca.standard_prefix(source(call("tokens"), explicit)), ["tokens"])
+        # Calls in other functions are not part of execute.
+        helper = "fn helper(ctx: &AllowitEnv) -> allowit::Result {\n" + call("tokens") + "    Ok(())\n}\n"
+        self.assertEqual(ca.standard_prefix(helper + source(call("expiry"))), ["expiry"])
+        for invalid in (helper, source("") + source("")):
+            with self.assertRaisesRegex(ValueError, "execute"):
+                ca.standard_prefix(invalid)
+
+    def test_owner_packets_bind_rules_derived_from_the_policy_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            text = source("    allowit::recipients(ctx, &ctx.grant.recipients)?;\n    allowit::expiry(ctx, &ctx.grant.expiry)?;\n")
+            policy.write_text(text)
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            packet = {"rules": ["recipients", "expiry"], "source_digest": "22" * 32}
+            self.assertEqual(ca.policy_rules(packet, "common", str(policy)), packet)
+            for tier, rules, source_digest in (("common", ["recipients"], "22" * 32), ("common", ["expiry", "recipients"], "22" * 32),
+                                               ("simple", ["recipients", "expiry"], "22" * 32), ("custom", [], "22" * 32),
+                                               (None, ["recipients", "expiry"], "22" * 32)):
+                with self.assertRaises(ValueError):
+                    ca.policy_rules({"rules": rules, "source_digest": source_digest}, tier, str(policy))
+            self.assertEqual(ca.policy_rules({"rules": [], "source_digest": digest}, "custom", str(policy))["rules"], [])
+            self.assertEqual(ca.policy_rules({"rules": [], "source_digest": "22" * 32}, "simple", str(policy))["rules"], [])
+            with self.assertRaises(ValueError):
+                ca.policy_rules(packet, "common", None)
+            # The admin packet path applies the same binding.
+            deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
+                          "rules": ["expiry"], "grant": {}, "x402_enabled": False, "wasm_hash": None}
+            args = SimpleNamespace(action="admin", network="testnet", allow_mainnet=False, source=KEYS[0], family="wallet",
+                                   contract=StrKey.encode_contract(bytes([2]) * 32), method="deploy_policy", tier="common",
+                                   policy_source=str(policy), arguments=json.dumps({"deployment": deployment}))
+            with self.assertRaisesRegex(ValueError, "standard prefix"):
+                ca.command(args)
+            deployment["rules"] = ["recipients", "expiry"]
+            args.arguments = json.dumps({"deployment": deployment})
+            self.assertIn("deploy_policy", ca.command(args))
 
     def test_secrets_and_hashes_reject(self):
         with self.assertRaises((ValueError, argparse.ArgumentTypeError)):

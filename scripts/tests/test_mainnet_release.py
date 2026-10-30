@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mainnet_release as release
-from stellar_sdk import Keypair, Asset, scval, Account, TransactionBuilder, Network, Address, TransactionEnvelope, xdr
+from stellar_sdk import Keypair, Asset, scval, Account, TransactionBuilder, Network, Address, TransactionEnvelope, StrKey, xdr
 
 
 class ReleaseTests(unittest.TestCase):
@@ -162,7 +162,7 @@ class ReleaseTests(unittest.TestCase):
     def execution_packet(self):
         wallet=self.plan['asset']
         state=dict(nonce=0,deployment_version=0)
-        binding=dict(module_digest=self.hashes['wallet'],entrypoint='_execute',argument_schema_digest=release.digest(release.SCHEMA))
+        binding=dict(module_digest=self.hashes['wallet'],entrypoint='execute',argument_schema_digest=release.digest(release.SCHEMA))
         request=release.execution(self.plan,wallet,state,binding,'ab'*32,90)
         tx=TransactionBuilder(Account(self.plan['agent'],1),Network.PUBLIC_NETWORK_PASSPHRASE,100).add_time_bounds(0,int(time.time())+300).append_invoke_contract_function_op(wallet,'execute',[request]).build()
         root=xdr.SorobanAuthorizedInvocation(xdr.SorobanAuthorizedFunction(xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,contract_fn=tx.transaction.operations[0].host_function.invoke_contract),[])
@@ -258,6 +258,49 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(config['source_digest'],release.prefix_digest(release.WALLET_KIND,self.hashes['wallet'],self.plan['asset'],release.RULES))
         self.assertEqual(release.SMOKE_SOURCE.decode().count('(ctx, &ctx.grant.'),len(release.RULES))
 
+    def test_wallet_state_accepts_a_real_encoded_state_and_rejects_other_rules(self):
+        wallet,parent,engine=(StrKey.encode_contract(bytes([n])*32) for n in (21,22,23))
+        expected=release.wallet_config(self.plan)
+        def state(rules):
+            grant=expected['grant']
+            def field(name,value):
+                if value is None: return scval.to_void()
+                if name in ('recipients','tokens'): return scval.to_vec([scval.to_address(a) for a in value])
+                return scval.to_uint64(value) if name in ('call_cap','expiry') else scval.to_int128(value)
+            history=scval.to_struct({k:scval.to_uint64(0) if k in ('calls','day') else scval.to_bool(False) if 'unpriced' in k else scval.to_int128(0) for k in ('calls','spent','unpriced','day','day_spent','day_total','day_unpriced')})
+            return scval.to_struct(dict(history=history,contract_version=scval.to_uint32(release.ca.WALLET_CONTRACT_VERSION),
+                owner=scval.to_address(self.plan['owner']),agent=scval.to_address(self.plan['agent']),server=scval.to_address(self.plan['server']),
+                asset=scval.to_address(self.plan['asset']),policy_instance=scval.to_bytes(bytes.fromhex(self.plan['policy_instance'])),
+                source_digest=scval.to_bytes(bytes.fromhex(expected['source_digest'])),
+                rules=scval.to_vec([scval.to_vec([scval.to_symbol(r)]) for r in rules]),
+                grant=scval.to_struct({k:field(k,v) for k,v in grant.items()}),x402_enabled=scval.to_bool(False),
+                token=scval.to_string('XLM'),deployment_version=scval.to_uint64(0),nonce=scval.to_uint64(0),paused=scval.to_bool(False)))
+        binding=scval.to_struct(dict(engine_kind=scval.to_symbol(release.WALLET_KIND),contract_version=scval.to_uint32(release.ca.WALLET_CONTRACT_VERSION),
+            policy_instance=scval.to_bytes(bytes.fromhex(self.plan['policy_instance'])),module_digest=scval.to_bytes(bytes.fromhex(self.hashes['wallet'])),
+            source_digest=scval.to_bytes(bytes.fromhex(expected['source_digest'])),argument_schema_digest=scval.to_bytes(hashlib.sha256(release.SCHEMA).digest()),
+            entrypoint=scval.to_symbol('execute')))
+        hashes={wallet:self.hashes['wallet'],parent:self.hashes['parent'],engine:self.hashes['engine']}
+        def run(rules):
+            def rpc(network,method,params=None):
+                self.assertEqual(method,'simulateTransaction')
+                call=TransactionEnvelope.from_xdr(params['transaction'],Network.PUBLIC_NETWORK_PASSPHRASE).transaction.operations[0].host_function.invoke_contract
+                target=Address.from_xdr_sc_address(call.contract_address).address
+                name=call.function_name.sc_symbol.decode()
+                value={(wallet,'state'):state(rules),(wallet,'policy_binding'):binding,(parent,'engine'):scval.to_address(engine),
+                    (parent,'state'):scval.to_struct(dict(owner=scval.to_address(self.plan['admin']),version=scval.to_uint64(0)))}[(target,name)]
+                return dict(results=[dict(xdr=value.to_xdr())])
+            def cli(args,input_data=None):
+                self.assertEqual(args[:3],['contract','info','hash'])
+                return hashes[args[args.index('--id')+1]]+'\n'
+            # Only RPC, account and CLI reads are replaced; decoding runs on the real encoded values.
+            with patch.object(release,'rpc',side_effect=rpc),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.ca,'cli_run',side_effect=cli):
+                return release.wallet_state(self.plan,wallet,parent)
+        decoded,_=run(release.RULES)
+        self.assertEqual(decoded['rules'],[[r] for r in release.RULES])
+        self.assertEqual(decoded['grant'],expected['grant'])
+        for rules in (release.RULES[::-1],release.RULES[:-1],release.RULES+['tokens']):
+            with self.assertRaisesRegex(ValueError,'grant differs'): run(rules)
+
     def test_prefix_digest_matches_the_contract_vector(self):
         # crates/policy-wallet/src/sep56_tests.rs standard_prefix_digest_matches_independent_xdr_vector_and_binds_context
         asset='CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ'
@@ -267,7 +310,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_execution_binds_full_source_and_conservative_xlm_expense(self):
         state=dict(nonce=3,deployment_version=1)
-        binding=dict(module_digest=self.hashes['wallet'],entrypoint='_execute',argument_schema_digest=release.digest(release.SCHEMA))
+        binding=dict(module_digest=self.hashes['wallet'],entrypoint='execute',argument_schema_digest=release.digest(release.SCHEMA))
         request=scval.from_struct(release.execution(self.plan,self.plan['asset'],state,binding,'ab'*32,90,day=7))
         self.assertEqual(scval.to_native(request['source_hash']).hex(),self.plan['policy_source_digest'])
         raw=scval.to_native(request['expense'])

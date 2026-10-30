@@ -68,6 +68,9 @@ class RealCliEncoding(unittest.TestCase):
         worker.start()
         try:
             with tempfile.TemporaryDirectory() as config:
+                policy = Path(config) / "policy.rs"
+                policy.write_text("use allowit::prelude::*;\npub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n"
+                                  "    allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;\n    Ok(())\n}\n")
                 cmd = [CLI, "--config-dir", config, "contract", "invoke", "--id", contract, "--source-account", account, "--rpc-url", f"http://127.0.0.1:{server.server_port}", "--network-passphrase", Network.TESTNET_NETWORK_PASSPHRASE, "--build-only", "--", "deploy_policy"]
                 result = subprocess.run(cmd + ca.serialize({"deployment": {"deployment_version": 1, "owner": account, "agent": recipient, "server": Keypair.from_raw_ed25519_seed(bytes([4]) * 32).public_key, "source_digest": "22" * 32, "rules": ["transaction_cap"], "grant": grant, "x402_enabled": False, "wasm_hash": None}}), check=True, capture_output=True, text=True, timeout=30)
                 tx = TransactionEnvelope.from_xdr(result.stdout.strip(), Network.TESTNET_NETWORK_PASSPHRASE)
@@ -91,7 +94,7 @@ class RealCliEncoding(unittest.TestCase):
                     with self.subTest(action=action):
                         expected = hashlib.sha256(wasm.read_bytes()).hexdigest()
                         options = SimpleNamespace(action=action, network="testnet", allow_mainnet=False, source=account,
-                            wasm=str(wasm), wasm_hash=expected, engine_wasm="11" * 32,
+                            wasm=str(wasm), wasm_hash=expected, engine_wasm="11" * 32, tier="common", policy_source=str(policy),
                             owner=account, config=json.dumps({"owner": account, "agent": recipient,
                                 "server": Keypair.from_raw_ed25519_seed(bytes([4]) * 32).public_key, "asset": contract,
                                 "source_digest": "22" * 32, "rules": ["transaction_cap"], "grant": grant, "x402_enabled": False, "policy_instance": "11" * 32}))

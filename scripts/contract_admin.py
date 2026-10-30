@@ -111,6 +111,42 @@ def grant(value):
     return result
 
 
+TIERS = ("simple", "common", "custom")
+# One prefix statement after whitespace removal: `allowit::<rule>(ctx,&ctx.grant.<rule>)?`. rustfmt may add a comma.
+PREFIX_CALL = re.compile(r"allowit::([a-z_]+)\(ctx,&ctx\.grant\.([a-z_]+),?\)\?")
+EXECUTE = re.compile(r"\bpub\s+fn\s+execute\s*\(\s*ctx\s*:\s*&\s*AllowitEnv\s*\)\s*->\s*allowit\s*::\s*Result(?:\s*<\s*\(\s*\)\s*>)?\s*\{")
+
+
+def standard_prefix(source):
+    """Return the standard prefix of authored policy source: the consecutive leading statements of
+    `execute` of the exact form `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`. Any other statement ends it."""
+    text = re.sub(r"/\*[\s\S]*?\*/|//[^\n]*", "", source)
+    found = list(EXECUTE.finditer(text))
+    if len(found) != 1:
+        raise ValueError("Policy source must define pub fn execute(ctx: &AllowitEnv) -> allowit::Result once")
+    rules = []
+    for statement in text[found[0].end():].split(";"):
+        call = PREFIX_CALL.fullmatch(re.sub(r"\s+", "", statement))
+        if not call or call[1] != call[2] or call[1] not in GRANT_FIELDS:
+            break
+        rules.append(call[1])
+    return rules
+
+
+def policy_rules(value, tier, source_path):
+    """Bind an owner packet to its authored source. Common binds the source's standard prefix; Simple and
+    Custom bind none. Custom also binds the source bytes."""
+    if tier not in TIERS or not source_path:
+        raise ValueError("Owner packets require --tier (" + ", ".join(TIERS) + ") and --policy-source")
+    source = Path(source_path).read_bytes()
+    expected = standard_prefix(source.decode()) if tier == "common" else []
+    if value["rules"] != expected:
+        raise ValueError("Rules must be the standard prefix derived from the policy source: " + json.dumps(expected))
+    if tier == "custom" and value["source_digest"] != hashlib.sha256(source).hexdigest():
+        raise ValueError("Custom source_digest must be the SHA-256 of the policy source")
+    return value
+
+
 def grant_cli(value):
     # Pinned CLI spec JSON: Option is null or its value; i128 as a decimal string avoids float decoding.
     return {name: str(item) if name in CAPS and item is not None else item for name, item in grant(value).items()}
@@ -298,6 +334,7 @@ def command(args):
             if not isinstance(config, dict) or set(config) != fields:
                 raise ValueError("Config fields must exactly match the policy wallet ABI")
             deployment({key: config[key] for key in fields - {"asset", "policy_instance"}} | {"deployment_version": 1, "wasm_hash": None})
+            policy_rules(config, getattr(args, "tier", None), getattr(args, "policy_source", None))
             contract(config["asset"])
             code_hash(config["policy_instance"])
             if int(config["policy_instance"], 16) == 0 or int(config["source_digest"], 16) == 0:
@@ -319,6 +356,8 @@ def command(args):
     if args.method not in methods:
         raise ValueError("Method is outside the admin allowlist")
     values = checked_args(args.method, public_json(args.arguments), args.family)
+    if args.method == "deploy_policy":
+        policy_rules(values["deployment"], getattr(args, "tier", None), getattr(args, "policy_source", None))
     return ["contract", "invoke", "--id", args.contract, "--build-only"] + base + ["--", args.method] + serialize(values)
 
 
@@ -331,6 +370,8 @@ def main():
     for flag in ("wasm", "wasm-hash", "engine-wasm", "owner", "agent", "engine", "asset", "grant", "policy-instance", "config", "contract", "method"):
         p.add_argument("--" + flag)
     p.add_argument("--family", choices=["wallet", "parent"], default="wallet")
+    p.add_argument("--tier", choices=TIERS, help="Wallet tier of an owner packet: simple, common or custom")
+    p.add_argument("--policy-source", help="Authored policy source file; Common rules are its standard prefix")
     p.add_argument("--member", action="append", default=[], type=account, help="Exactly three public members of the native parent admin")
     p.add_argument("--candidate-member", action="append", default=[], type=account, help="Three admitted members for parent admin handoff candidate")
     p.add_argument("--max-fee", type=int, default=10_000_000, help="Maximum total/resource fee in stroops; default 1 XLM")
