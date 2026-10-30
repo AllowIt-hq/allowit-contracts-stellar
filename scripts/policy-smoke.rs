@@ -1,6 +1,8 @@
-//! Compile the authored custom policy against the allowit host backend without chain dependencies.
+//! Compile the authored custom policies against the allowit host backend without chain dependencies.
 //! rustc --edition=2024 --crate-type=rlib --crate-name=allowit --cfg 'feature="std"' crates/allowit/src/lib.rs
 //! rustc --edition=2024 --test --extern allowit=liballowit.rlib scripts/policy-smoke.rs
+#[path = "../crates/custom-policy/src/branch_policy.rs"]
+mod branch;
 #[path = "../crates/custom-policy/policy/policy.rs"]
 mod policy;
 use allowit::prelude::*;
@@ -53,6 +55,14 @@ fn approval_passes_with_exact_constraints() {
         Ok(c.request.recipient.clone())
     );
     assert_eq!(allowit::expiry(&c, &c.grant.expiry), Ok(100));
+}
+#[test]
+fn approval_branch_policy_caps_deposits() {
+    let mut c = context();
+    c.state.spent = 31;
+    assert_eq!(branch::execute(&c), Ok(()));
+    c.request.operation = AllowitOperation::sep56_deposit;
+    assert_eq!(branch::execute(&c), Err(AllowitError::SpentCapExceeded));
 }
 #[test]
 fn approval_denies_unset_grant_fields() {
