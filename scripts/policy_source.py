@@ -23,12 +23,12 @@ CHAR = re.compile(r"(?<![A-Za-z0-9_])b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{
 ALLOWIT = re.compile(r"\ballowit\b")
 # Code that reads other files, the build environment or the including crate, so the one hashed
 # file would not be the whole policy, or that can behave differently in `AllowitCustomPolicy` and on the
-# host: file and environment macros, `#[path]`, `cfg_attr` (which can add `path`), an out-of-line
+# host: `#[path]`, `cfg_attr` (which can add `path`), an out-of-line
 # module, `extern` items, `unsafe` code and symbol attributes, macro definitions (which can assemble
 # paths that the root check below cannot see), conditional compilation, and location, type and
-# width introspection. Path roots are checked separately by `path_roots`.
+# width introspection. File and environment macros are checked by `MACRO_NAMES`, and path roots by
+# `path_roots`.
 OUTSIDE = (
-    (re.compile(r"\b(?:include|include_str|include_bytes|env|option_env)\b"), "file or environment macro"),
     (re.compile(r"#\s*\[\s*path\b"), "#[path] attribute"),
     (re.compile(r"\bcfg_attr\b"), "cfg_attr attribute"),
     (re.compile(r"\bmod\s+[^{};]*;"), "out-of-line module"),
@@ -40,6 +40,9 @@ OUTSIDE = (
      "location, type or width introspection"),
     (re.compile(r"\b(?:crate|super|self)\s*::"), "path into the including crate"),
 )
+# File and environment macros. Their names may appear only after a single `.`, as in the context
+# field `ctx.env`, never as a macro, a path segment, an import or a binding.
+MACRO_NAMES = re.compile(r"\b(?:include|include_str|include_bytes|env|option_env)\b")
 # Path roots that name the same thing in every including crate: the canonical crate, `core` and
 # primitive types. A capitalized root is a type, trait, enum or generic parameter; no crate in the
 # extern prelude of an including crate has a capitalized name. Every other root, such as
@@ -145,6 +148,11 @@ def checked_code(source):
         before, after = code[:found.start()].rstrip(), code[found.end():].lstrip()
         if not after.startswith("::") or before.endswith("::"):
             raise ValueError("Policy source must use `allowit` only as the path root `allowit::`; it must not rebind it")
+    for found in MACRO_NAMES.finditer(code):
+        before, after = code[:found.start()].rstrip(), code[found.end():].lstrip()
+        field = before.endswith(".") and not before.endswith("..")
+        if not field or after.startswith("!") and not after.startswith("!="):
+            raise ValueError("Policy source must be one self-contained file; it uses file or environment macro")
     for pattern, name in OUTSIDE:
         if pattern.search(code):
             raise ValueError("Policy source must be one self-contained file; it uses " + name)

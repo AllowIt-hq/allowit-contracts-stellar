@@ -558,6 +558,11 @@ class ContractAdmin(unittest.TestCase):
             'const E: &str = env!("HOME");\n',
             'const O: Option<&str> = option_env!("POLICY");\n',
             "use core::include as inline;\n",
+            "use core::env as e;\n",
+            'const E: &str = core::env!("HOME");\n',
+            'fn g() -> usize { (0..env!("HOME").len()).count() }\n',
+            'fn g(c: &AllowitContext) { let env = c.env.clone(); }\n',
+            "fn g() { let AllowitContext { env, .. } = todo!(); }\n",
             '#[path = "other.rs"]\nmod other {}\n',
             '#[cfg_attr(all(), path = "other.rs")]\nmod other {}\n',
             "mod other;\n",
@@ -623,7 +628,8 @@ class ContractAdmin(unittest.TestCase):
                    "const T: &str = \"crate::x cfg!(test) ::core\";\npub(crate) fn two() -> u8 { Vec::<u8>::new().len() as u8 + 2 }\n"
                    "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n"
                    "fn four(x: &[i128]) -> i128 { x.iter().sum::<i128>() + i128::MAX.min(0) + Option::<i128>::None.unwrap_or(0) }\n"
-                   "use allowit::{AllowitError as Denied, DAY};\nfn five() -> Denied { Denied::MissingGrant }\n")
+                   "use allowit::{AllowitError as Denied, DAY};\nfn five() -> Denied { Denied::MissingGrant }\n"
+                   "fn six(ctx: &AllowitContext) -> AllowitContext { let c = ctx . env.clone(); let _ = c; ctx.clone() }\n")
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
         # The `AllowitCustomPolicy` sources pass the same check.
         for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs"):
