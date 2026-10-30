@@ -720,9 +720,11 @@ fn next_history(
     }
     Ok(next)
 }
-/// Rule input: owner Grant, proposed protected history and authenticated request facts.
+/// Rule input: contract environment, owner Grant, proposed protected history and authenticated
+/// request facts.
 /// Deposits name their vault as the recipient.
 fn rule_input(
+    env: &Env,
     state: &AllowitState,
     history: &AllowitAccountingHistory,
     operation: AllowitOperation,
@@ -731,6 +733,7 @@ fn rule_input(
     expires_at: u64,
 ) -> AllowitContext {
     AllowitContext {
+        env: env.clone(),
         grant: state.grant.clone(),
         state: history.clone(),
         request: AllowitRequest {
@@ -797,6 +800,7 @@ fn admit<P: AllowitPolicy>(
     let history = next_history(env, &state.history, &execution, args.amount, now)?;
     P::validate(&state.rules)?;
     let ctx = rule_input(
+        env,
         &state,
         &history,
         operation.kind(),

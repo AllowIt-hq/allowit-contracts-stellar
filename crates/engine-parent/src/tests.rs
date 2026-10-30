@@ -58,6 +58,7 @@ impl Fixture {
 }
 fn context(env: &Env) -> AllowitContext {
     AllowitContext {
+        env: env.clone(),
         grant: AllowitGrant {
             transaction_cap: Some(10),
             ..Default::default()
@@ -76,10 +77,17 @@ fn context(env: &Env) -> AllowitContext {
         },
     }
 }
+/// Call the engine's `transaction_cap` with the fixture context.
+fn transaction_cap(
+    env: &Env,
+    engine: &Address,
+) -> Result<Result<i128, soroban_sdk::Error>, Result<allowit::AllowitError, soroban_sdk::InvokeError>>
+{
+    let ctx = context(env);
+    AllowitEngineClient::new(env, engine).try_transaction_cap(&ctx.grant, &ctx.state, &ctx.request)
+}
 fn approved(env: &Env, engine: &Address) -> bool {
-    AllowitEngineClient::new(env, engine)
-        .try_transaction_cap(&context(env))
-        .is_ok_and(|left| left == Ok(9))
+    transaction_cap(env, engine).is_ok_and(|left| left == Ok(9))
 }
 
 #[test]
@@ -220,7 +228,7 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     f.client().upgrade_engine(&deny, &0);
     assert_eq!(f.client().engine(), engine);
     assert_eq!(
-        AllowitEngineClient::new(&f.env, &engine).try_transaction_cap(&context(&f.env)),
+        transaction_cap(&f.env, &engine),
         Err(Err(soroban_sdk::InvokeError::Contract(
             allowit_wallet_engine::TEST_DENY
         )))

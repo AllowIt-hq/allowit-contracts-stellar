@@ -49,8 +49,8 @@ calls roll back the state, version and executable changes together.
 
 The reference update changes the code used by subsequent engine calls. It does not replace the
 engine address or authorize wallet spending. Each new engine release must preserve the interface
-and state interpretation required by its callers. Engine release 2 takes `AllowitContext` and returns
-each rule's pass value; wallets do not call it. A code hash identifies the exact executable.
+and state interpretation required by its callers. Engine release 3 takes the `AllowitContext` fields
+`grant`, `state` and `request` and returns each rule's pass value; wallets do not call it. A code hash identifies the exact executable.
 The parent administration version does not identify its release semantics.
 
 ## Lifetime and recovery

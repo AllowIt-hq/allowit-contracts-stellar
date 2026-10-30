@@ -2,8 +2,10 @@
 //! yields identical pass values and errors on a shared vector set.
 extern crate std;
 use super::*;
-use allowit::DAY;
-use soroban_sdk::{Address, Bytes, testutils::Address as _};
+use allowit::{
+    AllowitAccountingHistory, AllowitError, AllowitGrant, AllowitOperation, AllowitRequest, DAY,
+};
+use soroban_sdk::{Address, Bytes, contract, contractimpl, testutils::Address as _, vec};
 use std::{format, string::String as Text, string::ToString, vec::Vec as List};
 
 /// The authored policy compiled against the offchain host backend.
@@ -149,15 +151,22 @@ fn strkey(address: &Address) -> Text {
 /// Shared address universe: Soroban addresses and their StrKey text for the host backend.
 struct Universe {
     env: Env,
+    scope: Address,
     onchain: List<Address>,
     host: List<Text>,
 }
 impl Universe {
     fn new() -> Self {
         let env = Env::default();
+        let scope = env.register(Scope, ());
         let onchain: List<Address> = (0..4).map(|_| Address::generate(&env)).collect();
         let host = onchain.iter().map(strkey).collect();
-        Self { env, onchain, host }
+        Self {
+            env,
+            scope,
+            onchain,
+            host,
+        }
     }
     fn onchain(&self, v: &Vector) -> AllowitContext {
         let list = |items: &Option<List<usize>>| {
@@ -170,6 +179,7 @@ impl Universe {
             })
         };
         AllowitContext {
+            env: self.env.clone(),
             grant: allowit::AllowitGrant {
                 transaction_cap: v.caps[0],
                 spent_cap: v.caps[1],
@@ -210,6 +220,7 @@ impl Universe {
                 .map(|items| items.iter().map(|i| self.host[*i].clone()).collect())
         };
         allowit::host::AllowitContext {
+            env: allowit::host::AllowitEnv::default(),
             grant: allowit::host::AllowitGrant {
                 transaction_cap: v.caps[0],
                 spent_cap: v.caps[1],
@@ -245,13 +256,16 @@ impl Universe {
     }
     /// Run one vector under both backends and require identical outcomes.
     fn run(&self, v: &Vector) -> Outcome {
-        let onchain = outcome!(
-            ::allowit::soroban,
-            policy::execute,
-            branch_onchain::execute,
-            self.onchain(v),
-            |a: &Address| self.onchain.iter().position(|x| x == a).unwrap()
-        );
+        // A failed onchain rule records its error in contract temporary storage.
+        let onchain = self.env.as_contract(&self.scope, || {
+            outcome!(
+                ::allowit::soroban,
+                policy::execute,
+                branch_onchain::execute,
+                self.onchain(v),
+                |a: &Address| self.onchain.iter().position(|x| x == a).unwrap()
+            )
+        });
         let host = outcome!(
             ::allowit::host,
             host_policy::execute,
@@ -394,6 +408,64 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
         checked += 1;
     }
     assert_eq!(checked, 24);
+}
+
+/// Contract scope for rule calls. A failed rule records its error in temporary storage.
+#[contract]
+struct Scope;
+#[contractimpl]
+impl Scope {}
+
+#[test]
+fn custom_runner_denies_a_failed_rule_that_the_policy_did_not_return() {
+    let env = Env::default();
+    let recipient = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let ctx = AllowitContext {
+        env: env.clone(),
+        grant: AllowitGrant {
+            transaction_cap: Some(10),
+            spent_cap: Some(10),
+            day_spent_cap: Some(10),
+            day_total_cap: Some(10),
+            call_cap: Some(1),
+            recipients: Some(vec![&env, recipient.clone()]),
+            tokens: Some(vec![&env, asset.clone()]),
+            expiry: Some(100),
+        },
+        state: AllowitAccountingHistory {
+            calls: 1,
+            spent: 10,
+            day_spent: 10,
+            day_total: 10,
+            ..Default::default()
+        },
+        request: AllowitRequest {
+            operation: AllowitOperation::sep41_transfer,
+            asset,
+            recipient,
+            amount: 10,
+            now: 10,
+            expires_at: 20,
+        },
+    };
+    let rules = Vec::new(&env);
+    env.as_contract(&env.register(Scope, ()), || {
+        assert_eq!(AllowitCustom::check(&ctx, &rules), Ok(()));
+        // A rule failure that policy code caught earlier in the same invocation.
+        let mut other = ctx.clone();
+        other.grant.spent_cap = Some(9);
+        assert!(allowit::spent_cap(&other, &other.grant.spent_cap).is_err());
+        assert_eq!(policy::execute(&ctx), Ok(()));
+        assert_eq!(
+            AllowitCustom::check(&ctx, &rules),
+            Err(AllowitWalletError::PolicyDenied)
+        );
+        assert_eq!(
+            allowit::run(&ctx, policy::execute),
+            Err(AllowitError::SpentCapExceeded)
+        );
+    });
 }
 
 #[test]

@@ -287,6 +287,7 @@ fn rule_input_carries_typed_operations_and_the_vault_as_recipient() {
         ..Default::default()
     };
     let ctx = rule_input(
+        &f.env,
         &state,
         &history,
         deposit.kind(),

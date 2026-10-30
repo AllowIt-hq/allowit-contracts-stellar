@@ -9,7 +9,7 @@ contract. Shared checkers have no custody.
 ## Public names
 
 Every public type that authored policy, SDK integrations or contract specs name carries the
-`Allowit` prefix: `AllowitContext`, `AllowitGrant`, `AllowitRule`, `AllowitError`,
+`Allowit` prefix: `AllowitContext`, `AllowitEnv`, `AllowitGrant`, `AllowitRule`, `AllowitError`,
 `AllowitExecutionRequest`, `AllowitPolicyDeployment`, `AllowitState` and the others. The contract
 structs and their generated clients carry it too: `AllowitSimplePolicyEngine`,
 `AllowitCommonPolicyEngine`, `AllowitCustomPolicy`, `AllowitEngine`, `AllowitEngineParent`, and
@@ -44,7 +44,10 @@ pub fn execute(ctx: &AllowitContext) -> allowit::Result {
 The function doc comment keeps the owner's original policy prompt. Each inline comment quotes the
 prompt clause that the next call implements.
 
-The standard contract runs only its leading canonical calls, supplied by the owner as `rules`, and
+`AllowitCustomPolicy` and the offchain server run the function through `allowit::run`. A failed
+rule ends the run with a denial: every rule records its error in `ctx.env`, and `run` returns the
+first recorded rule error even if the policy caught the error and returned `Ok`. The standard
+contract runs only its leading canonical calls, supplied by the owner as `rules`, and
 skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes
 Rust comments, including nested block comments, and literals first, so they cannot add or hide calls.
 
@@ -55,6 +58,7 @@ identifier, such as `mod allowit`, `use core as allowit`, `extern crate`, `macro
 `AllowitCustomPolicy` compiles the file as a module with `#[path]`, and `SOURCE_HASH` covers only that file.
 The file must therefore be the whole policy: it must not use `include!`, `include_str!`,
 `include_bytes!`, `env!`, `option_env!`, `#[path]`, `cfg_attr` or an out-of-line `mod name;`. The
+names of those macros may appear only after a single `.`, as in the context field `ctx.env`. The
 host portability test includes the file, so it must not use inner attributes or inner doc comments.
 The same file must also behave the same offchain and onchain, so it must not use `cfg` or `cfg!`,
 `module_path!`, `file!`, `type_name`, `type_name_of_val`, `Location`, `TypeId`, `size_of`,
@@ -85,8 +89,8 @@ not compile the file. Two compiles are therefore required guards for every owner
   every owner source before deployment.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
-Soroban `Address`, `Vec` and contract types. Feature `std` uses heap strings and vectors
-for the host evaluator; addresses are StrKey text. The selected backend backs the crate root that
+Soroban `Address`, `Vec`, `Env` and contract types. Feature `std` uses heap strings and vectors
+for the host evaluator; addresses are StrKey text and the environment is a host `AllowitEnv`. The selected backend backs the crate root that
 authored policy names. The offchain server depends on
 `allowit = { default-features = false, features = ["std"] }`. Enabling both backends is a compile
 error, so a server cannot silently unify `soroban` through another crate. Feature `dual` enables
@@ -98,17 +102,28 @@ as `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list meth
 `u32` onchain and `usize` on the host), so authored code reads lists only through `recipients` and
 `tokens`.
 
-`AllowitContext` is the complete rule input. The wallet or server computes it:
+`AllowitContext` is the complete rule input. It is plain data without methods. The wallet or server
+computes it:
 
 | Field | Content |
 | --- | --- |
+| `env` | Backend environment: the contract's Soroban `Env` onchain, a new `AllowitEnv` per host evaluation |
 | `grant` | Typed owner `AllowitGrant`. Each field is an `Option`; `None` is unset |
 | `state` | Protected `AllowitAccountingHistory` proposed after this operation |
 | `request` | Typed `AllowitOperation`, immutable asset, recipient (deposit vault), amount, `now`, `expires_at` |
 
-Rules are pure checks: `allowit::<rule>(ctx, &Option<V>) -> allowit::Result<T>`. Each returns only
+Rules are checks: `allowit::<rule>(ctx, &Option<V>) -> allowit::Result<T>`. Each returns only
 its passing constraint, or an `allowit::AllowitError`. An unset field is `MissingGrant`. Policy code calls
 rules unguarded, so an unset parameter denies. Future server-only functions use the same shape.
+
+A failed rule also records its first error in `ctx.env`, and `allowit::run` denies with that error
+after the policy returns, so policy code cannot turn a rule failure into a pass with `match`,
+`if let` or `let _`. `run` never clears the record. Context clones share it. Onchain, the record is
+the temporary-storage entry `rule_fail` of the running contract. The denial rolls the write back
+with the rest of the invocation, and the custom contract reads the key after every run, so its
+footprint includes that key. On the host, `AllowitEnv` holds the record; create a new one for every
+evaluation. Authored code can read `ctx.env` but must not call its methods, because the two
+environments have none in common.
 
 | Rule and same-named Grant field | Native value | Pass value |
 | --- | --- | --- |
@@ -137,7 +152,11 @@ caller selectors. `AllowitRule` is a typed enum whose variants are the canonical
 vector elements when read, so owner configuration decodes every rule and allowlist element before
 storing it: an unknown name aborts and a malformed element is `InvalidGrant`. It runs each call through `allowit::preflight` as `if grant.<rule>.is_some() { allowit::<rule>(ctx, &grant.<rule>)?; }`
 and discards pass values. This preflight runner is the only place an unset field skips its rule.
-The offchain full policy still runs the unguarded call. Repeated rules read the same proposed
+The offchain full policy and `AllowitCustomPolicy` still run the unguarded call, so they deny it
+with `MissingGrant`. An unset prefix field is valid configuration: the owner can set or unset Grant
+values with `deploy_policy` without code redeployment. `scripts/contract_admin.py` warns about it
+without rejecting the packet. The preflight runner propagates the first rule error, so it does not
+read the failure record. Repeated rules read the same proposed
 history, so they cannot charge twice.
 
 Rule denials map to `PolicyDenied`. `MissingGrant` and `InvalidParameter` map to `InvalidGrant`.
@@ -196,14 +215,18 @@ funds before any change across layouts. Every later layout bump needs the same r
 
 ## Shared engine
 
-The shared engine exposes each canonical rule as `<rule>(ctx: AllowitContext) -> Result<T, AllowitError>`.
+`AllowitContext` carries the contract `Env`, so it is not a contract value. The shared engine
+exposes each canonical rule as
+`<rule>(grant: AllowitGrant, state: AllowitAccountingHistory, request: AllowitRequest) -> Result<T, AllowitError>`.
 Callers use its generated `AllowitEngineClient`.
-It runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)` and returns the same pass value or rule error.
+It builds the context with its own `Env`, runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)` and
+returns the same pass value or rule error.
 It holds no custody, Grant or history. No policy wallet, release tool or server in this repository
 calls it; offchain evaluation uses `allowit` directly. It remains the engine parent's administered
 checker for onchain callers that cannot bundle `allowit`. Its tests match `AllowitRule` exhaustively, so a
 new rule fails to compile until the engine exposes it. The `test-deny` fixture aborts every rule
-with contract error `TEST_DENY` (1000), outside `allowit::AllowitError`. `engine_version` 2 marks this ABI.
+with contract error `TEST_DENY` (1000), outside `allowit::AllowitError`. `engine_version` 3 marks this ABI.
+Release 2 took `ctx: AllowitContext` as one argument.
 
 ## Expenses and native effects
 

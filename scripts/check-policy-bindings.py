@@ -32,7 +32,8 @@ if binding(contract, "ARGUMENT_SCHEMA_HASH") != hashlib.sha256(SCHEMA).digest():
     raise SystemExit("Custom policy argument schema differs")
 if '#[path = "../policy/policy.rs"]\nmod policy;' not in contract or "/source_hash.rs" not in contract:
     raise SystemExit("Custom policy must compile and hash its authored source verbatim")
-for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs"):
+for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs",
+             "crates/custom-policy/src/catching_policy.rs"):
     try:
         checked_code((ROOT / path).read_text())
     except ValueError as error:

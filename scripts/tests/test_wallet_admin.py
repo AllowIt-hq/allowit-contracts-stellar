@@ -632,7 +632,8 @@ class ContractAdmin(unittest.TestCase):
                    "fn six(ctx: &AllowitContext) -> AllowitContext { let c = ctx . env.clone(); let _ = c; ctx.clone() }\n")
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
         # The `AllowitCustomPolicy` sources pass the same check.
-        for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs"):
+        for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs",
+                     "crates/custom-policy/src/catching_policy.rs"):
             ca.checked_code((ROOT / path).read_text())
         result = subprocess.run([sys.executable, str(ROOT / "scripts/check-policy-bindings.py")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -27,9 +27,10 @@ impl AllowitPolicy for AllowitCustom {
     fn argument_schema_digest(env: &Env) -> BytesN<32> {
         BytesN::from_array(env, &ARGUMENT_SCHEMA_HASH)
     }
-    /// Run the complete authored policy. An unset Grant field denies.
+    /// Run the complete authored policy. An unset Grant field denies, and so does any failed rule
+    /// that the policy caught.
     fn check(ctx: &AllowitContext, _rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
-        Ok(policy::execute(ctx)?)
+        Ok(allowit::run(ctx, policy::execute)?)
     }
 }
 allowit_policy_wallet::policy_wallet!(AllowitCustomPolicy, AllowitCustom);

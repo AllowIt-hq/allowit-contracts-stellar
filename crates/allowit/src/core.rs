@@ -1,5 +1,6 @@
-// Shared types and rules, included once per backend. `Address` and `Vec` come from the
-// including module. Field types keep those names so Soroban contract specs name native types.
+// Shared types and rules, included once per backend. `Address`, `AllowitEnv` and `Vec` come from
+// the including module, with `record` and `recorded`. Field types keep those names so Soroban
+// contract specs name native types.
 
 /// UTC day length in seconds.
 pub const DAY: u64 = 86_400;
@@ -10,7 +11,7 @@ pub use types::*;
 /// `AllowitRule` variants keep the snake-case names of their functions and Grant fields.
 #[allow(non_camel_case_types)]
 mod types {
-    use super::{Address, Vec};
+    use super::{Address, AllowitEnv, Vec};
 
     value! {
         /// Owner-signed typed rule parameters. `None` is unset: its rule denies with `MissingGrant`.
@@ -101,14 +102,15 @@ mod types {
         }
     }
 
-    value! {
-        /// Complete rule input, computed and supplied by the wallet or server.
-        #[derive(Clone, Debug, Eq, PartialEq)]
-        pub struct AllowitContext {
-            pub grant: AllowitGrant,
-            pub state: AllowitAccountingHistory,
-            pub request: AllowitRequest,
-        }
+    /// Complete rule input, computed and supplied by the wallet or server. Plain data: `env` is
+    /// the backend environment, a Soroban `Env` onchain and an `AllowitEnv` on the host. A failed
+    /// rule records its error in `env`.
+    #[derive(Clone)]
+    pub struct AllowitContext {
+        pub env: AllowitEnv,
+        pub grant: AllowitGrant,
+        pub state: AllowitAccountingHistory,
+        pub request: AllowitRequest,
     }
 
     error! {
@@ -182,11 +184,24 @@ fn left(cap: i128, used: i128, exceeded: AllowitError) -> Result<i128> {
     }
 }
 
+/// Record a failed rule in `ctx.env`, so `run` denies even if the policy catches the error.
+fn failed<T>(ctx: &AllowitContext, result: Result<T>) -> Result<T> {
+    if let Err(error) = &result {
+        record(&ctx.env, *error);
+    }
+    result
+}
+
 /// Bound the gross amount of one operation.
 ///
 /// Returns `cap - request.amount`, the headroom left for this operation.
 /// A negative cap or nonpositive amount is `InvalidParameter`.
 pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
+    failed(ctx, check_transaction_cap(ctx, cap))
+}
+
+/// `transaction_cap` without recording a failure.
+fn check_transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
     if cap < 0 || ctx.request.amount <= 0 {
         return Err(AllowitError::InvalidParameter);
@@ -202,6 +217,11 @@ pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128>
 ///
 /// Returns `cap - state.spent`. Lifetime unpriced history is `Unpriced`.
 pub fn spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
+    failed(ctx, check_spent_cap(ctx, cap))
+}
+
+/// `spent_cap` without recording a failure.
+fn check_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
     let s = &ctx.state;
     accounting(
@@ -218,6 +238,11 @@ pub fn spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
 /// Returns `cap - state.day_spent`. Unpriced history for that day is `Unpriced`.
 /// `state.day` must equal `request.now / DAY`.
 pub fn day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
+    failed(ctx, check_day_spent_cap(ctx, cap))
+}
+
+/// `day_spent_cap` without recording a failure.
+fn check_day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
     let s = &ctx.state;
     let e = AllowitError::DaySpentCapExceeded;
@@ -230,6 +255,11 @@ pub fn day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
 /// Returns `cap - state.day_total`. Unpriced history for that day is `Unpriced`.
 /// `state.day` must equal `request.now / DAY`.
 pub fn day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
+    failed(ctx, check_day_total_cap(ctx, cap))
+}
+
+/// `day_total_cap` without recording a failure.
+fn check_day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
     let s = &ctx.state;
     let e = AllowitError::DayTotalCapExceeded;
@@ -240,6 +270,11 @@ pub fn day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
 ///
 /// Returns `cap - state.calls`. A zero cap always denies.
 pub fn call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
+    failed(ctx, check_call_cap(ctx, cap))
+}
+
+/// `call_cap` without recording a failure.
+fn check_call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
     let calls = ctx.state.calls;
     if cap == 0 || calls > cap {
@@ -252,6 +287,11 @@ pub fn call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
 ///
 /// Returns the matched `request.recipient`. An empty list denies.
 pub fn recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
+    failed(ctx, check_recipients(ctx, allowed))
+}
+
+/// `recipients` without recording a failure.
+fn check_recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
     let allowed = allowed.as_ref().ok_or(AllowitError::MissingGrant)?;
     let recipient = &ctx.request.recipient;
     if allowed.contains(recipient) {
@@ -265,6 +305,11 @@ pub fn recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Resul
 ///
 /// Returns the matched `request.asset`. An empty list denies.
 pub fn tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
+    failed(ctx, check_tokens(ctx, allowed))
+}
+
+/// `tokens` without recording a failure.
+fn check_tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
     let allowed = allowed.as_ref().ok_or(AllowitError::MissingGrant)?;
     let asset = &ctx.request.asset;
     if allowed.contains(asset) {
@@ -278,6 +323,11 @@ pub fn tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Ad
 ///
 /// Returns `expiry - request.now`, the seconds the grant has left.
 pub fn expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
+    failed(ctx, check_expiry(ctx, expiry))
+}
+
+/// `expiry` without recording a failure.
+fn check_expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
     let expiry = expiry.ok_or(AllowitError::MissingGrant)?;
     let r = &ctx.request;
     if r.now < expiry && r.now < r.expires_at && r.expires_at <= expiry {
@@ -334,6 +384,18 @@ pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
         }
     }
     Ok(())
+}
+
+/// Run a complete authored policy, as `AllowitCustomPolicy` and the host evaluator do. A failed
+/// rule ends the run with a denial: when any rule failed, `run` returns the first rule error even
+/// if the policy caught it and returned `Ok`. `run` never clears the record, so a policy cannot
+/// clear it by calling `run` itself.
+pub fn run(ctx: &AllowitContext, execute: fn(&AllowitContext) -> Result) -> Result {
+    let result = execute(ctx);
+    match recorded(&ctx.env) {
+        Some(error) => Err(error),
+        None => result,
+    }
 }
 
 impl AllowitGrant {
