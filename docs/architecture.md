@@ -49,7 +49,15 @@ CustomPolicy compiles the file as a module with `#[path]`, and `SOURCE_HASH` cov
 The file must therefore be the whole policy: it must not use `include!`, `include_str!`,
 `include_bytes!`, `env!`, `option_env!`, `#[path]`, `cfg_attr` or an out-of-line `mod name;`. The
 host portability test includes the file, so it must not use inner attributes or inner doc comments.
+The same file must also behave the same offchain and onchain, so it must not use `cfg` or `cfg!`,
+`module_path!`, `file!`, `type_name` or `type_name_of_val`, or paths rooted at `crate::`, `super::`,
+`self::` or a bare `::`, which reach the including crate or select code by build target.
 `check-policy-bindings.py` and the owner packet tooling of every tier reject all of these.
+
+These checks are lexical. They cannot prove that the two backends behave the same, for example
+when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host. The remaining
+guard is the dual-backend test: CustomPolicy tests compile its source under both backends and
+require identical outcomes on a shared vector set.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec` and contract types. Feature `std` uses heap strings and vectors

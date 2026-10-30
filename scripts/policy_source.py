@@ -21,15 +21,21 @@ CHAR = re.compile(r"(?<![A-Za-z0-9_])b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{
 # identifier declares or imports a replacement (`mod allowit`, `use x as allowit`, `fn allowit`,
 # `macro_rules! allowit`, `let allowit`) or reaches another module (`self::allowit`).
 ALLOWIT = re.compile(r"\ballowit\b")
-# Code that reads other files or the build environment, so the one hashed file would not be the
-# whole policy: file and environment macros, `#[path]`, `cfg_attr` (which can add `path`), an
-# out-of-line module and `extern crate`.
+# Code that reads other files, the build environment or the including crate, so the one hashed
+# file would not be the whole policy, or that can behave differently in CustomPolicy and on the
+# host: file and environment macros, `#[path]`, `cfg_attr` (which can add `path`), an out-of-line
+# module, `extern crate`, conditional compilation, location and type-name introspection, and paths
+# rooted at `crate`, `super`, `self` or a bare `::`.
 OUTSIDE = (
     (re.compile(r"\b(?:include|include_str|include_bytes|env|option_env)\b"), "file or environment macro"),
     (re.compile(r"#\s*\[\s*path\b"), "#[path] attribute"),
     (re.compile(r"\bcfg_attr\b"), "cfg_attr attribute"),
     (re.compile(r"\bmod\s+[^{};]*;"), "out-of-line module"),
     (re.compile(r"\bextern\s+crate\b"), "extern crate"),
+    (re.compile(r"\bcfg\b"), "conditional compilation"),
+    (re.compile(r"\b(?:module_path|type_name|type_name_of_val)\b|\bfile\s*!"), "location or type-name introspection"),
+    (re.compile(r"\b(?:crate|super|self)\s*::"), "path into the including crate"),
+    (re.compile(r"(?:^|[^\w>\s])\s*::"), "path rooted at ::"),
 )
 
 
@@ -71,7 +77,7 @@ def rust_code(source):
 def checked_code(source):
     """Return the code of one self-contained policy file that binds `allowit` only to the canonical
     crate. Reject inner attributes and doc comments, which the including module cannot accept."""
-    if re.search(r"^\s*(//!|/\*!|#!\[)", source, re.M):
+    if re.search(r"^\s*(//!|/\*!|#\s*!\s*\[)", source, re.M):
         raise ValueError("Policy source must not use inner attributes or inner doc comments")
     code = rust_code(source)
     for found in ALLOWIT.finditer(code):

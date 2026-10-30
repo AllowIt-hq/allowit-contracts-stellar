@@ -460,7 +460,7 @@ class ContractAdmin(unittest.TestCase):
         for invalid in (fake + source(call("recipients"), HEAD.replace("allowit::Result {", "Result {")),
                         fake.replace('"', "r#\"", 1).replace('";', '"#;') + source("", HEAD.replace("allowit::Result {", "Result {")),
                         "/* pub fn execute(ctx: &AllowitContext) -> allowit::Result {\n" + call("spent_cap") + "*/\npub fn r#execute(ctx: &AllowitContext) -> Result {\n    Ok(())\n}\n",
-                        source(call("expiry")) + "pub use self::execute as r#execute;\n"):
+                        source(call("expiry")) + "pub use execute as r#execute;\n"):
             with self.subTest(source=invalid), self.assertRaisesRegex(ValueError, "execute"):
                 ca.standard_prefix(invalid)
         for unterminated in ("/* /* */", 'const S: &str = "', 'const R: &str = r#"x"'):
@@ -555,6 +555,23 @@ class ContractAdmin(unittest.TestCase):
             "pub(crate) mod r#other ;\n",
             "macro_rules! m { ($i:ident) => { mod $i; } }\n",
             "extern crate core;\n",
+            # Code that can behave differently in CustomPolicy and on the host.
+            'const W: bool = cfg!(target_family = "wasm");\n',
+            '#[cfg(target_family = "wasm")]\nconst W: bool = true;\n',
+            "#[ cfg (test)]\nfn t() {}\n",
+            "const M: &str = module_path!();\n",
+            "const F: &str = file ! ();\n",
+            "fn n() -> &'static str { core::any::type_name::<AllowitContext>() }\n",
+            "fn n(c: &AllowitContext) -> &str { core::any::type_name_of_val(c) }\n",
+            "use core::any::type_name as n;\n",
+            # Paths into the including crate, and global paths.
+            "const H: [u8; 32] = super::SOURCE_HASH;\n",
+            "use crate::policy as p;\n",
+            "fn s() -> u8 { self :: inner() }\n",
+            "macro_rules! m { () => { $crate::x } }\n",
+            "const N: u32 = ::core::u32::MAX;\n",
+            "fn g(x: ::core::primitive::u8) {}\n",
+            "fn g() -> u8 { (|| ::core::primitive::u8::MAX)() }\n",
         )
         for code in outside:
             for text in (code + source(body), source(body) + code):
@@ -562,8 +579,9 @@ class ContractAdmin(unittest.TestCase):
                     ca.standard_prefix(text)
         with self.assertRaisesRegex(ValueError, "self-contained"):
             ca.standard_prefix(source('    let _ = include_str!("x");\n' + body))
-        with self.assertRaisesRegex(ValueError, "inner"):
-            ca.standard_prefix("#![allow(unused)]\n" + source(body))
+        for inner in ("#![allow(unused)]\n", "# ! [allow(unused)]\n", "//! Policy\n", "/*! Policy */\n"):
+            with self.subTest(source=inner), self.assertRaisesRegex(ValueError, "inner"):
+                ca.standard_prefix(inner + source(body))
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
             policy.write_text(source(body) + outside[0])
@@ -571,7 +589,9 @@ class ContractAdmin(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "self-contained"):
                 ca.policy_rules({"rules": [], "source_digest": digest}, "custom", str(policy))
         # Inline modules and mentions in comments or literals stay valid.
-        allowed = 'mod helpers { pub fn one() -> u8 { 1 } }\n// include!("x")\nconst S: &str = "mod other;";\n'
+        allowed = ('mod helpers { pub fn one() -> u8 { 1 } }\n// include!("x")\nconst S: &str = "mod other;";\n'
+                   "const T: &str = \"crate::x cfg!(test) ::core\";\npub(crate) fn two() -> u8 { Vec::<u8>::new().len() as u8 + 2 }\n"
+                   "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n")
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
         # The CustomPolicy sources pass the same check.
         for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs"):
