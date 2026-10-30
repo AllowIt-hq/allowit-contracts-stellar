@@ -69,8 +69,10 @@ authored `--policy-source` file and rejects any other list: Common binds the sou
 Simple and Custom bind an empty list. `--tier custom` also requires `source_digest` to be the
 SHA-256 of that file. Owner `deploy_policy` packets take the same two options for the target tier.
 Every tier requires one self-contained, portable source file. The tooling rejects every
-construct listed in [One portable policy source](architecture.md#one-portable-policy-source) and
-runs the std-only compile described there, so it needs `rustc`. For `--tier custom`, also build the
+construct listed in [One portable policy source](architecture.md#one-portable-policy-source), such
+as macros other than the assertion and `matches!` macros, writes to `ctx.env`, list access outside
+the `recipients` and `tokens` rules, indexing and pointer-width methods. It also runs the std-only
+compile described there, so it needs `rustc`. For `--tier custom`, also build the
 reviewed custom Wasm from the same file, which is the Soroban compile.
 
 Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,

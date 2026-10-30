@@ -660,7 +660,7 @@ class ContractAdmin(unittest.TestCase):
                 ca.policy_rules({"rules": [], "source_digest": digest}, "custom", str(policy))
         # Inline modules and mentions in comments or literals stay valid.
         allowed = ('mod helpers { pub fn one() -> u8 { 1 } }\n// include!("x")\nconst S: &str = "mod other;";\n'
-                   "const T: &str = \"crate::x cfg!(test) ::core\";\npub(crate) fn two() -> u8 { Vec::<u8>::new().len() as u8 + 2 }\n"
+                   "const T: &str = \"crate::x cfg!(test) ::core\";\npub(crate) fn two() -> u8 { Vec::<u8>::new().is_empty() as u8 + 2 }\n"
                    "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n"
                    "fn four(x: &[i128]) -> i128 { x.iter().sum::<i128>() + i128::MAX.min(0) + Option::<i128>::None.unwrap_or(0) }\n"
                    "use allowit::{AllowitError as Denied, DAY};\nfn five() -> Denied { Denied::MissingGrant }\n"
@@ -694,11 +694,11 @@ class ContractAdmin(unittest.TestCase):
             # backends: Soroban methods of an aliased environment or an address, address order and
             # std prelude macros.
             for body in ("    let _ = allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n    let e = &ctx.env;\n"
-                         "    e.storage().temporary().remove(&0u32);\n",
+                         "    e.storage().temporary().has(&0u32);\n",
                          "    if ctx.request.asset < ctx.request.recipient {\n        return Err(AllowitError::RecipientNotAllowed);\n    }\n",
-                         "    let _ = ctx.grant.recipients.clone().map(|r| r.binary_search(&ctx.request.recipient));\n",
-                         "    let _ = ctx.grant.recipients < ctx.grant.tokens;\n",
-                         "    let _ = vec![ctx.request.amount];\n",
+                         "    let _ = ctx.request.asset.clone().max(ctx.request.recipient.clone());\n",
+                         "    ctx.request.recipient.require_auth();\n",
+                         "    let _ = Box::new(ctx.request.amount);\n",
                          "    let _ = ctx.request.recipient.to_string();\n"):
                 text = source(body)
                 with self.subTest(body=body):
@@ -711,6 +711,78 @@ class ContractAdmin(unittest.TestCase):
             for tier, rules, source_digest in (("common", [], "22" * 32), ("custom", [], digest), ("simple", [], "22" * 32)):
                 with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "std-only compile"):
                     ca.policy_rules({"rules": rules, "source_digest": source_digest}, tier, str(policy))
+
+    def test_policy_source_rejects_code_that_diverges_between_backends(self):
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        head = HEAD + call("recipients")
+        diverging = (
+            # Native code that runs inside the offchain evaluator process before `main`.
+            'core::arch::global_asm!(".section __DATA,__mod_init_func", ".quad _p", "_p:", "mov x0, #42", "bl _exit");\n',
+            'fn g() { core::arch::asm!("nop"); }\n',
+            "use core::arch::global_asm as assert;\n",
+            'use core::arch::global_asm;\nglobal_asm! { "nop" }\n',
+            "use core::concat as panic;\n",
+            'fn g() { let _ = vec![1u8]; }\n',
+            'fn g() -> u32 { line!() }\n',
+            "#[track_caller]\nfn g() {}\n",
+            '#[doc = "x"]\nfn g() {}\n',
+            '#[unsafe(no_mangle)]\nfn g() {}\n',
+            # A replaced or borrowed environment.
+            "fn g(ctx: &AllowitContext) { let mut d = ctx.clone(); d.env = allowit::AllowitEnv::new(); let _ = d; }\n",
+            "fn g(ctx: &AllowitContext, e: &AllowitContext) { let mut d = ctx.clone(); d.env = e.env.clone(); let _ = d; }\n",
+            "fn g(ctx: &AllowitContext, e: &AllowitContext) { let mut d = ctx.clone(); core::mem::swap(&mut d.env, &mut e.clone().env); }\n",
+            "fn g(ctx: &AllowitContext) { let _ = core::mem::replace(&mut ctx.clone().env, ctx.env.clone()); }\n",
+            "fn g() { let _: Option<allowit::AllowitEnv> = None; }\n",
+            # Lists outside their rules, and pointer-width values.
+            "fn g(ctx: &AllowitContext) -> bool { ctx.grant.recipients.is_some() }\n",
+            "fn g(ctx: &AllowitContext) { let mut c = ctx.clone(); c.grant.tokens = None; let _ = c; }\n",
+            "fn g(ctx: &AllowitContext) { let _ = allowit::recipients(ctx, &ctx.grant.tokens); }\n",
+            "use allowit::recipients;\nfn g(ctx: &AllowitContext) { let _ = recipients(ctx, &ctx.grant.recipients); }\n",
+            "fn g(ctx: &AllowitContext) { let r#tokens = 0u8; let _ = (ctx, r#tokens); }\n",
+            "fn g(ctx: &AllowitContext) { let AllowitGrant { spent_cap, .. } = ctx.grant.clone(); let _ = spent_cap; }\n",
+            "fn g(ctx: &AllowitContext) { let AllowitContext { grant, .. } = ctx.clone(); let _ = grant; }\n",
+            "fn g(ctx: &AllowitContext) -> AllowitGrant { AllowitGrant { spent_cap: None, ..ctx.grant.clone() } }\n",
+            "fn g(ctx: &AllowitContext) -> AllowitRequest { AllowitRequest { amount: 1, ..ctx.request.clone() } }\n",
+            "fn g() -> bool { [0u8; 1].len().count_zeros() > 40 }\n",
+            "fn g() -> bool { let i = 0; let _ = [1u8][i]; (!i) as u64 > 1 << 40 }\n",
+            "fn g(x: [u8; 2]) -> u8 { x[1] }\n",
+            "fn g() -> bool { (0..3).map(|x| x).count() > 1 }\n",
+            "fn g() -> u8 { core::array::from_fn::<u8, 2, _>(|i| i as u8)[0] }\n",
+            "fn g() -> u64 { core::array::from_fn::<u64, 2, _>(|i| i as u64).iter().sum() }\n",
+            "fn g() { for (_i, _) in [1u8].iter().enumerate() {} }\n",
+            "fn g() -> bool { 'a'.len_utf8() > 0 }\n",
+            "fn g(ctx: &AllowitContext) -> bool { ctx.request.recipient.as_str() > \"G\" }\n",
+        )
+        for code in diverging:
+            for text in (code + source("", head), source("", head) + code):
+                with self.subTest(source=text), self.assertRaisesRegex(ValueError, "self-contained"):
+                    ca.standard_prefix(text)
+        # The detaching probe passes the std-only compile, so only the gate rejects it. The host
+        # record still denies its caught failure: see `scripts/policy-smoke.rs`.
+        detach = source("    let mut d = ctx.clone();\n    d.env = allowit::AllowitEnv::new();\n"
+                        "    if let Err(e) = allowit::spent_cap(&d, &d.grant.spent_cap) {\n        let _ = e;\n    }\n", head)
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            for text in (detach, source("", head) + diverging[0]):
+                policy.write_text(text)
+                ca.host_compile(policy)
+                digest = hashlib.sha256(text.encode()).hexdigest()
+                for tier, rules, source_digest in (("common", ["recipients"], "22" * 32), ("custom", [], digest), ("simple", [], "22" * 32)):
+                    with self.subTest(tier=tier, source=text), self.assertRaisesRegex(ValueError, "self-contained"):
+                        ca.policy_rules({"rules": rules, "source_digest": source_digest}, tier, str(policy))
+        # Portable code beside them stays valid.
+        allowed = ("fn a(x: bool) -> bool { if !x { return !x; } assert!(x != !x); matches!(Some(1u8), Some(_)) }\n"
+                   "#[inline]\n#[allow(dead_code)]\nfn b(c: &AllowitContext) -> AllowitGrant { c.grant.clone() }\n"
+                   "trait T {}\nimpl T for AllowitContext {}\nfn d(c: &AllowitContext) -> &AllowitContext { c }\n"
+                   "use allowit::AllowitRule;\nfn e(r: AllowitRule) -> bool { r == AllowitRule::tokens || r == allowit::AllowitRule::recipients }\n"
+                   "fn f(ctx: &AllowitContext) -> allowit::Result { let c = ctx.clone(); allowit::tokens(&c, &c.grant.tokens)?; Ok(()) }\n"
+                   "fn h(a: [u8; 2]) -> u64 { let [x, y] = a; let s: &[u8] = &[x, y]; s.iter().map(|v| *v as u64).sum() }\n"
+                   "fn i(c: &AllowitContext) -> u64 { let e = &c.env; let _ = e; (0..3u64).map(|x| x + c.request.now).max().unwrap_or(0) }\n")
+        self.assertEqual(ca.standard_prefix(allowed + source("", head)), ["recipients"])
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(allowed + source("", head))
+            ca.host_compile(policy)
 
     def test_wallet_code_changes_require_custody_layout_2(self):
         self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"2"))), 2)

@@ -60,8 +60,9 @@ The file must therefore be the whole policy: it must not use `include!`, `includ
 `include_bytes!`, `env!`, `option_env!`, `#[path]`, `cfg_attr` or an out-of-line `mod name;`. The
 names of those macros may appear only as the bare context field read `ctx.env`: after a single `.`
 and not followed by `.`, `(` or `!`. So `ctx.env.storage()` and a value's Soroban `env()` method
-reject. The host portability test includes the file, so it must not use inner attributes or inner
-doc comments.
+reject. The field is read-only: an assignment such as `c.env = ...` and a `&mut c.env` borrow,
+which `core::mem::replace` could use, reject, and so does the name `AllowitEnv`. The host
+portability test includes the file, so it must not use inner attributes or inner doc comments.
 
 The same file must also behave the same offchain and onchain. The tooling therefore rejects:
 
@@ -80,6 +81,25 @@ The same file must also behave the same offchain and onchain. The tooling theref
 - Formatting: `fmt`, `write!`, `writeln!` and `format_args!`. Backend `Debug` output differs, and
   `{:p}` prints addresses.
 - `unsafe`, `extern` items, `no_mangle`, `export_name`, `link_section` and `macro_rules!`.
+- Every macro other than `assert!`, `assert_eq!`, `assert_ne!`, `panic!`, `matches!` and
+  `unreachable!`, every rename (`use ... as`) to one of those names, and the names `asm`,
+  `global_asm`, `naked_asm` and `arch`. `core::arch::global_asm!` is safe code without `unsafe`
+  that emits native code. Linked into the offchain evaluator, it could run before `main`, for
+  example as a module initializer, while the Soroban compile rejects it.
+- Every attribute other than `allow`, `expect`, `warn`, `deny`, `forbid`, `derive`, `inline`, `cold`
+  and `must_use`, for example `track_caller` or `doc`.
+- List access other than through the list rules. `recipients` and `tokens` may appear only in the
+  call `allowit::<list>(<ctx>, &<ctx>.grant.<list>)`, with the same list name twice, and as
+  `AllowitRule` variants. A method call on a list, a write, `use allowit::recipients`, a struct
+  expression or pattern of `AllowitGrant` or `AllowitContext`, and struct update syntax `..`
+  reject. Soroban and heap vectors have different methods with the same names: for example
+  `append` drains its argument only on the host.
+- Sources of pointer-width `usize` values: indexing (`x[i]`, whose index Rust infers as `usize`)
+  and the `core` methods that produce, take or expose one, such as `len`, `count`, `position`,
+  `enumerate`, `nth`, `skip`, `take`, `get`, `find`, `from_fn`, `len_utf8`, `count_zeros`,
+  `leading_zeros` and `trailing_zeros`. `scripts/policy_source.py` holds the complete list, which
+  also includes host-only `as_str`. A `usize` is 32 bits onchain and 64 bits on the host, so
+  arithmetic, overflow, `!`, shifts and casts on it differ.
 
 The file must also not reach the dependencies of the including crate. In `AllowitCustomPolicy`
 those include `soroban_sdk`, whose `Env::default()` gives a live host environment, and the wallet
@@ -107,20 +127,29 @@ compiles:
   every tier. These tools need `rustc` (from `RUSTC` or `PATH`). The portability test below and the
   `policy` job of `.github/workflows/contracts.yml` also compile `scripts/policy-smoke.rs`, which
   includes the branch sources, the same way.
-- The Soroban compile builds the file into `AllowitCustomPolicy`. A host-only name, such as
-  `allowit::AllowitEnv` or `Address::as_str`, fails there. `scripts/build-contracts.sh` runs it for
+- The Soroban compile builds the file into `AllowitCustomPolicy`. A host-only item, such as
+  `Address::new`, fails there. `scripts/build-contracts.sh` runs it for
   the branch source. Build the reviewed custom Wasm from the owner source before deployment.
 
-One known boundary remains. Values whose type Rust infers as `usize` without naming it, such as a
-slice index or the result of `count()`, are 32 bits onchain and 64 bits on the host. Arithmetic or
-`wrapping_*`, `checked_*` and `overflowing_*` calls on them can therefore differ. Neither the
-lexical gate nor the two compiles can see an inferred type. Authored code must not compute with
-such values; it reads lists only through `recipients` and `tokens`.
+One boundary remains, because the lexical gate cannot see types. It rejects indexing and every
+known `core` method that produces or takes a `usize`. A `core` API outside that list that infers
+`usize` would pass both compiles and still behave differently. Add such an API to the list in
+`scripts/policy_source.py` when you find it.
 
 Integer overflow must behave the same: it panics, so the operation denies. The contract release
 profile sets `overflow-checks = true`. The offchain server must build with `overflow-checks = true`
 in every profile that evaluates policy, because Cargo's default release profile wraps on overflow.
 The std-only compile, the smoke and the portability test pass `-Coverflow-checks=on` explicitly.
+
+Execution must be bounded the same way. Onchain, the Soroban budget stops a policy that loops or
+recurses without end, and the operation denies. A host process has no such budget: `loop {}` never
+returns, and deep recursion overflows the stack, which aborts the whole process because Rust
+cannot catch a stack overflow. For Simple and Common wallets, the host run is the only evaluation
+of the full policy. The offchain server must therefore evaluate each policy in an isolated worker
+process with CPU-time, wall-clock, stack and memory limits. A timeout, crash, abort or panic of the
+worker counts as a denial. The worker must build with `panic = "unwind"` if it catches panics in
+process; otherwise the process boundary turns every panic into a denial. One owner's policy must
+not be able to stop or slow evaluations for other wallets.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec`, `Env` and contract types. Feature `std` uses heap strings and vectors
@@ -149,9 +178,9 @@ transfer-only custom contract or a negative cap, run only on the two backends. K
 same kernel error in all three contracts.
 
 Portable authored code beyond canonical calls uses typed scalar fields and enum comparisons, such
-as `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list methods differ (`len` returns
-`u32` onchain and `usize` on the host), so authored code reads lists only through `recipients` and
-`tokens`.
+as `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list methods differ (`len`
+returns `u32` onchain and `usize` on the host), so the tooling allows lists only as arguments of
+`recipients` and `tokens`.
 
 `AllowitContext` is the complete rule input. It is plain data without methods. The wallet or server
 computes it:

@@ -74,6 +74,44 @@ KEYWORDS = frozenset((
     "as", "async", "await", "box", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn",
     "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
     "static", "struct", "super", "trait", "type", "union", "unsafe", "use", "where", "while", "yield"))
+# Macros that authored code may invoke. Every other `name!` rejects: `core::arch::global_asm!`,
+# `asm!` and `naked_asm!` emit native code that would run inside the offchain evaluator process,
+# and other built-in macros read the build environment or source location.
+MACROS = frozenset(("assert", "assert_eq", "assert_ne", "panic", "matches", "unreachable"))
+MACRO_CALL = re.compile(r"(?:r#)?\b([A-Za-z_]\w*)\s*!(?!=)")
+# Attributes that authored code may use. Every other attribute rejects, such as `path`, `cfg`,
+# `unsafe(...)`, `link_section`, `export_name`, `track_caller` or `doc`.
+ATTRIBUTES = frozenset(("allow", "expect", "warn", "deny", "forbid", "derive", "inline", "cold", "must_use"))
+ATTRIBUTE = re.compile(r"#\s*\[\s*(?:r#)?([A-Za-z_]\w*)")
+# Backend-dependent code that the two compiles accept but that can give different results:
+# native code, the host environment type, and every `core` method that produces, takes or exposes
+# a pointer-width `usize` value or a backend list (32 bits onchain, 64 bits on the host; Soroban
+# and heap vectors differ, for example in `append`). `count_zeros` and its relatives expose the
+# width of an inferred `usize`.
+PORTABLE = (
+    (re.compile(r"\b(?:asm|global_asm|naked_asm|arch)\b"), "native code or `core::arch`"),
+    (re.compile(r"\bAllowitEnv\b"), "the host environment type `AllowitEnv`"),
+    (re.compile(r"\bas\s+(?:r#)?(?:" + "|".join(sorted(MACROS)) + r")\b"), "a rename to an allowed macro name"),
+    (re.compile(r"\b(?:len|count|position|rposition|enumerate|from_fn|nth|nth_back|skip|take|step_by|size_hint|"
+                r"chunks|chunks_exact|rchunks|windows|split_at|get|get_mut|swap|binary_search|binary_search_by|"
+                r"binary_search_by_key|partition_point|rotate_left|rotate_right|char_indices|match_indices|"
+                r"rmatch_indices|find|rfind|len_utf8|len_utf16|encode_utf8|is_char_boundary|floor_char_boundary|"
+                r"ceil_char_boundary|count_zeros|count_ones|leading_zeros|trailing_zeros|leading_ones|"
+                r"trailing_ones|repeat|truncate|insert|remove|swap_remove|with_capacity|capacity|split_off|drain|"
+                r"copy_within|select_nth_unstable|to_vec|into_vec|concat|join|append|as_str)\b"),
+     "a method that exposes pointer width, a backend list or host-only text"),
+    (re.compile(r"[{,]\s*\.\.(?![=.])\s*[^\s}\]),]"), "struct update syntax `..`"),
+)
+# Lists are read only through their rules, in exactly this form. Any other use of `recipients` or
+# `tokens`, such as a method call on a list, a write, a destructuring pattern or a bare call after
+# `use allowit::recipients`, rejects.
+LIST_CALL = re.compile(r"\ballowit\s*::\s*(recipients|tokens)\s*\(\s*&?\s*[A-Za-z_]\w*\s*,\s*&\s*[A-Za-z_]\w*\s*\."
+                       r"\s*grant\s*\.\s*(recipients|tokens)\s*,?\s*\)")
+LIST_VARIANT = re.compile(r"\bAllowitRule\s*::\s*(recipients|tokens)\b")
+LIST_NAME = re.compile(r"\b(?:recipients|tokens)\b")
+# A struct expression or pattern of the types that hold the lists and the environment. A return
+# type or an `impl ... for` target followed by a block is no struct expression.
+LIST_STRUCT = re.compile(r"\bAllowit(?:Grant|Context)\s*\{")
 TOKEN = re.compile(r"r#[A-Za-z_]\w*|[A-Za-z_]\w*|::|=>|->|\$\w*|'\w+|\d\w*|\S")
 IDENT = re.compile(r"(?:r#)?[A-Za-z_]\w*")
 
@@ -121,6 +159,40 @@ def path_roots(code):
                 if root not in ("::", "}") and (not IDENT.fullmatch(root) or (error := root_error(root))):
                     raise ValueError("Policy source must be one self-contained file; it uses a "
                                      + (error if IDENT.fullmatch(root) else "use tree rooted at " + root))
+
+
+def reject(what):
+    raise ValueError("Policy source must be one self-contained, portable file; it uses " + what)
+
+
+def portable(code):
+    """Raise ValueError for macros, attributes, environment writes, list access and indexing that
+    could behave differently in `AllowitCustomPolicy` and on the host."""
+    for found in MACRO_CALL.finditer(code):
+        if found[1] not in KEYWORDS and found[1] not in MACROS:
+            reject("macro `{}!`; only {} are allowed".format(found[1], ", ".join(m + "!" for m in sorted(MACROS))))
+    for found in ATTRIBUTE.finditer(code):
+        if found[1] not in ATTRIBUTES:
+            reject("attribute `{}`".format(found[1]))
+    for pattern, name in PORTABLE:
+        if pattern.search(code):
+            reject(name)
+    allowed = set()
+    for call in LIST_CALL.finditer(code):
+        if call[1] == call[2]:
+            allowed.update((call.start(1), call.start(2)))
+    allowed.update(found.start(1) for found in LIST_VARIANT.finditer(code))
+    if any(found.start() not in allowed for found in LIST_NAME.finditer(code)):
+        reject("`recipients` or `tokens` other than as `allowit::<list>(ctx, &ctx.grant.<list>)`")
+    for found in LIST_STRUCT.finditer(code):
+        before = re.sub(r"(?:&\s*(?:'\w+\s*)?(?:mut\s+)?)+$", "", code[:found.start()].rstrip()).rstrip()
+        if not (before.endswith("->") or re.search(r"\b(?:for|impl)$", before)):
+            reject("a struct expression or pattern of `AllowitGrant` or `AllowitContext`")
+    tokens = TOKEN.findall(code)
+    for before, token in zip(tokens, tokens[1:]):
+        if token == "[" and (before in (")", "]", "?") or before[:1].isdigit()
+                             or IDENT.fullmatch(before) and before not in KEYWORDS):
+            reject("indexing, whose index is a pointer-width `usize`")
 
 
 def rust_code(source):
@@ -173,10 +245,14 @@ def checked_code(source):
         field = before.endswith(".") and not before.endswith("..")
         if not field or after.startswith((".", "(")) or after.startswith("!") and not after.startswith("!="):
             raise ValueError("Policy source must be one self-contained file; it uses file or environment macro")
+        # `ctx.env` is read-only: no assignment and no `&mut` borrow that `core::mem` could replace.
+        if after.startswith("=") and not after.startswith("==") or re.search(r"&\s*mut\b[^;,{}]*\.$", before):
+            reject("a write to the `env` field")
     for pattern, name in OUTSIDE:
         if pattern.search(code):
             raise ValueError("Policy source must be one self-contained file; it uses " + name)
     path_roots(code)
+    portable(code)
     return code
 
 
