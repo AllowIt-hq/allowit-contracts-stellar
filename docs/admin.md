@@ -59,13 +59,15 @@ parent's `engine()` before the parent, engine reference or engine code expires. 
 fee source and `--auth-mode root`. The admin tool does not admit this maintenance invocation.
 Restore archived dependencies through separate reviewed transactions.
 
-Prepare `deploy-wallet --source "$OWNER" --config JSON --wasm PATH --wasm-hash HASH`.
+Prepare `deploy-wallet --source "$OWNER" --config JSON --wasm PATH --wasm-hash HASH --tier TIER --policy-source FILE`.
 Select `allowit_simple_policy_engine.wasm`, `allowit_common_policy_engine.wasm`, or a reviewed
 `allowit_custom_policy.wasm`. Config contains exactly `owner`, `agent`, `server`, `asset`,
 `policy_instance`, `source_digest`, `rules`, `grant`, and `x402_enabled`.
 The asset is an immutable native SAC. Identity and source digests are nonzero 32-byte hex strings.
-`rules` contains the owner's ordered standard prefix of canonical rule names. An empty Common list selects no local business checks. Simple and Custom use an empty list.
-The Custom sample's source digest must match its compiled source.
+`rules` contains the ordered standard prefix of canonical rule names. The tool derives it from the
+authored `--policy-source` file and rejects any other list: Common binds the source's prefix,
+Simple and Custom bind an empty list. `--tier custom` also requires `source_digest` to be the
+SHA-256 of that file. Owner `deploy_policy` packets take the same two options for the target tier.
 
 Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`

@@ -8,8 +8,8 @@ Three owner-controlled contract implementations share custody and administration
 
 Policy source is portable Rust against `crates/allowit`: `allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;`.
 The offchain server and CustomPolicy compile the file verbatim. The standard contract runs only its
-leading canonical calls, supplied by the owner as `rules`, and skips unset fields. Matching `rules`
-to the source is part of the owner's offchain authorization. Rules are pure checks over
+leading canonical calls, supplied by the owner as `rules`, and skips unset fields.
+`scripts/contract_admin.py` derives `rules` from the source. Rules are pure checks over
 `AllowitEnv` (typed Grant, protected history, request) and return their passing constraint or an
 error. The server uses `allowit = { default-features = false, features = ["std"] }`.
 
@@ -32,8 +32,8 @@ python3 -m unittest discover -s scripts/tests -v
 python3 scripts/artifacts.py --output PATH
 ```
 
-The CustomPolicy sample source is `crates/custom-policy/policy/policy.rs`. Its contract includes that
-file verbatim, and `build.rs` binds `SOURCE_HASH` to its bytes. No SDK code generation is involved.
+The CustomPolicy sample source is `crates/custom-policy/policy/policy.rs`. Its contract compiles that
+file verbatim as a module, and `build.rs` binds `SOURCE_HASH` to its bytes. No SDK code generation is involved.
 The canonical rules and their Grant fields are in `crates/allowit/`; the custody mixins are in
 `crates/policy-wallet/`. `scripts/policy-smoke.rs` compiles the sample against the host backend with
 plain `rustc`.
