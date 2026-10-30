@@ -222,8 +222,10 @@ stays plain data.
 server run the same function. It rolls the UTC day over, adds one call, adds `spent_units` to
 `spent` and `day_spent`, adds the amount and `gas_units` to `day_total`, and marks `unpriced` and
 `day_unpriced` for a request without expense bounds. It then applies the policy's writes, which may
-replace a standard key: owner-signed code is trusted, and no key is reserved. It always consumes
-the write buffer first, so no write outlives the operation.
+replace a standard key: owner-signed code is trusted, and no key is reserved. A merged state whose
+standard keys later operations could not decode, such as `calls` written as a `bool`, a negative
+`spent` or a later `day`, is `InvalidState`: the operation denies instead of locking the wallet.
+`post_flight` consumes the write buffer first, even when it fails.
 
 The server-only enrichment functions `price`, `fetch`, `internet_search`, `marketplace_search`,
 `systemone`, `request_screening` and `clear_systemone_context` exist only in the host backend.

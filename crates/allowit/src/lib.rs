@@ -24,7 +24,8 @@
 //!
 //! After approval, the wallet and the server run the same `post_flight`: it rolls the UTC day
 //! over, counts the call, adds spent and gross amounts, marks unpriced operations, then applies
-//! the policy's own `set_state` writes. The standard contract runs the leading canonical calls,
+//! the policy's own `set_state` writes, and denies a result whose standard keys do not decode. The
+//! standard contract runs the leading canonical calls,
 //! supplied by the owner as `rules`, through `preflight`, which skips unset fields.
 //!
 //! Portable authored code uses rule calls, `get_state` and `set_state`, typed scalar fields and

@@ -555,7 +555,15 @@ fn post_flight_and_state_access_reject_invalid_keys_values_days_and_overflow() {
             Err(AllowitError::InvalidState)
         );
         type Edit = fn(&mut AllowitContext);
-        let cases: [(Edit, AllowitError); 6] = [
+        let cases: [(Edit, AllowitError); 7] = [
+            // A standard key of another type fails the decode before any write applies.
+            (
+                |c| {
+                    c.state
+                        .set(Symbol::new(&c.env, "calls"), true.into_val(&c.env))
+                },
+                AllowitError::InvalidState,
+            ),
             (|c| edit(c, |s| s.day += 1), AllowitError::InvalidState),
             (|c| edit(c, |s| s.spent = -1), AllowitError::InvalidState),
             (
@@ -577,5 +585,34 @@ fn post_flight_and_state_access_reject_invalid_keys_values_days_and_overflow() {
                 Ok(None)
             );
         }
+    });
+}
+
+#[test]
+fn post_flight_denies_policy_writes_that_leave_standard_state_undecodable() {
+    let env = Env::default();
+    let id = env.register(Scope, ());
+    let ctx = fixture(&env);
+    env.as_contract(&id, || {
+        type Write = fn(&AllowitContext) -> Result;
+        let writes: [Write; 5] = [
+            |c| set_state(c, "calls", true),
+            |c| set_state(c, "spent", -1i128),
+            |c| set_state(c, "day_total", -1i128),
+            |c| set_state(c, "day", c.request.now / DAY + 1),
+            |c| set_state(c, "unpriced", 1u64),
+        ];
+        for write in writes {
+            write(&ctx).unwrap();
+            // Stored, the write would fail every later operation; the operation denies instead.
+            assert_eq!(post_flight(&ctx), Err(AllowitError::InvalidState));
+            assert!(post_flight(&ctx).is_ok());
+        }
+        // Valid replacements of standard keys still apply last.
+        set_state(&ctx, "day", 0u64).unwrap();
+        set_state(&ctx, "spent", 0i128).unwrap();
+        let next = post_flight(&ctx).unwrap();
+        assert_eq!(read::<u64>(&env, &next, "day"), Ok(Some(0)));
+        assert_eq!(read::<i128>(&env, &next, "spent"), Ok(Some(0)));
     });
 }

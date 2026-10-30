@@ -414,17 +414,28 @@ pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
     Ok(())
 }
 
-/// State after an approved operation, computed by the wallet and the server alike: roll the UTC
-/// day over, count the call, add spent and gross amounts, mark an unpriced request, then apply the
-/// policy's buffered writes. It always clears the write buffer first.
-pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
-    let writes = take_writes(&ctx.env);
-    let mut s = standard(ctx)?;
-    let (day_spent, day_total, day_unpriced) = daily(ctx, &s)?;
-    let r = &ctx.request;
-    if s.spent < 0 || day_spent < 0 || day_total < 0 {
+/// Standard values of `state` and its daily values on the request's day. A value of another type,
+/// a negative amount or a later day is `InvalidState`.
+fn decode(
+    ctx: &AllowitContext,
+    state: &AllowitStateMap,
+) -> Result<(AllowitStandardState, (i128, i128, bool))> {
+    let s = AllowitStandardState::read(&ctx.env, state)?;
+    let d = daily(ctx, &s)?;
+    if s.spent < 0 || d.0 < 0 || d.1 < 0 {
         return Err(AllowitError::InvalidState);
     }
+    Ok((s, d))
+}
+
+/// State after an approved operation, computed by the wallet and the server alike: roll the UTC
+/// day over, count the call, add spent and gross amounts, mark an unpriced request, then apply the
+/// policy's buffered writes. It clears the write buffer first, even when it fails. A result that
+/// later operations could not decode is `InvalidState`, so a policy write cannot lock the wallet.
+pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
+    let writes = take_writes(&ctx.env);
+    let (mut s, (day_spent, day_total, day_unpriced)) = decode(ctx, &ctx.state)?;
+    let r = &ctx.request;
     s.calls = s.calls.checked_add(1).ok_or(AllowitError::Overflow)?;
     s.day = r.now / DAY;
     s.spent = sum(s.spent, contribution(&[r.spent_units])?)?;
@@ -435,6 +446,7 @@ pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
     let mut state = ctx.state.clone();
     s.write(&ctx.env, &mut state)?;
     merge(&mut state, writes);
+    decode(ctx, &state)?;
     Ok(state)
 }
 
