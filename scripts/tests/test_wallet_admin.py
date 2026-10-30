@@ -431,11 +431,13 @@ class ContractAdmin(unittest.TestCase):
             (call("expiry") + "    if ctx.request.operation == AllowitOperation::sep56_deposit {\n" + call("spent_cap") + "    }\n", ["expiry"]),
             (call("expiry") + "    allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n" + call("tokens"), ["expiry"]),
         ]
-        vectors += [(call(name) + call("expiry"), []) for name in
-                    ("set_cap_per_day", "cap_per_transaction", "require_recipient", "require_asset", "allow_actions", "state_remove", "fail")]
         for body, expected in vectors:
             with self.subTest(body=body):
                 self.assertEqual(ca.standard_prefix(source(body)), expected)
+        # Removed rule names are not on the allowlist.
+        for name in ("set_cap_per_day", "cap_per_transaction", "require_recipient", "require_asset", "allow_actions", "state_remove", "fail"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "allowlist"):
+                ca.standard_prefix(source(call(name) + call("expiry")))
         explicit = HEAD.replace("allowit::Result {", "allowit::Result<()> {")
         self.assertEqual(ca.standard_prefix(source(call("tokens"), explicit)), ["tokens"])
         # Calls in other functions are not part of execute.
@@ -658,14 +660,15 @@ class ContractAdmin(unittest.TestCase):
             digest = hashlib.sha256(policy.read_bytes()).hexdigest()
             with self.assertRaisesRegex(ValueError, "self-contained"):
                 ca.policy_rules({"rules": [], "source_digest": digest}, "custom", str(policy))
-        # Inline modules and mentions in comments or literals stay valid.
-        allowed = ('mod helpers { pub fn one() -> u8 { 1 } }\n// include!("x")\nconst S: &str = "mod other;";\n'
-                   "const T: &str = \"crate::x cfg!(test) ::core\";\npub(crate) fn two() -> u8 { Vec::<u8>::new().is_empty() as u8 + 2 }\n"
-                   "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n"
-                   "fn four(x: &[i128]) -> i128 { x.iter().sum::<i128>() + i128::MAX.min(0) + Option::<i128>::None.unwrap_or(0) }\n"
-                   "use allowit::{AllowitError as Denied, DAY};\nfn five() -> Denied { Denied::MissingGrant }\n"
+        # Helper functions, constants and mentions in comments or literals stay valid.
+        allowed = ('fn one() -> u8 { 1 }\n// include!("x")\nconst S: &str = "mod other;";\n'
+                   "const T: &str = \"crate::x cfg!(test) ::core\";\npub fn two() -> u8 { one() + 2 }\n"
+                   "fn three(file: u8, x: u8) -> u8 { u8::from(true) + file + x }\n"
+                   "fn four(x: i128) -> i128 { x.saturating_add(i128::MAX.min(0)) + Option::None.unwrap_or(0) }\n"
+                   "use allowit::{AllowitError, DAY};\nfn five() -> AllowitError { AllowitError::MissingGrant }\n"
+                   "const LIMIT: u64 = DAY * 2;\n"
                    "fn six(ctx: &AllowitContext) -> AllowitContext { let c = &ctx . env; let _ = c; ctx.clone() }\n"
-                   "fn seven<'a>(x: &'static str, y: &'a str) -> bool { x != y && 0u32 != 1 }\n")
+                   "fn seven<'a>(x: &'static str, y: &'a str) -> bool { x != y && 0u32 != 1 && LIMIT > 1 }\n")
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
         # The `AllowitCustomPolicy` sources pass the same check.
         for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs",
@@ -690,16 +693,19 @@ class ContractAdmin(unittest.TestCase):
                 ca.checked_code(sdk)
             with self.assertRaisesRegex(ValueError, "std-only compile"):
                 compiled(sdk)
-            # Code that passes the lexical gate but compiles only onchain or diverges between the
-            # backends: Soroban methods of an aliased environment or an address, address order and
-            # std prelude macros.
+            # Soroban methods of an aliased environment or an address and std prelude items are
+            # off the allowlist.
             for body in ("    let _ = allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n    let e = &ctx.env;\n"
                          "    e.storage().temporary().has(&0u32);\n",
-                         "    if ctx.request.asset < ctx.request.recipient {\n        return Err(AllowitError::RecipientNotAllowed);\n    }\n",
-                         "    let _ = ctx.request.asset.clone().max(ctx.request.recipient.clone());\n",
                          "    ctx.request.recipient.require_auth();\n",
                          "    let _ = Box::new(ctx.request.amount);\n",
                          "    let _ = ctx.request.recipient.to_string();\n"):
+                with self.subTest(body=body), self.assertRaisesRegex(ValueError, "allowlist"):
+                    ca.checked_code(source(body))
+            # Address order passes the allowlist; the std-only compile rejects it, because the
+            # host `Address` has no order.
+            for body in ("    if ctx.request.asset < ctx.request.recipient {\n        return Err(AllowitError::RecipientNotAllowed);\n    }\n",
+                         "    let _ = ctx.request.asset.clone().max(ctx.request.recipient.clone());\n"):
                 text = source(body)
                 with self.subTest(body=body):
                     ca.checked_code(text)
@@ -757,8 +763,7 @@ class ContractAdmin(unittest.TestCase):
             for text in (code + source("", head), source("", head) + code):
                 with self.subTest(source=text), self.assertRaisesRegex(ValueError, "self-contained"):
                     ca.standard_prefix(text)
-        # The detaching probe passes the std-only compile, so only the gate rejects it. The host
-        # record still denies its caught failure: see `scripts/policy-smoke.rs`.
+        # The detaching probe passes the std-only compile, so only the gate rejects it.
         detach = source("    let mut d = ctx.clone();\n    d.env = allowit::AllowitEnv::new();\n"
                         "    if let Err(e) = allowit::spent_cap(&d, &d.grant.spent_cap) {\n        let _ = e;\n    }\n", head)
         with tempfile.TemporaryDirectory() as directory:
@@ -773,16 +778,61 @@ class ContractAdmin(unittest.TestCase):
         # Portable code beside them stays valid.
         allowed = ("fn a(x: bool) -> bool { if !x { return !x; } assert!(x != !x); matches!(Some(1u8), Some(_)) }\n"
                    "#[inline]\n#[allow(dead_code)]\nfn b(c: &AllowitContext) -> AllowitGrant { c.grant.clone() }\n"
-                   "trait T {}\nimpl T for AllowitContext {}\nfn d(c: &AllowitContext) -> &AllowitContext { c }\n"
+                   "fn d(c: &AllowitContext) -> &AllowitContext { c }\n"
                    "use allowit::AllowitRule;\nfn e(r: AllowitRule) -> bool { r == AllowitRule::tokens || r == allowit::AllowitRule::recipients }\n"
                    "fn f(ctx: &AllowitContext) -> allowit::Result { let c = ctx.clone(); allowit::tokens(&c, &c.grant.tokens)?; Ok(()) }\n"
-                   "fn h(a: [u8; 2]) -> u64 { let [x, y] = a; let s: &[u8] = &[x, y]; s.iter().map(|v| *v as u64).sum() }\n"
-                   "fn i(c: &AllowitContext) -> u64 { let e = &c.env; let _ = e; (0..3u64).map(|x| x + c.request.now).max().unwrap_or(0) }\n")
+                   "fn h(pair: [u8; 2]) -> u64 { let [x, y] = pair; u64::from(x) + u64::from(y) }\n"
+                   "fn i(c: &AllowitContext) -> u64 { let held = &c.env; let _ = held; let mut n = 0u64; for x in 0..3u64 { n = n.max(x + c.request.now); } n }\n"
+                   "fn j(c: &AllowitContext) -> allowit::Result<u64> { let n: Option<u64> = allowit::get_state(c, \"seen\")?; "
+                   "allowit::set_state(c, \"seen\", n.unwrap_or(0).saturating_add(1))?; Ok(n.unwrap_or(0)) }\n"
+                   "fn k(c: &AllowitContext) -> bool { c.request.spent_units.checked_add(c.request.gas_units).is_some() && !c.request.unpriced }\n")
         self.assertEqual(ca.standard_prefix(allowed + source("", head)), ["recipients"])
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
             policy.write_text(allowed + source("", head))
             ca.host_compile(policy)
+
+    def test_policy_source_rejects_pointer_width_and_address_probes(self):
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        head = HEAD + call("recipients")
+        # The review probe: a 64-bit host skips the cap that a 32-bit contract enforces.
+        probe = ("    let wide = core::num::NonZeroUsize::MAX.ilog2() == 63;\n    if !wide {\n"
+                 "        allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n    }\n")
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(source(probe, head))
+            # It passes the std-only compile, so only the allowlist rejects it.
+            ca.host_compile(policy)
+        probes = (
+            probe,
+            "    let _ = core::num::NonZeroIsize::MAX.ilog10();\n",
+            "    let _ = u64::MAX.ilog2() + u64::MAX.checked_ilog10().unwrap_or(0);\n",
+            "    let _ = u64::MAX.ilog(3);\n",
+            "    let _ = core::str::from_utf8(&[0xffu8]).unwrap_err().valid_up_to();\n",
+            "    let _ = u8::MAX.count_ones();\n",
+            "    let _ = 1usize;\n",
+            "    let _ = 1.5;\n",
+            "    let _ = 1e3;\n",
+            "    let _ = ctx.request.amount as u64;\n",
+            # Function values and non-capturing closures coerce to pointers whose order is code layout.
+            "    let a = if true { |x: u8| x } else { |x: u8| x + 1 };\n",
+            "    let _ = ctx.request.amount.checked_add(1).map(|x| x);\n",
+            "    let f = allowit::spent_cap;\n",
+            "    let _ = [i128::from, i128::from];\n",
+            "    let p: fn(&AllowitContext) -> allowit::Result = execute;\n",
+            "    let _ = if true { execute } else { execute };\n",
+            "    let _ = core::cmp::max::<u8>;\n",
+            # Raw pointers expose addresses.
+            "    let _ = &raw const ctx.request.amount;\n",
+            "    let _: *const i128 = &ctx.request.amount;\n",
+            # Generic and qualified paths reach APIs beyond the allowlist.
+            "    let _ = <u64>::MAX.leading_zeros();\n",
+            "    let _ = Option::<u64>::None;\n",
+            "    let _ = ctx.state.clone();\n",
+        )
+        for body in probes:
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
+                ca.standard_prefix(source(body, head))
 
     def test_wallet_code_changes_require_custody_layout_3(self):
         self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"3"))), 3)

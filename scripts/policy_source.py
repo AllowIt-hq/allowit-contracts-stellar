@@ -33,47 +33,17 @@ CHAR = re.compile(r"(?<![A-Za-z0-9_])b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{
 # identifier declares or imports a replacement (`mod allowit`, `use x as allowit`, `fn allowit`,
 # `macro_rules! allowit`, `let allowit`) or reaches another module (`self::allowit`).
 ALLOWIT_NAME = re.compile(r"\ballowit\b")
-# Code that reads other files, the build environment or the including crate, so the one hashed
-# file would not be the whole policy, or that can behave differently in `AllowitCustomPolicy` and on
-# the host: `#[path]`, `cfg_attr` (which can add `path`), an out-of-line module, `extern` items,
-# `unsafe` code and symbol attributes, macro definitions (which can assemble paths that the root
-# check below cannot see), conditional compilation, debug-only assertions, mutable statics (which
-# keep values across host evaluations but start again in every contract instance), and location,
-# type, layout, width, pointer and formatting introspection. File and environment macros are
-# checked by `MACRO_NAMES`, and path roots by `path_roots`.
+# Attributes that read other files or the build environment, and raw pointers, whose addresses
+# differ between the contract and the host. Every other construct must pass the allowlist below.
 OUTSIDE = (
     (re.compile(r"#\s*\[\s*path\b"), "#[path] attribute"),
     (re.compile(r"\bcfg_attr\b"), "cfg_attr attribute"),
-    (re.compile(r"\bmod\s+[^{};]*;"), "out-of-line module"),
-    (re.compile(r"\bextern\b"), "extern item"),
-    (re.compile(r"\b(?:unsafe|no_mangle|export_name|link_section)\b"), "unsafe code or symbol attribute"),
-    (re.compile(r"\bmacro_rules\b"), "macro definition"),
-    (re.compile(r"\bcfg\b"), "conditional compilation"),
-    (re.compile(r"\bdebug_assert(?:_eq|_ne)?\b"), "debug-only assertion"),
-    (re.compile(r"(?<!')\bstatic\b"), "static item"),
-    (re.compile(r"\b(?:module_path|type_name|type_name_of_val|Location|caller|TypeId|type_id|size_of|size_of_val|"
-                r"align_of|align_of_val|needs_drop|Layout|offset_of|BITS|usize|isize)\b|\bfile\s*!"),
-     "location, type, layout or width introspection"),
-    (re.compile(r"\*\s*(?:const|mut)\b|\b(?:ptr|addr_of|addr_of_mut|as_ptr|as_mut_ptr|expose_provenance)\b|\.\s*addr\s*\("),
-     "pointer introspection"),
-    (re.compile(r"\b(?:fmt|write|writeln|format_args)\b"), "formatting"),
-    (re.compile(r"\b(?:crate|super|self)\s*::"), "path into the including crate"),
+    (re.compile(r"\*\s*(?:const|mut)\b|\braw\s+(?:const|mut)\b"), "a raw pointer"),
 )
 # File and environment macros. Their names may appear only as the bare context field read
 # `ctx.env`: after a single `.` and not followed by `.`, `(` or `!`, so neither `ctx.env.<method>`
 # nor a value's `env()` method, such as the Soroban `Address::env`, passes.
 MACRO_NAMES = re.compile(r"\b(?:include|include_str|include_bytes|env|option_env)\b")
-# Path roots that name the same thing in every including crate: the canonical crate, `core` and
-# the fixed-width primitive types. A capitalized root is a type, trait, enum or generic parameter;
-# no crate in the extern prelude of an including crate has a capitalized name. Every other root,
-# such as `soroban_sdk`, `std`, `alloc` or `allowit_policy_wallet`, can reach a dependency of the
-# including crate, and a lowercase local name cannot be told apart from one lexically.
-ROOTS = frozenset(("allowit", "core", "bool", "char", "str", "f32", "f64") + tuple(
-    sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 128)))
-KEYWORDS = frozenset((
-    "as", "async", "await", "box", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn",
-    "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
-    "static", "struct", "super", "trait", "type", "union", "unsafe", "use", "where", "while", "yield"))
 # Macros that authored code may invoke. Every other `name!` rejects: `core::arch::global_asm!`,
 # `asm!` and `naked_asm!` emit native code that would run inside the offchain evaluator process,
 # and other built-in macros read the build environment or source location.
@@ -81,27 +51,66 @@ MACROS = frozenset(("assert", "assert_eq", "assert_ne", "panic", "matches", "unr
 MACRO_CALL = re.compile(r"(?:r#)?\b([A-Za-z_]\w*)\s*!(?!=)")
 # Attributes that authored code may use. Every other attribute rejects, such as `path`, `cfg`,
 # `unsafe(...)`, `link_section`, `export_name`, `track_caller` or `doc`.
-ATTRIBUTES = frozenset(("allow", "expect", "warn", "deny", "forbid", "derive", "inline", "cold", "must_use"))
+ATTRIBUTES = frozenset(("allow", "expect", "warn", "deny", "forbid", "inline", "cold", "must_use"))
 ATTRIBUTE = re.compile(r"#\s*\[\s*(?:r#)?([A-Za-z_]\w*)")
-# Backend-dependent code that the two compiles accept but that can give different results:
-# native code, the host environment type, and every `core` method that produces, takes or exposes
-# a pointer-width `usize` value or a backend list (32 bits onchain, 64 bits on the host; Soroban
-# and heap vectors differ, for example in `append`). `count_zeros` and its relatives expose the
-# width of an inferred `usize`.
-PORTABLE = (
-    (re.compile(r"\b(?:asm|global_asm|naked_asm|arch)\b"), "native code or `core::arch`"),
-    (re.compile(r"\bAllowitEnv\b"), "the host environment type `AllowitEnv`"),
-    (re.compile(r"\bas\s+(?:r#)?(?:" + "|".join(sorted(MACROS)) + r")\b"), "a rename to an allowed macro name"),
-    (re.compile(r"\b(?:len|count|position|rposition|enumerate|from_fn|nth|nth_back|skip|take|step_by|size_hint|"
-                r"chunks|chunks_exact|rchunks|windows|split_at|get|get_mut|swap|binary_search|binary_search_by|"
-                r"binary_search_by_key|partition_point|rotate_left|rotate_right|char_indices|match_indices|"
-                r"rmatch_indices|find|rfind|len_utf8|len_utf16|encode_utf8|is_char_boundary|floor_char_boundary|"
-                r"ceil_char_boundary|count_zeros|count_ones|leading_zeros|trailing_zeros|leading_ones|"
-                r"trailing_ones|repeat|truncate|insert|remove|swap_remove|with_capacity|capacity|split_off|drain|"
-                r"copy_within|select_nth_unstable|to_vec|into_vec|concat|join|append|as_str)\b"),
-     "a method that exposes pointer width, a backend list or host-only text"),
-    (re.compile(r"[{,]\s*\.\.(?![=.])\s*[^\s}\]),]"), "struct update syntax `..`"),
-)
+
+# The allowlist. Authored code is portable only when every name in it has the same meaning and
+# result in `AllowitCustomPolicy` and on the host, where `usize` is 32 and 64 bits wide, backend
+# lists differ and code addresses differ. Each identifier is one of: an allowed keyword; a field
+# or method after `.`; a path from `PATHS`; a type from `TYPES`, a constant the file defines or a
+# type it imports from `allowit`; or another lowercase local name. Pointer-width types, float and
+# `usize` literals, casts, closures and function values reject, because each can observe a
+# pointer width or a code address. Onchain resource limits still deny a policy that the host
+# evaluates to completion, such as deep recursion; that difference only denies.
+RUST_KEYWORDS = frozenset((
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn",
+    "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "macro",
+    "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return", "self", "Self", "static",
+    "struct", "super", "trait", "true", "try", "type", "typeof", "union", "unsafe", "unsized", "use",
+    "virtual", "where", "while", "yield"))
+# Functions, constants, control flow and `use allowit::...`. No modules, types, traits, impls,
+# statics, unsafe code, casts (`as`), paths into the including crate or `move` closures.
+ALLOWED_KEYWORDS = frozenset((
+    "break", "const", "continue", "else", "false", "fn", "for", "if", "in", "let", "loop", "match", "mut",
+    "pub", "ref", "return", "true", "use", "while"))
+INTEGERS = tuple(sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 128))
+# Primitive types whose width or representation differs between the backends.
+NOT_PORTABLE = frozenset(("usize", "isize", "f16", "f32", "f64", "f128"))
+ERRORS = ("MissingGrant", "TransactionCapExceeded", "SpentCapExceeded", "DaySpentCapExceeded", "DayTotalCapExceeded",
+          "CallCapExceeded", "RecipientNotAllowed", "TokenNotAllowed", "Expired", "Unpriced", "InvalidParameter",
+          "InvalidState", "Overflow", "Unsupported")
+ENUMS = {"AllowitOperation": ("sep41_transfer", "sep56_deposit"), "AllowitError": ERRORS, "AllowitRule": GRANT_FIELDS}
+# Server-only enrichment: allowed offchain; a Custom contract that calls one does not compile.
+SERVER_FUNCTIONS = ("price", "fetch", "internet_search", "marketplace_search", "systemone", "request_screening",
+                    "clear_systemone_context")
+ALLOWIT_FUNCTIONS = GRANT_FIELDS + ("get_state", "set_state") + SERVER_FUNCTIONS
+ALLOWIT_TYPES = ("AllowitContext", "AllowitError", "AllowitGrant", "AllowitOperation", "AllowitRequest", "AllowitRule",
+                 "Address", "Result", "DAY")
+TYPES = frozenset(ALLOWIT_TYPES + ("Option", "Some", "None", "Ok", "Err"))
+FUNCTION_PATHS = frozenset(["allowit::" + name for name in ALLOWIT_FUNCTIONS]
+                           + [t + "::" + f for t in INTEGERS for f in ("from", "try_from")]
+                           + ["core::cmp::min", "core::cmp::max"])
+PATHS = FUNCTION_PATHS | frozenset(
+    ["allowit::" + name for name in ALLOWIT_TYPES] + ["allowit::prelude"]
+    + [prefix + enum + "::" + variant for enum, variants in ENUMS.items() for variant in variants
+       for prefix in ("", "allowit::")]
+    + ["Option::Some", "Option::None", "Result::Ok", "Result::Err"]
+    + [t + "::" + c for t in INTEGERS for c in ("MAX", "MIN")]
+    + ["core::cmp::Ordering"] + ["core::cmp::Ordering::" + o for o in ("Less", "Equal", "Greater")])
+# Context, Grant and request fields. `ctx.state` is read only through `allowit::get_state`.
+FIELDS = frozenset(("env", "grant", "request") + GRANT_FIELDS + (
+    "operation", "asset", "recipient", "amount", "now", "expires_at", "spent_units", "gas_units", "unpriced"))
+# Methods of `Option`, `Result`, fixed-width integers, `bool` and `Ordering` that take and return
+# no pointer-width value and no backend list.
+METHODS = frozenset((
+    "clone", "eq", "ne", "lt", "le", "gt", "ge", "cmp", "partial_cmp", "min", "max", "clamp",
+    "is_some", "is_none", "is_some_and", "is_none_or", "is_ok", "is_err", "is_ok_and", "is_err_and", "ok", "err",
+    "ok_or", "unwrap", "expect", "unwrap_or", "unwrap_or_default", "copied", "cloned", "as_ref", "xor", "or", "and",
+    "checked_add", "checked_sub", "checked_mul", "checked_div", "checked_rem", "checked_neg", "checked_abs",
+    "checked_pow", "saturating_add", "saturating_sub", "saturating_mul", "saturating_pow", "pow", "abs", "abs_diff",
+    "unsigned_abs", "signum", "is_positive", "is_negative", "div_euclid", "rem_euclid",
+    "is_lt", "is_le", "is_gt", "is_ge", "is_eq", "is_ne", "reverse", "then_some"))
+NUMBER = re.compile(r"(?:0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|[0-9][0-9_]*)(?:" + "|".join(INTEGERS) + r")?")
 # Lists are read only through their rules, in exactly this form. Any other use of `recipients` or
 # `tokens`, such as a method call on a list, a write, a destructuring pattern or a bare call after
 # `use allowit::recipients`, rejects.
@@ -110,73 +119,126 @@ LIST_CALL = re.compile(r"\ballowit\s*::\s*(recipients|tokens)\s*\(\s*&?\s*[A-Za-
 LIST_VARIANT = re.compile(r"\bAllowitRule\s*::\s*(recipients|tokens)\b")
 LIST_NAME = re.compile(r"\b(?:recipients|tokens)\b")
 # A struct expression or pattern of the types that hold the lists and the environment. A return
-# type or an `impl ... for` target followed by a block is no struct expression.
+# type followed by a block is no struct expression.
 LIST_STRUCT = re.compile(r"\bAllowit(?:Grant|Context)\s*\{")
 TOKEN = re.compile(r"r#[A-Za-z_]\w*|[A-Za-z_]\w*|::|=>|->|\$\w*|'\w+|\d\w*|\S")
 IDENT = re.compile(r"(?:r#)?[A-Za-z_]\w*")
-
-
-def root_error(name):
-    """Return why a path root is not allowed, or None."""
-    name = name.removeprefix("r#")
-    if name in ROOTS or name[:1].isupper():
-        return None
-    return "path rooted at `{}`; roots must be `allowit`, `core`, a primitive type or a capitalized type".format(name)
-
-
-def use_roots(tokens, i):
-    """Yield the root token of each tree of the `use` declaration whose tree starts at tokens[i]."""
-    if i >= len(tokens):
-        return
-    if tokens[i] != "{":
-        yield tokens[i]
-        return
-    depth, start = 0, i + 1
-    for j in range(i, len(tokens)):
-        depth += (tokens[j] == "{") - (tokens[j] == "}")
-        if depth == 1 and tokens[j] == "," or depth == 0:
-            yield from use_roots(tokens, start)
-            start = j + 1
-        if depth == 0:
-            return
-
-
-def path_roots(code):
-    """Raise ValueError when a path or `use` tree starts at a root other than `ROOTS` or a capitalized
-    name. A bare `::` root, after a keyword or punctuation other than `>`, reaches the extern prelude."""
-    tokens = TOKEN.findall(code)
-    for i, token in enumerate(tokens):
-        before = tokens[i - 1] if i else ""
-        if token == "::":
-            if not IDENT.fullmatch(before) and before != ">" or before in KEYWORDS:
-                raise ValueError("Policy source must be one self-contained file; it uses a path rooted at ::")
-            # A segment after `::` or `.` (method turbofish), or before `<` (turbofish), is no root.
-            segment = i >= 2 and tokens[i - 2] in ("::", ".") or tokens[i + 1:i + 2] == ["<"]
-            if IDENT.fullmatch(before) and not segment and (error := root_error(before)):
-                raise ValueError("Policy source must be one self-contained file; it uses a " + error)
-        elif token == "use" and before != ".":
-            for root in use_roots(tokens, i + 1):
-                if root not in ("::", "}") and (not IDENT.fullmatch(root) or (error := root_error(root))):
-                    raise ValueError("Policy source must be one self-contained file; it uses a "
-                                     + (error if IDENT.fullmatch(root) else "use tree rooted at " + root))
+# Tokens after which `|` starts a closure rather than an `|` operator or pattern alternative.
+CLOSURE_BEFORE = frozenset(("", "(", "[", "{", ",", ";", "=", "=>", "return", "move", "!", "&", "&&", ":"))
 
 
 def reject(what):
     raise ValueError("Policy source must be one self-contained, portable file; it uses " + what)
 
 
+def uses(tokens, i):
+    """Check the `use` declaration at tokens[i]; return the capitalized names it imports and the index
+    after its `;`. Only `use allowit::prelude::*;` and imports of `allowit` types are allowed."""
+    end = tokens.index(";", i) if ";" in tokens[i:] else len(tokens)
+    tree = "".join(tokens[i + 1:end])
+    if tree == "allowit::prelude::*":
+        return set(), end + 1
+    names = tree[len("allowit::{"):-1].split(",") if tree.startswith("allowit::{") and tree.endswith("}") else (
+        [tree[len("allowit::"):]] if tree.startswith("allowit::") else [])
+    names = [name for name in names if name]
+    if not names or any(name not in ALLOWIT_TYPES for name in names):
+        reject("`use " + tree + "`; only `use allowit::prelude::*` and `allowit` types may be imported")
+    return set(names), end + 1
+
+
+def after_generics(tokens, j):
+    """Return the index after the generic arguments that start with `<` at tokens[j]."""
+    depth = 0
+    for k in range(j, len(tokens)):
+        depth += (tokens[k] == "<") - (tokens[k] == ">")
+        if depth == 0:
+            return k + 1
+    reject("unterminated generic arguments")
+
+
+def allowlisted(code):
+    """Raise ValueError unless every identifier, path, method, field and literal of `code` is on the
+    allowlist. Comments and literals are already removed."""
+    if not code.isascii():
+        reject("a non-ASCII identifier")
+    tokens = TOKEN.findall(code)
+    local_fns = {tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "fn"}
+    defined = {tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "const" and IDENT.fullmatch(tokens[k + 1])}
+    i = 0
+    while i < len(tokens):
+        token, before = tokens[i], tokens[i - 1] if i else ""
+        after = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if token == "use":
+            imported, i = uses(tokens, i)
+            defined |= imported
+            continue
+        if token[0].isdigit():
+            if before != "." and (not NUMBER.fullmatch(token) or after == "." and tokens[i + 2:i + 3] != ["."]
+                                  and not IDENT.fullmatch(tokens[i + 2] if i + 2 < len(tokens) else "")):
+                reject("the literal `{}`; only integer literals with fixed-width suffixes are portable".format(token))
+            i += 1
+            continue
+        if token == "::":
+            reject("a path that does not start at an allowed name")
+        if token == "|" and before in CLOSURE_BEFORE:
+            reject("a closure, which can become a function pointer whose address differs between the backends")
+        if not IDENT.fullmatch(token):
+            i += 1
+            continue
+        name = token.removeprefix("r#")
+        if token == name and name in RUST_KEYWORDS:
+            if name not in ALLOWED_KEYWORDS:
+                reject("the keyword `{}`".format(name))
+            if name == "fn" and not IDENT.fullmatch(after):
+                reject("a function pointer type, whose address differs between the backends")
+            i += 1
+            continue
+        if after == "!" and tokens[i + 2:i + 3] != ["="]:
+            i += 1  # A macro name; `portable` checks it.
+            continue
+        if before == "." and tokens[i - 2:i - 1] != ["."]:
+            if after in ("(", "::"):
+                if name not in METHODS:
+                    reject("the method `{}`, which is not on the portable allowlist".format(name))
+            elif name not in FIELDS:
+                reject("the field `{}`, which is not on the portable allowlist".format(name))
+            i += 1
+            continue
+        segments, j = [name], i + 1
+        while tokens[j:j + 1] == ["::"] and j + 1 < len(tokens) and IDENT.fullmatch(tokens[j + 1]):
+            segments.append(tokens[j + 1].removeprefix("r#"))
+            j += 2
+        turbofish = tokens[j:j + 2] == ["::", "<"]
+        if len(segments) > 1 or turbofish:
+            path = "::".join(segments)
+            if path not in PATHS:
+                reject("the path `{}`, which is not on the portable allowlist".format(path))
+            call = after_generics(tokens, j + 1) if turbofish else j
+            if path in FUNCTION_PATHS and tokens[call:call + 1] != ["("]:
+                reject("the function `{}` as a value, whose address differs between the backends".format(path))
+            i = j + 1 if turbofish else j
+            continue
+        if name[0].isupper():
+            if name not in TYPES and name not in defined:
+                reject("the name `{}`, which is not on the portable allowlist".format(name))
+        elif name in NOT_PORTABLE:
+            reject("the type `{}`, whose width or representation differs between the backends".format(name))
+        elif name in local_fns and after != "(" and before != "fn":
+            reject("the function `{}` as a value, whose address differs between the backends".format(name))
+        i += 1
+
+
 def portable(code):
     """Raise ValueError for macros, attributes, environment writes, list access and indexing that
-    could behave differently in `AllowitCustomPolicy` and on the host."""
+    could behave differently in `AllowitCustomPolicy` and on the host, then apply the allowlist."""
     for found in MACRO_CALL.finditer(code):
-        if found[1] not in KEYWORDS and found[1] not in MACROS:
+        if found[1] not in RUST_KEYWORDS and found[1] not in MACROS:
             reject("macro `{}!`; only {} are allowed".format(found[1], ", ".join(m + "!" for m in sorted(MACROS))))
     for found in ATTRIBUTE.finditer(code):
         if found[1] not in ATTRIBUTES:
             reject("attribute `{}`".format(found[1]))
-    for pattern, name in PORTABLE:
-        if pattern.search(code):
-            reject(name)
+    if re.search(r"[{,]\s*\.\.(?![=.])\s*[^\s}\]),]", code):
+        reject("struct update syntax `..`")
     allowed = set()
     for call in LIST_CALL.finditer(code):
         if call[1] == call[2]:
@@ -186,13 +248,14 @@ def portable(code):
         reject("`recipients` or `tokens` other than as `allowit::<list>(ctx, &ctx.grant.<list>)`")
     for found in LIST_STRUCT.finditer(code):
         before = re.sub(r"(?:&\s*(?:'\w+\s*)?(?:mut\s+)?)+$", "", code[:found.start()].rstrip()).rstrip()
-        if not (before.endswith("->") or re.search(r"\b(?:for|impl)$", before)):
+        if not before.endswith("->"):
             reject("a struct expression or pattern of `AllowitGrant` or `AllowitContext`")
     tokens = TOKEN.findall(code)
     for before, token in zip(tokens, tokens[1:]):
         if token == "[" and (before in (")", "]", "?") or before[:1].isdigit()
-                             or IDENT.fullmatch(before) and before not in KEYWORDS):
+                             or IDENT.fullmatch(before) and before not in RUST_KEYWORDS):
             reject("indexing, whose index is a pointer-width `usize`")
+    allowlisted(code)
 
 
 def rust_code(source):
@@ -251,7 +314,6 @@ def checked_code(source):
     for pattern, name in OUTSIDE:
         if pattern.search(code):
             raise ValueError("Policy source must be one self-contained file; it uses " + name)
-    path_roots(code)
     portable(code)
     return code
 
