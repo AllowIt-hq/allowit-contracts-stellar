@@ -2,12 +2,12 @@
 
 Three owner-controlled contract implementations share custody and administration mixins:
 
-- `SimplePolicyEngine` requires agent and server approval for delegated transfers and SEP-56 deposits. The server checks the authored policy offchain.
-- `CommonPolicyEngine` runs the owner-approved standard prefix of canonical rule calls.
-- `CustomPolicy` compiles a complete authored policy verbatim into its own contract and reuses the same wallet mixins.
+- `AllowitSimplePolicyEngine` requires agent and server approval for delegated transfers and SEP-56 deposits. The server checks the authored policy offchain.
+- `AllowitCommonPolicyEngine` runs the owner-approved standard prefix of canonical rule calls.
+- `AllowitCustomPolicy` compiles a complete authored policy verbatim into its own contract and reuses the same wallet mixins.
 
 Policy source is portable Rust against `crates/allowit`: `allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;`.
-The offchain server and CustomPolicy compile the file verbatim. The standard contract runs only its
+The offchain server and `AllowitCustomPolicy` compile the file verbatim. The standard contract runs only its
 leading canonical calls, supplied by the owner as `rules`, and skips unset fields.
 `scripts/contract_admin.py` derives `rules` from the source. Rules are pure checks over
 `AllowitContext` (typed Grant, protected history, request) and return their passing constraint or an
@@ -32,7 +32,7 @@ python3 -m unittest discover -s scripts/tests -v
 python3 scripts/artifacts.py --output PATH
 ```
 
-The CustomPolicy sample source is `crates/custom-policy/policy/policy.rs`. Its contract compiles that
+The `AllowitCustomPolicy` sample source is `crates/custom-policy/policy/policy.rs`. Its contract compiles that
 file verbatim as a module, and `build.rs` binds `SOURCE_HASH` to its bytes. No SDK code generation is involved.
 The canonical rules and their Grant fields are in `crates/allowit/`; the custody mixins are in
 `crates/policy-wallet/`. `scripts/policy-smoke.rs` compiles the sample against the host backend with

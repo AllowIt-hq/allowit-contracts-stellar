@@ -1,10 +1,10 @@
 #![no_std]
-//! Shared stateless checker. Each method runs the canonical rule on its same-named AllowitGrant field.
-//! It holds no custody, AllowitGrant or accounting. No policy wallet or tool here calls it.
+//! Shared stateless checker. Each method runs the canonical rule on its same-named Grant field.
+//! It holds no custody, Grant or accounting. No policy wallet or tool here calls it.
 use allowit::{AllowitContext, AllowitError};
 use soroban_sdk::{Address, Env, contract, contractimpl, panic_with_error};
 #[contract]
-pub struct Engine;
+pub struct AllowitEngine;
 /// Engine executable release, independent of parent administration. Version 2 has the typed ABI.
 const ENGINE_VERSION: u32 = 2;
 /// Contract error code of the test fixture veto. It is outside `allowit::AllowitError`.
@@ -17,7 +17,7 @@ fn vetoed(env: &Env) {
     }
 }
 #[contractimpl]
-impl Engine {
+impl AllowitEngine {
     /// Read the engine executable release without changing data or requiring authorization.
     pub fn engine_version(env: Env) -> u32 {
         let _ = env;

@@ -4,7 +4,7 @@ use soroban_sdk::{
     Env, IntoVal, Symbol, TryFromVal, Val, testutils::Address as _, vec, xdr::ToXdr,
 };
 
-/// Every canonical rule in AllowitGrant field order.
+/// Every canonical rule in Grant field order.
 const ALL: [AllowitRule; 8] = [
     AllowitRule::transaction_cap,
     AllowitRule::spent_cap,

@@ -968,7 +968,7 @@ fn custom_source_and_unknown_storage_layout_reject() {
                     Symbol::new(&f.env, "history"),
                     nested("history").into_val(&f.env),
                 ),
-                // A legacy empty Grant map would otherwise decode as an all-unset typed AllowitGrant.
+                // A legacy empty Grant map would otherwise decode as an all-unset typed Grant.
                 _ => raw.set(
                     Symbol::new(&f.env, "grant"),
                     Map::<Symbol, Val>::new(&f.env).into_val(&f.env),
@@ -1057,7 +1057,7 @@ fn upgraded_legacy_layout_keeps_owner_recovery_and_accepts_a_typed_owner_packet(
     );
     f.client().recover(&f.recipient, &7);
     assert_eq!(f.balance(), 983);
-    // A complete owner packet replaces AllowitGrant and rules and keeps history and nonce.
+    // A complete owner packet replaces Grant and rules and keeps history and nonce.
     let p = AllowitPolicyDeployment {
         deployment_version: current.deployment_version + 1,
         owner: current.owner.clone(),

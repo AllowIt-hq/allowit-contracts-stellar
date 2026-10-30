@@ -1,23 +1,30 @@
 # Policy wallet engines
 
 Wallets keep one immutable underlying Stellar Asset Contract (SAC). The owner selects code, agent,
-independent server signer and Grant. SimplePolicyEngine relies on agent/server authorization.
-CommonPolicyEngine is the standard implementation for an owner-approved initial preflight prefix.
-CustomPolicy compiles a complete authored policy into its contract. Shared checkers have no custody.
+independent server signer and Grant. `AllowitSimplePolicyEngine` relies on agent/server
+authorization. `AllowitCommonPolicyEngine` is the standard implementation for an owner-approved
+initial preflight prefix. `AllowitCustomPolicy` compiles a complete authored policy into its
+contract. Shared checkers have no custody.
 
 ## Public names
 
 Every public type that authored policy, SDK integrations or contract specs name carries the
 `Allowit` prefix: `AllowitContext`, `AllowitGrant`, `AllowitRule`, `AllowitError`,
-`AllowitExecutionRequest`, `AllowitPolicyDeployment`, `AllowitState` and the others. Namespaced
-items keep their short names, such as `allowit::Result` and `allowit::spent_cap`. A Soroban type
-name appears only in the contract spec. Encodings carry struct field names and enum variant
-symbols, so the prefix changes no signed bytes, digests or stored state.
+`AllowitExecutionRequest`, `AllowitPolicyDeployment`, `AllowitState` and the others. The contract
+structs and their generated clients carry it too: `AllowitSimplePolicyEngine`,
+`AllowitCommonPolicyEngine`, `AllowitCustomPolicy`, `AllowitEngine`, `AllowitEngineParent`, and
+`AllowitEngineClient` and the other `*Client` types. Namespaced items keep their short names, such
+as `allowit::Result` and `allowit::spent_cap`.
+
+Encodings carry struct field names and enum variant symbols, not type names. The prefix therefore
+leaves signed encodings, the standard prefix digest test vector and the stored layout unchanged.
+Type names are in the Wasm contract spec, so rebuilt Wasm has new module hashes and, because the
+standard `source_digest` hashes the module, new prefix-binding digests.
 
 ## One portable policy source
 
 Policy source is ordinary synchronous Rust against `crates/allowit`. The offchain server and
-CustomPolicy compile the file verbatim:
+`AllowitCustomPolicy` compile the file verbatim:
 
 ```rust
 use allowit::prelude::*;
@@ -45,7 +52,7 @@ Policy source names `allowit` only as the path root `allowit::`. Any other occur
 identifier, such as `mod allowit`, `use core as allowit`, `extern crate`, `macro_rules! allowit` or
 `fn allowit`, could rebind the crate that prefix calls name, so the tooling rejects it.
 
-CustomPolicy compiles the file as a module with `#[path]`, and `SOURCE_HASH` covers only that file.
+`AllowitCustomPolicy` compiles the file as a module with `#[path]`, and `SOURCE_HASH` covers only that file.
 The file must therefore be the whole policy: it must not use `include!`, `include_str!`,
 `include_bytes!`, `env!`, `option_env!`, `#[path]`, `cfg_attr` or an out-of-line `mod name;`. The
 host portability test includes the file, so it must not use inner attributes or inner doc comments.
@@ -55,9 +62,8 @@ The same file must also behave the same offchain and onchain, so it must not use
 `check-policy-bindings.py` and the owner packet tooling of every tier reject all of these.
 
 These checks are lexical. They cannot prove that the two backends behave the same, for example
-when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host. The remaining
-guard is the dual-backend test: CustomPolicy tests compile its source under both backends and
-require identical outcomes on a shared vector set.
+when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host. The
+dual-backend test below is the remaining guard.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec` and contract types. Feature `std` uses heap strings and vectors
@@ -65,7 +71,7 @@ for the host evaluator; addresses are StrKey text. The selected backend backs th
 authored policy names. The offchain server depends on
 `allowit = { default-features = false, features = ["std"] }`. Enabling both backends is a compile
 error, so a server cannot silently unify `soroban` through another crate. Feature `dual` enables
-both for tests only. The CustomPolicy tests compile its source under both backends and require
+both for tests only. The `AllowitCustomPolicy` tests compile its source under both backends and require
 identical pass values and errors on a shared vector set.
 
 Portable authored code beyond canonical calls uses typed scalar fields and enum comparisons, such
@@ -106,7 +112,7 @@ before rules run. Deployment rejects negative caps.
 
 The standard prefix is the consecutive leading top-level statements of exactly the form
 `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`: one canonical rule and its same-named Grant field.
-Any other statement ends it. Later statements run offchain or in CustomPolicy.
+Any other statement ends it. Later statements run offchain or in `AllowitCustomPolicy`.
 The standard contract receives the exact owner-approved ordered prefix as `rules: Vec<AllowitRule>`, never
 caller selectors. `AllowitRule` is a typed enum whose variants are the canonical names. Soroban decodes
 vector elements when read, so owner configuration decodes every rule and allowlist element before
@@ -172,7 +178,7 @@ funds before any change across layouts. Every later layout bump needs the same r
 ## Shared engine
 
 The shared engine exposes each canonical rule as `<rule>(ctx: AllowitContext) -> Result<T, AllowitError>`.
-Callers use its generated `EngineClient`.
+Callers use its generated `AllowitEngineClient`.
 It runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)` and returns the same pass value or rule error.
 It holds no custody, Grant or history. No policy wallet, release tool or server in this repository
 calls it; offchain evaluation uses `allowit` directly. It remains the engine parent's administered

@@ -49,15 +49,15 @@ fn native_contract_wrapper_matches_the_bundled_rule() {
     let env = Env::default();
     let ctx = fixture(&env);
     assert_eq!(
-        Engine::day_total_cap(env.clone(), ctx.clone()),
+        AllowitEngine::day_total_cap(env.clone(), ctx.clone()),
         allowit::day_total_cap(&ctx, &ctx.grant.day_total_cap)
     );
-    assert_eq!(Engine::day_total_cap(env, ctx), Ok(57));
+    assert_eq!(AllowitEngine::day_total_cap(env, ctx), Ok(57));
 }
 #[test]
 fn engine_metadata_is_pure_release_data() {
     let env = Env::default();
-    assert_eq!(Engine::engine_version(env.clone()), 2);
+    assert_eq!(AllowitEngine::engine_version(env.clone()), 2);
     assert!(env.auths().is_empty());
 }
 
@@ -67,7 +67,7 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
         include_bytes!("../../../target/wasm32v1-none/release/allowit_wallet_engine.wasm");
     let env = Env::default();
     let id = env.register(WASM, ());
-    let client = EngineClient::new(&env, &id);
+    let client = AllowitEngineClient::new(&env, &id);
     let mut ctx = fixture(&env);
     let c = &ctx;
     let g = &c.grant;

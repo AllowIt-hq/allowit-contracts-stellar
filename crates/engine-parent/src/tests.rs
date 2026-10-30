@@ -2,7 +2,7 @@ use super::*;
 use allowit::{
     AllowitAccountingHistory, AllowitContext, AllowitGrant, AllowitOperation, AllowitRequest,
 };
-use allowit_wallet_engine::EngineClient;
+use allowit_wallet_engine::AllowitEngineClient;
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
@@ -31,7 +31,7 @@ impl Fixture {
         let parent = if compiled_parent {
             env.register(PARENT_WASM, (admin.clone(), engine_hash.clone()))
         } else {
-            env.register(EngineParent, (admin.clone(), engine_hash.clone()))
+            env.register(AllowitEngineParent, (admin.clone(), engine_hash.clone()))
         };
         env.mock_auths(&[]);
         Self {
@@ -41,8 +41,8 @@ impl Fixture {
             engine_hash,
         }
     }
-    fn client(&self) -> EngineParentClient<'_> {
-        EngineParentClient::new(&self.env, &self.parent)
+    fn client(&self) -> AllowitEngineParentClient<'_> {
+        AllowitEngineParentClient::new(&self.env, &self.parent)
     }
     fn auth(&self, actor: &Address, method: &str, args: Vec<Val>) {
         self.env.mock_auths(&[MockAuth {
@@ -77,7 +77,7 @@ fn context(env: &Env) -> AllowitContext {
     }
 }
 fn approved(env: &Env, engine: &Address) -> bool {
-    EngineClient::new(env, engine)
+    AllowitEngineClient::new(env, engine)
         .try_transaction_cap(&context(env))
         .is_ok_and(|left| left == Ok(9))
 }
@@ -220,7 +220,7 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     f.client().upgrade_engine(&deny, &0);
     assert_eq!(f.client().engine(), engine);
     assert_eq!(
-        EngineClient::new(&f.env, &engine).try_transaction_cap(&context(&f.env)),
+        AllowitEngineClient::new(&f.env, &engine).try_transaction_cap(&context(&f.env)),
         Err(Err(soroban_sdk::InvokeError::Contract(
             allowit_wallet_engine::TEST_DENY
         )))

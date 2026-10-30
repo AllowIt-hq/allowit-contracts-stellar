@@ -22,7 +22,7 @@ CHAR = re.compile(r"(?<![A-Za-z0-9_])b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{
 # `macro_rules! allowit`, `let allowit`) or reaches another module (`self::allowit`).
 ALLOWIT = re.compile(r"\ballowit\b")
 # Code that reads other files, the build environment or the including crate, so the one hashed
-# file would not be the whole policy, or that can behave differently in CustomPolicy and on the
+# file would not be the whole policy, or that can behave differently in `AllowitCustomPolicy` and on the
 # host: file and environment macros, `#[path]`, `cfg_attr` (which can add `path`), an out-of-line
 # module, `extern crate`, conditional compilation, location and type-name introspection, and paths
 # rooted at `crate`, `super`, `self` or a bare `::`.

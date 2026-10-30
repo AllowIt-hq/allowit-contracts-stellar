@@ -34,7 +34,7 @@ pub enum AllowitParentError {
 }
 
 #[contract]
-pub struct EngineParent;
+pub struct AllowitEngineParent;
 
 /// Stable executable-reference tag owned by this parent. It is not a custody contract identifier.
 fn tag(env: &Env) -> String {
@@ -80,7 +80,7 @@ mod engine {
 }
 
 #[contractimpl]
-impl EngineParent {
+impl AllowitEngineParent {
     /// Create the shared engine and its independent upgrade authority.
     /// The engine uses this parent's "engine" executable reference and the all-zero deployment salt.
     /// Its constructor receives no arguments. The parent starts at administration version zero.

@@ -555,7 +555,7 @@ class ContractAdmin(unittest.TestCase):
             "pub(crate) mod r#other ;\n",
             "macro_rules! m { ($i:ident) => { mod $i; } }\n",
             "extern crate core;\n",
-            # Code that can behave differently in CustomPolicy and on the host.
+            # Code that can behave differently in `AllowitCustomPolicy` and on the host.
             'const W: bool = cfg!(target_family = "wasm");\n',
             '#[cfg(target_family = "wasm")]\nconst W: bool = true;\n',
             "#[ cfg (test)]\nfn t() {}\n",
@@ -593,7 +593,7 @@ class ContractAdmin(unittest.TestCase):
                    "const T: &str = \"crate::x cfg!(test) ::core\";\npub(crate) fn two() -> u8 { Vec::<u8>::new().len() as u8 + 2 }\n"
                    "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n")
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
-        # The CustomPolicy sources pass the same check.
+        # The `AllowitCustomPolicy` sources pass the same check.
         for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs"):
             ca.checked_code((ROOT / path).read_text())
         result = subprocess.run([sys.executable, str(ROOT / "scripts/check-policy-bindings.py")], capture_output=True, text=True)

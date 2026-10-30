@@ -7,7 +7,7 @@ pub const DAY: u64 = 86_400;
 pub use types::*;
 
 /// Contract types. Kept apart from `Result` so generated code sees the standard prelude.
-/// AllowitRule variants keep the snake-case names of their functions and AllowitGrant fields.
+/// `AllowitRule` variants keep the snake-case names of their functions and Grant fields.
 #[allow(non_camel_case_types)]
 mod types {
     use super::{Address, Vec};
@@ -87,7 +87,7 @@ mod types {
     }
 
     value! {
-        /// Canonical rule. Each variant names its rule function and its same-named AllowitGrant field.
+        /// Canonical rule. Each variant names its rule function and its same-named Grant field.
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub enum AllowitRule {
             transaction_cap,
@@ -116,7 +116,7 @@ mod types {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         #[repr(u32)]
         pub enum AllowitError {
-            /// The rule's AllowitGrant field is unset.
+            /// The rule's Grant field is unset.
             MissingGrant = 1,
             TransactionCapExceeded = 2,
             SpentCapExceeded = 3,
@@ -271,7 +271,7 @@ pub fn expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
 }
 
 /// Standard-contract preflight of one canonical prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`.
-/// Only this runner skips a rule whose AllowitGrant field is unset. It discards pass values.
+/// Only this runner skips a rule whose Grant field is unset. It discards pass values.
 pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
     let grant = &ctx.grant;
     match rule {

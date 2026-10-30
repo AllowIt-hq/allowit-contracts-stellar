@@ -77,7 +77,7 @@ def pinned_wasm(path, expected_hash):
     return expected_hash
 
 
-# Custody AllowitState layout this tool encodes: typed Grant and Vec<AllowitRule> prefix. Version 1 stored a Grant map.
+# Custody State layout this tool encodes: typed Grant and Vec<AllowitRule> prefix. Version 1 stored a Grant map.
 WALLET_CONTRACT_VERSION = 2
 
 

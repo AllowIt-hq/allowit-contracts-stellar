@@ -17,10 +17,10 @@ use soroban_sdk::{
 };
 mod persistent;
 const STATE_KEY: u32 = 0;
-/// Version 2: typed AllowitGrant and `Vec<AllowitRule>` prefix. Version 1 stored an untyped Grant map.
+/// Version 2: typed Grant and `Vec<AllowitRule>` prefix. Version 1 stored an untyped Grant map.
 pub const CONTRACT_VERSION: u32 = 2;
 // Wasm metadata equal to CONTRACT_VERSION. Release tooling refuses a code change to Wasm that
-// declares another custody layout, or none (version 1), because that code cannot read AllowitState.
+// declares another custody layout, or none (version 1), because that code cannot read State.
 soroban_sdk::contractmeta!(key = "allowit_custody_layout", val = "2");
 
 /// Initial owner-signed configuration. Asset and policy_instance stay fixed after creation.
@@ -154,7 +154,7 @@ fn load(env: &Env, initial: Option<AllowitState>) -> Result<AllowitState, Allowi
     let state =
         AllowitState::try_from_val(env, &raw).map_err(|_| AllowitWalletError::InvalidState)?;
     // Struct decoding ignores extra keys and reads absent Option keys as None. Only the exact
-    // canonical encoding of this layout is accepted, including nested AllowitGrant and history.
+    // canonical encoding of this layout is accepted, including nested Grant and history.
     if state.contract_version != CONTRACT_VERSION || state.clone().to_xdr(env) != raw.to_xdr(env) {
         return Err(AllowitWalletError::InvalidState);
     }
@@ -169,9 +169,9 @@ fn extend(env: &Env) {
 fn store(env: &Env, state: &AllowitState) {
     env.storage().instance().set(&STATE_KEY, state);
 }
-/// Stored fields that owner entrypoints keep. Struct decoding ignores the other AllowitState keys, so
-/// a stored AllowitGrant or rule list that no longer decodes never blocks recovery, passthrough or its
-/// replacement by an owner packet. Version 1 differs from version 2 only in AllowitGrant and rules.
+/// Stored fields that owner entrypoints keep. Struct decoding ignores the other State keys, so
+/// a stored Grant or rule list that no longer decodes never blocks recovery, passthrough or its
+/// replacement by an owner packet. Version 1 differs from version 2 only in Grant and rules.
 /// Protected history is read separately, only where it is carried over.
 #[contracttype]
 struct KeptState {
@@ -195,7 +195,7 @@ fn kept(env: &Env) -> Result<KeptState, AllowitWalletError> {
     extend(env);
     Ok(kept)
 }
-/// Protected history carried into a new AllowitState. Struct decoding ignores extra keys, so only its
+/// Protected history carried into a new State. Struct decoding ignores extra keys, so only its
 /// exact canonical encoding is accepted.
 fn kept_history(env: &Env) -> Result<AllowitAccountingHistory, AllowitWalletError> {
     let fields = Map::<Symbol, Val>::try_from_val(env, &stored(env)?)
@@ -231,7 +231,7 @@ fn public_key(env: &Env, address: &Address) -> Result<BytesN<32>, AllowitWalletE
     encoded.slice(12..44).copy_into_slice(&mut key);
     Ok(BytesN::from_array(env, &key))
 }
-/// Pure standard-prefix binding. AllowitGrant values and the owner-signed offchain suffix are excluded.
+/// Pure standard-prefix binding. Grant values and the owner-signed offchain suffix are excluded.
 pub fn standard_prefix_digest(
     env: &Env,
     kind: &Symbol,
@@ -310,7 +310,7 @@ fn validate<P: AllowitPolicy>(
     Ok(())
 }
 /// Soroban decodes vector elements when read. Owner configuration decodes each one before storing
-/// it, so an element that later fails to decode cannot be stored. An unknown AllowitRule symbol aborts.
+/// it, so an element that later fails to decode cannot be stored. An unknown `AllowitRule` symbol aborts.
 fn decoded<T: IntoVal<Env, Val> + TryFromVal<Env, Val>>(
     list: &Vec<T>,
 ) -> Result<(), AllowitWalletError> {
@@ -720,7 +720,7 @@ fn next_history(
     }
     Ok(next)
 }
-/// Rule input: owner AllowitGrant, proposed protected history and authenticated request facts.
+/// Rule input: owner Grant, proposed protected history and authenticated request facts.
 /// Deposits name their vault as the recipient.
 fn rule_input(
     state: &AllowitState,
@@ -1135,7 +1135,7 @@ impl AllowitPolicy for AllowitCommon {
         Ok(())
     }
     /// Run each prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;` in owner order.
-    /// An unset AllowitGrant field skips its rule here only; the full offchain policy denies it.
+    /// An unset Grant field skips its rule here only; the full offchain policy denies it.
     fn check(ctx: &AllowitContext, rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         for rule in rules.iter() {
             allowit::preflight(ctx, rule)?;

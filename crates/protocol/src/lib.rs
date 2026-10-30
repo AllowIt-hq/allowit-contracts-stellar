@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{Address, Bytes, BytesN, Symbol, contractevent, contracttype};
 
-/// Typed owner AllowitGrant and the protected accounting that rules read.
+/// Typed owner Grant and the protected accounting that rules read.
 pub use allowit::{AllowitAccountingHistory, AllowitGrant};
 
 /// Native transfer-profile argument encoding, fixed independently of policy source.
@@ -137,7 +137,7 @@ pub struct AllowitExecutionRequest {
     pub expires_at: u64,
     /// Installed module selection and exact canonical arguments, bound before compiled policy execution.
     pub invocation: AllowitPolicyInvocation,
-    /// Optional canonical XDR of AllowitExpenseBounds, bounded by MAX_EXPENSE_BYTES. New cost rules require Some.
+    /// Optional canonical XDR of `AllowitExpenseBounds`, bounded by MAX_EXPENSE_BYTES. New cost rules require Some.
     pub expense: Option<Bytes>,
 }
 

@@ -20,7 +20,7 @@ mod branch_host {
     include!("branch_policy.rs");
 }
 
-/// Every canonical rule of one backend, in AllowitGrant field order.
+/// Every canonical rule of one backend, in Grant field order.
 macro_rules! rules {
     ($lib:path) => {{
         use $lib as lib;
@@ -377,7 +377,7 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
     v.caps[0] = Some(-1);
     assert_eq!(u.run(&v).policy, Err(E::InvalidParameter as u32));
     checked += 4;
-    // An unset AllowitGrant field denies in the policy and rule, and is skipped only by preflight.
+    // An unset Grant field denies in the policy and rule, and is skipped only by preflight.
     for field in 0..8 {
         let mut v = base();
         match field {

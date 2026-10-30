@@ -1,5 +1,5 @@
 #![no_std]
-//! Canonical AllowIt policy rules. The offchain server and CustomPolicy compile one authored
+//! Canonical AllowIt policy rules. The offchain server and `AllowitCustomPolicy` compile one authored
 //! policy file verbatim:
 //!
 //! ```ignore
@@ -14,7 +14,7 @@
 //! }
 //! ```
 //!
-//! Rules are pure checks. Each returns its passing constraint or an `AllowitError`. An unset AllowitGrant field
+//! Rules are pure checks. Each returns its passing constraint or an `AllowitError`. An unset Grant field
 //! is `MissingGrant`. The standard contract runs only the leading canonical calls, supplied by the
 //! owner as `rules`, through `preflight`, which skips unset fields. `scripts/contract_admin.py`
 //! derives `rules` from the source.
@@ -42,7 +42,7 @@ compile_error!(
     "Features `soroban` and `std` select different crate-root types; use `default-features = false`"
 );
 
-/// Onchain backend. Owner-signed AllowitGrant and every rule input are Soroban contract types.
+/// Onchain backend. Owner-signed Grant and every rule input are Soroban contract types.
 #[cfg(feature = "soroban")]
 pub mod soroban {
     pub use soroban_sdk::Address;
