@@ -28,7 +28,7 @@ impl Policy for Custom {
         BytesN::from_array(env, &ARGUMENT_SCHEMA_HASH)
     }
     /// Run the complete authored policy. An unset Grant field denies.
-    fn check(_env: &Env, ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
+    fn check(ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(policy::execute(ctx)?)
     }
 }

@@ -52,7 +52,7 @@ fn approval_passes_with_exact_constraints() {
         allowit::recipients(&c, &c.grant.recipients),
         Ok(c.request.recipient.clone())
     );
-    assert_eq!(allowit::expiry(&c, &c.grant.expiry), Ok(50));
+    assert_eq!(allowit::expiry(&c, &c.grant.expiry), Ok(100));
 }
 #[test]
 fn approval_denies_unset_grant_fields() {

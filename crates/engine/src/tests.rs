@@ -1,5 +1,5 @@
 use super::*;
-use allowit::{AccountingHistory, Grant, Operation, Request};
+use allowit::{AccountingHistory, Grant, Operation, Request, Rule};
 use soroban_sdk::{testutils::Address as _, vec};
 fn fixture(env: &Env) -> AllowitEnv {
     let asset = Address::generate(env);
@@ -32,6 +32,16 @@ fn fixture(env: &Env) -> AllowitEnv {
         },
     }
 }
+const ALL: [Rule; 8] = [
+    Rule::transaction_cap,
+    Rule::spent_cap,
+    Rule::day_spent_cap,
+    Rule::day_total_cap,
+    Rule::call_cap,
+    Rule::recipients,
+    Rule::tokens,
+    Rule::expiry,
+];
 #[test]
 fn native_contract_wrapper_matches_the_bundled_rule() {
     let env = Env::default();
@@ -57,14 +67,47 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
     let id = env.register(WASM, ());
     let client = EngineClient::new(&env, &id);
     let mut ctx = fixture(&env);
-    assert_eq!(client.transaction_cap(&ctx), 60);
-    assert_eq!(client.spent_cap(&ctx), 0);
-    assert_eq!(client.day_spent_cap(&ctx), 5);
-    assert_eq!(client.day_total_cap(&ctx), 57);
-    assert_eq!(client.call_cap(&ctx), 2);
-    assert_eq!(client.recipients(&ctx), ctx.request.recipient);
-    assert_eq!(client.tokens(&ctx), ctx.request.asset);
-    assert_eq!(client.expiry(&ctx), 400);
+    let c = &ctx;
+    let g = &c.grant;
+    // The exhaustive match fails to compile when a rule lacks its engine method.
+    for rule in ALL {
+        match rule {
+            Rule::transaction_cap => {
+                let v = allowit::transaction_cap(c, &g.transaction_cap);
+                assert_eq!((client.transaction_cap(c), v), (60, Ok(60)));
+            }
+            Rule::spent_cap => {
+                let v = allowit::spent_cap(c, &g.spent_cap);
+                assert_eq!((client.spent_cap(c), v), (0, Ok(0)));
+            }
+            Rule::day_spent_cap => {
+                let v = allowit::day_spent_cap(c, &g.day_spent_cap);
+                assert_eq!((client.day_spent_cap(c), v), (5, Ok(5)));
+            }
+            Rule::day_total_cap => {
+                let v = allowit::day_total_cap(c, &g.day_total_cap);
+                assert_eq!((client.day_total_cap(c), v), (57, Ok(57)));
+            }
+            Rule::call_cap => {
+                let v = allowit::call_cap(c, &g.call_cap);
+                assert_eq!((client.call_cap(c), v), (2, Ok(2)));
+            }
+            Rule::recipients => {
+                let v = allowit::recipients(c, &g.recipients);
+                assert_eq!(Ok(client.recipients(c)), v);
+                assert_eq!(v, Ok(c.request.recipient.clone()));
+            }
+            Rule::tokens => {
+                let v = allowit::tokens(c, &g.tokens);
+                assert_eq!(Ok(client.tokens(c)), v);
+                assert_eq!(v, Ok(c.request.asset.clone()));
+            }
+            Rule::expiry => {
+                let v = allowit::expiry(c, &g.expiry);
+                assert_eq!((client.expiry(c), v), (900, Ok(900)));
+            }
+        }
+    }
     ctx.grant.day_total_cap = Some(42);
     assert_eq!(
         client.try_day_total_cap(&ctx),

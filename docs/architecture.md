@@ -21,7 +21,8 @@ pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
 ```
 
 The standard contract runs only its leading canonical calls, supplied by the owner as `rules`, and
-skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file.
+skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file. It lexes
+Rust comments, including nested block comments, and literals first, so they cannot add or hide calls.
 
 CustomPolicy compiles the file as a module with `#[path]`. The host portability test includes it, so
 the file must not use inner attributes or inner doc comments; `check-policy-bindings.py` rejects them.
@@ -61,7 +62,7 @@ rules unguarded, so an unset parameter denies. Future server-only functions use 
 | `call_cap` | `u64` successful operation count ceiling; zero denies | `cap - state.calls` |
 | `recipients` | `Vec<Address>` permitted destinations, including vaults; empty denies | Matched recipient |
 | `tokens` | `Vec<Address>` exact permitted SAC identities; empty denies | Matched asset |
-| `expiry` | `u64` exclusive Unix timestamp; request expiry cannot exceed it | Seconds to `expires_at` |
+| `expiry` | `u64` exclusive Unix timestamp; request expiry cannot exceed it | `expiry - now` |
 
 Each rule checks only the facts it reads. A negative cap is `InvalidParameter`, as is a nonpositive
 `transaction_cap` amount. A negative value that a cap reads is `InvalidState`; daily caps also
@@ -130,13 +131,22 @@ typed `deploy_policy` packet replaces Grant, rules and roles, keeps history, non
 asset, and writes version 2. Later versions reject even owner calls, because their kept fields may
 change meaning. New source and schema hashes need new owner bindings.
 
+The reverse direction has no repair. Version 1 code reads State only in its own layout, so a
+`deploy_policy` code change from version 2 to a version 1 release permanently locks custody. Each
+wallet Wasm declares `allowit_custody_layout` metadata equal to `CONTRACT_VERSION`.
+`contract_admin.py` refuses a code change to Wasm that declares another layout or none. Recover
+funds before any change across layouts. Every later layout bump needs the same rule.
+
 ## Shared engine
 
 The shared engine exposes each canonical rule as `<rule>(ctx: AllowitEnv) -> Result<T, Error>`.
 Callers use its generated `EngineClient`.
 It runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)` and returns the same pass value or rule error.
-It holds no custody, Grant or history, and policy wallets do not call it. It serves simulation
-and checker-upgrade administration through the engine parent. `engine_version` 2 marks this ABI.
+It holds no custody, Grant or history. No policy wallet, release tool or server in this repository
+calls it; offchain evaluation uses `allowit` directly. It remains the engine parent's administered
+checker for onchain callers that cannot bundle `allowit`. Its tests match `Rule` exhaustively, so a
+new rule fails to compile until the engine exposes it. The `test-deny` fixture aborts every rule
+with contract error `TEST_DENY` (1000), outside `allowit::Error`. `engine_version` 2 marks this ABI.
 
 ## Expenses and native effects
 

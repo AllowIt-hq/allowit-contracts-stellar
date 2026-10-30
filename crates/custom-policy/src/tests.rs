@@ -286,7 +286,7 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
     let o = expect(
         base(),
         Ok(()),
-        ok(["60", "955", "455", "557", "2", "@1", "@0", "400"]),
+        ok(["60", "955", "455", "557", "2", "@1", "@0", "1000"]),
     );
     assert_eq!(o.preflight, all_preflight_ok());
     checked += 1;

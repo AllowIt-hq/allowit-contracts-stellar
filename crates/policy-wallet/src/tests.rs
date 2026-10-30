@@ -610,7 +610,21 @@ fn owner_signs_the_canonical_packet_so_absent_or_extra_keys_reject() {
     assert_eq!(f.client().state().deployment_version, 1);
 }
 #[test]
-fn custom_sample_executes_compiled_initial_rule_prefix() {
+fn wallet_wasm_declares_its_custody_layout() {
+    // XDR ScMetaEntry V0 { key, val }, as written into the `contractmetav0` section.
+    let mut entry = std::vec![0u8; 4];
+    let layout = std::format!("{CONTRACT_VERSION}");
+    for field in [&b"allowit_custody_layout"[..], layout.as_bytes()] {
+        entry.extend((field.len() as u32).to_be_bytes());
+        entry.extend(field);
+        entry.resize(entry.len().next_multiple_of(4), 0);
+    }
+    for wasm in [SIMPLE, COMMON, CUSTOM] {
+        assert!(wasm.windows(entry.len()).any(|w| w == entry));
+    }
+}
+#[test]
+fn custom_sample_executes_complete_compiled_policy() {
     let f = Fixture::new(CUSTOM, false);
     f.transfer(20);
     f.transfer(30);
@@ -1179,6 +1193,74 @@ fn constructor_owner_signs_the_canonical_packet_so_absent_or_extra_keys_reject()
     }
     assert!(deploy(raw(&|_, _| {})));
     assert_eq!(Client::new(&f.env, &wallet).state().grant, config.grant);
+}
+#[test]
+fn constructor_and_deploy_policy_reject_a_mismatched_standard_prefix_digest() {
+    let f = Fixture::new(COMMON, false);
+    let s = f.client().state();
+    let env = &f.env;
+    let module = env
+        .crypto()
+        .sha256(&Bytes::from_slice(env, COMMON))
+        .to_bytes();
+    let common = Symbol::new(env, "common_policy_engine");
+    let mut reordered = s.rules.clone();
+    let first = reordered.pop_front().unwrap();
+    reordered.push_back(first);
+    let digest = |kind: &Symbol, module: &BytesN<32>, rules: &Vec<Rule>| {
+        standard_prefix_digest(env, kind, module, &s.asset, rules)
+    };
+    // Another rule order, another kind or another module.
+    let wrong = [
+        digest(&common, &module, &reordered),
+        digest(&Symbol::new(env, "simple_policy_engine"), &module, &s.rules),
+        digest(&common, &BytesN::from_array(env, &[3; 32]), &s.rules),
+    ];
+    let config = |source_digest: &BytesN<32>| PolicyConfig {
+        owner: s.owner.clone(),
+        agent: s.agent.clone(),
+        server: s.server.clone(),
+        asset: s.asset.clone(),
+        policy_instance: s.policy_instance.clone(),
+        source_digest: source_digest.clone(),
+        rules: s.rules.clone(),
+        grant: s.grant.clone(),
+        x402_enabled: false,
+    };
+    let wasm = env.deployer().upload_contract_wasm(COMMON);
+    let factory = env.register(Constructor, ());
+    let constructor = ConstructorClient::new(env, &factory);
+    env.mock_all_auths_allowing_non_root_auth();
+    for source_digest in &wrong {
+        assert!(
+            constructor
+                .try_deploy(&wasm, &config(source_digest))
+                .is_err()
+        );
+    }
+    for source_digest in &wrong {
+        let mut p = f.deployment();
+        p.source_digest = source_digest.clone();
+        f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(env));
+        assert_eq!(
+            f.client().try_deploy_policy(&p),
+            Err(Ok(Error::InvalidState))
+        );
+        assert_eq!(f.client().state(), s);
+    }
+    // The matching digest passes both paths.
+    env.mock_all_auths_allowing_non_root_auth();
+    assert!(
+        constructor
+            .try_deploy(&wasm, &config(&s.source_digest))
+            .is_ok()
+    );
+    let mut p = f.deployment();
+    p.rules = reordered;
+    p.source_digest = wrong[0].clone();
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(env));
+    f.client().deploy_policy(&p);
+    assert_eq!(f.client().state().rules, p.rules);
 }
 #[test]
 fn ordinary_compiled_deployment_requires_owner_authorization() {

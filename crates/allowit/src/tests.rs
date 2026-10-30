@@ -78,7 +78,7 @@ fn rules_return_exact_passing_constraints() {
         Ok(ctx.request.recipient.clone())
     );
     assert_eq!(tokens(&ctx, &g.tokens), Ok(ctx.request.asset.clone()));
-    assert_eq!(expiry(&ctx, &g.expiry), Ok(400));
+    assert_eq!(expiry(&ctx, &g.expiry), Ok(999_999 - DAY - 100));
     for rule in ALL {
         assert_eq!(preflight(&ctx, rule), Ok(()));
     }
@@ -129,6 +129,10 @@ fn boundary_equality_passes_with_zero_headroom_and_one_more_denies() {
     assert_eq!(
         expiry(&ctx, &Some(ctx.request.expires_at)),
         Ok(ctx.request.expires_at - ctx.request.now)
+    );
+    assert_eq!(
+        expiry(&ctx, &Some(ctx.request.now + 1)),
+        Err(Error::Expired)
     );
     assert_eq!(
         transaction_cap(&ctx, &Some(39)),

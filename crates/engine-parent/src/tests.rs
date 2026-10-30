@@ -219,7 +219,9 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     assert_eq!(f.client().engine(), engine);
     assert_eq!(
         EngineClient::new(&f.env, &engine).try_transaction_cap(&context(&f.env)),
-        Err(Ok(allowit::Error::InvalidState))
+        Err(Err(soroban_sdk::InvokeError::Contract(
+            allowit_wallet_engine::TEST_DENY
+        )))
     );
     assert_eq!(f.client().state().version, 1);
     // A later authorized release can restore the engine, preserving identity.

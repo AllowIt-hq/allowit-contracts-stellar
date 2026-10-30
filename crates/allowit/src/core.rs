@@ -31,7 +31,7 @@ mod types {
             pub recipients: Option<Vec<Address>>,
             /// Exact permitted underlying asset contracts. Empty denies.
             pub tokens: Option<Vec<Address>>,
-            /// Exclusive Unix timestamp after which the grant denies.
+            /// Exclusive Unix timestamp; the grant denies at and after it.
             pub expiry: Option<u64>,
         }
     }
@@ -259,12 +259,12 @@ pub fn tokens(ctx: &AllowitEnv, allowed: &Option<Vec<Address>>) -> Result<Addres
 
 /// Require an unexpired grant and request, with the request expiring no later than the grant.
 ///
-/// Returns seconds left until `request.expires_at`, which the grant expiry bounds.
+/// Returns `expiry - request.now`, the seconds the grant has left.
 pub fn expiry(ctx: &AllowitEnv, expiry: &Option<u64>) -> Result<u64> {
     let expiry = expiry.ok_or(Error::MissingGrant)?;
     let r = &ctx.request;
     if r.now < expiry && r.now < r.expires_at && r.expires_at <= expiry {
-        Ok(r.expires_at - r.now)
+        Ok(expiry - r.now)
     } else {
         Err(Error::Expired)
     }

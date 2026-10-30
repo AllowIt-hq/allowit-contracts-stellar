@@ -18,6 +18,9 @@ mod persistent;
 const STATE_KEY: u32 = 0;
 /// Version 2: typed Grant and `Vec<Rule>` prefix. Version 1 stored an untyped Grant map.
 pub const CONTRACT_VERSION: u32 = 2;
+// Wasm metadata equal to CONTRACT_VERSION. Release tooling refuses a code change to Wasm that
+// declares another custody layout, or none (version 1), because that code cannot read State.
+soroban_sdk::contractmeta!(key = "allowit_custody_layout", val = "2");
 
 /// Initial owner-signed configuration. Asset and policy_instance stay fixed after creation.
 #[contracttype]
@@ -130,7 +133,7 @@ pub trait Policy {
         *digest == Self::argument_schema_digest(env)
     }
     /// Check the owner-approved standard prefix. Only Common admits a nonempty list.
-    fn validate(_env: &Env, rules: &Vec<Rule>) -> Result<(), Error> {
+    fn validate(rules: &Vec<Rule>) -> Result<(), Error> {
         if rules.is_empty() {
             Ok(())
         } else {
@@ -138,7 +141,7 @@ pub trait Policy {
         }
     }
     /// Evaluate the compiled checks on the kernel-built rule input. Pass values are discarded.
-    fn check(env: &Env, ctx: &AllowitEnv, rules: &Vec<Rule>) -> Result<(), Error>;
+    fn check(ctx: &AllowitEnv, rules: &Vec<Rule>) -> Result<(), Error>;
 }
 
 /// Read initialized state and maintain its instance and code lifetime. Constructor initialization is explicit.
@@ -284,7 +287,7 @@ fn validate<P: Policy>(env: &Env, config: &PolicyConfig) -> Result<(), Error> {
     for list in lists.into_iter().flatten() {
         decoded(list)?;
     }
-    P::validate(env, &config.rules)?;
+    P::validate(&config.rules)?;
     if P::STANDARD_PREFIX
         && config.source_digest != checked_prefix::<P>(env, &config.asset, &config.rules)?
     {
@@ -754,7 +757,7 @@ fn admit<P: Policy>(
     validate_expense(env, &state, &execution, operation)?;
     let nonce = state.nonce.checked_add(1).ok_or(Error::Overflow)?;
     let history = next_history(env, &state.history, &execution, args.amount, now)?;
-    P::validate(env, &state.rules)?;
+    P::validate(&state.rules)?;
     let ctx = rule_input(
         &state,
         &history,
@@ -763,7 +766,7 @@ fn admit<P: Policy>(
         now,
         execution.expires_at,
     );
-    P::check(env, &ctx, &state.rules)?;
+    P::check(&ctx, &state.rules)?;
     state.nonce = nonce;
     state.history = history;
     store(env, &state);
@@ -943,10 +946,10 @@ pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Resu
 struct UpgradeConfig;
 impl Policy for UpgradeConfig {
     const KIND: &'static str = "upgrade";
-    fn validate(_env: &Env, _rules: &Vec<Rule>) -> Result<(), Error> {
+    fn validate(_rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(())
     }
-    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
+    fn check(_ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
         Err(Error::PolicyDenied)
     }
 }
@@ -1061,7 +1064,7 @@ impl Policy for Simple {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
-    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
+    fn check(_ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -1075,12 +1078,12 @@ impl Policy for Common {
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
     /// Any ordered list of typed rules. The kernel decodes each element before storing it.
-    fn validate(_env: &Env, _rules: &Vec<Rule>) -> Result<(), Error> {
+    fn validate(_rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(())
     }
     /// Run each prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;` in owner order.
     /// An unset Grant field skips its rule here only; the full offchain policy denies it.
-    fn check(_env: &Env, ctx: &AllowitEnv, rules: &Vec<Rule>) -> Result<(), Error> {
+    fn check(ctx: &AllowitEnv, rules: &Vec<Rule>) -> Result<(), Error> {
         for rule in rules.iter() {
             allowit::preflight(ctx, rule)?;
         }
