@@ -496,6 +496,89 @@ class ContractAdmin(unittest.TestCase):
             args.arguments = json.dumps({"deployment": deployment})
             self.assertIn("deploy_policy", ca.command(args))
 
+    def test_policy_source_cannot_rebind_allowit(self):
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        body = call("recipients") + call("expiry")
+        self.assertEqual(ca.standard_prefix(source(body)), ["recipients", "expiry"])
+        # A local `allowit` would make the trusted prefix call a different function.
+        fake = "pub fn recipients(_: &AllowitContext, _: &Option<()>) -> allowit::Result<()> { Ok(()) }"
+        rebinds = (
+            "mod allowit { " + fake + " }\n",
+            "pub mod allowit {}\n",
+            "mod r#allowit {}\n",
+            "use core as allowit;\n",
+            "use core::{self as allowit};\n",
+            "use self::inner::allowit;\n",
+            "use inner::{allowit, other};\n",
+            "extern crate core as allowit;\n",
+            "macro_rules! allowit { () => {} }\n",
+            "fn allowit() {}\n",
+            "struct allowit;\n",
+            "enum allowit {}\n",
+            "trait allowit {}\n",
+            "type allowit = u8;\n",
+            "const allowit: u8 = 0;\n",
+            "static allowit: u8 = 0;\n",
+            "macro_rules! m { ($i:ident) => { mod $i {} } }\nm!(allowit);\n",
+        )
+        for rebind in rebinds:
+            for text in (rebind + source(body), source(body) + rebind):
+                with self.subTest(source=text), self.assertRaisesRegex(ValueError, "rebind"):
+                    ca.standard_prefix(text)
+        # Inside execute too, and through the owner packet path of every tier.
+        with self.assertRaisesRegex(ValueError, "rebind"):
+            ca.standard_prefix(source("    let allowit = 0;\n" + body))
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(rebinds[0] + source(body))
+            digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+            for tier, rules, source_digest in (("common", ["recipients", "expiry"], "22" * 32), ("custom", [], digest), ("simple", [], "22" * 32)):
+                with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "rebind"):
+                    ca.policy_rules({"rules": rules, "source_digest": source_digest}, tier, str(policy))
+        # Comments, literals and longer identifiers are not bindings.
+        allowed = '// mod allowit {}\nconst S: &str = "use x as allowit;";\nfn allowit_helper() {}\n'
+        self.assertEqual(ca.standard_prefix(allowed + source(body)), ["recipients", "expiry"])
+
+    def test_policy_source_is_one_self_contained_file(self):
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        body = call("expiry")
+        outside = (
+            'include!("more.rs");\n',
+            'const S: &str = include_str!("secret.txt");\n',
+            'const B: &[u8] = core::include_bytes!("data.bin");\n',
+            'const E: &str = env!("HOME");\n',
+            'const O: Option<&str> = option_env!("POLICY");\n',
+            "use core::include as inline;\n",
+            '#[path = "other.rs"]\nmod other {}\n',
+            '#[cfg_attr(all(), path = "other.rs")]\nmod other {}\n',
+            "mod other;\n",
+            "pub(crate) mod r#other ;\n",
+            "macro_rules! m { ($i:ident) => { mod $i; } }\n",
+            "extern crate core;\n",
+        )
+        for code in outside:
+            for text in (code + source(body), source(body) + code):
+                with self.subTest(source=text), self.assertRaisesRegex(ValueError, "self-contained"):
+                    ca.standard_prefix(text)
+        with self.assertRaisesRegex(ValueError, "self-contained"):
+            ca.standard_prefix(source('    let _ = include_str!("x");\n' + body))
+        with self.assertRaisesRegex(ValueError, "inner"):
+            ca.standard_prefix("#![allow(unused)]\n" + source(body))
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(source(body) + outside[0])
+            digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, "self-contained"):
+                ca.policy_rules({"rules": [], "source_digest": digest}, "custom", str(policy))
+        # Inline modules and mentions in comments or literals stay valid.
+        allowed = 'mod helpers { pub fn one() -> u8 { 1 } }\n// include!("x")\nconst S: &str = "mod other;";\n'
+        self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
+        # The CustomPolicy sources pass the same check.
+        for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs"):
+            ca.checked_code((ROOT / path).read_text())
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/check-policy-bindings.py")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_wallet_code_changes_require_custody_layout_2(self):
         self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"2"))), 2)
         # The version 1 release declares only SDK metadata.

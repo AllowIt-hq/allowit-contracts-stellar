@@ -68,6 +68,9 @@ The asset is an immutable native SAC. Identity and source digests are nonzero 32
 authored `--policy-source` file and rejects any other list: Common binds the source's prefix,
 Simple and Custom bind an empty list. `--tier custom` also requires `source_digest` to be the
 SHA-256 of that file. Owner `deploy_policy` packets take the same two options for the target tier.
+Every tier requires one self-contained source file that names `allowit` only as the path root
+`allowit::`; file and environment macros, `#[path]`, `cfg_attr`, out-of-line modules and any
+rebinding of `allowit` reject ([details](architecture.md#one-portable-policy-source)).
 
 Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`

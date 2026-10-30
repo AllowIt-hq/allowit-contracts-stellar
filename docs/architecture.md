@@ -30,11 +30,18 @@ pub fn execute(ctx: &AllowitContext) -> allowit::Result {
 ```
 
 The standard contract runs only its leading canonical calls, supplied by the owner as `rules`, and
-skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file. It lexes
+skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes
 Rust comments, including nested block comments, and literals first, so they cannot add or hide calls.
 
-CustomPolicy compiles the file as a module with `#[path]`. The host portability test includes it, so
-the file must not use inner attributes or inner doc comments; `check-policy-bindings.py` rejects them.
+Policy source names `allowit` only as the path root `allowit::`. Any other occurrence of the
+identifier, such as `mod allowit`, `use core as allowit`, `extern crate`, `macro_rules! allowit` or
+`fn allowit`, could rebind the crate that prefix calls name, so the tooling rejects it.
+
+CustomPolicy compiles the file as a module with `#[path]`, and `SOURCE_HASH` covers only that file.
+The file must therefore be the whole policy: it must not use `include!`, `include_str!`,
+`include_bytes!`, `env!`, `option_env!`, `#[path]`, `cfg_attr` or an out-of-line `mod name;`. The
+host portability test includes the file, so it must not use inner attributes or inner doc comments.
+`check-policy-bindings.py` and the owner packet tooling of every tier reject all of these.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec` and contract types. Feature `std` uses heap strings and vectors

@@ -27,7 +27,7 @@ SCHEMA = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,t
 DEPOSIT_SCHEMA = b"allowit.stellar.sep56_deposit.v1:ScValMap(assets:i128,from:Address,min_shares:i128,operator:Address,receiver:Address,vault:Address)"
 WALLET_KIND = "common_policy_engine"
 POLICY_DENIED = 18
-BUILD_SCRIPTS = ("build-contracts.sh", "check-policy-bindings.py")
+BUILD_SCRIPTS = ("build-contracts.sh", "check-policy-bindings.py", "policy_source.py")
 
 # The smoke policy is entirely one standard prefix of canonical calls. Its rules derive from the source.
 SMOKE_SOURCE = b"""use allowit::prelude::*;
