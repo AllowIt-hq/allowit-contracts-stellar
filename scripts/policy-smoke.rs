@@ -20,7 +20,7 @@ fn context() -> AllowitContext {
     let recipient = "GRECIPIENT".to_string();
     let asset = "CASSET".to_string();
     AllowitContext {
-        env: AllowitEnv::default(),
+        env: AllowitEnv::new(),
         grant: AllowitGrant {
             transaction_cap: Some(10),
             spent_cap: Some(30),
@@ -52,7 +52,7 @@ fn context() -> AllowitContext {
 /// Run a policy as the offchain server does, on a context with a new host environment.
 fn run(c: &AllowitContext, execute: fn(&AllowitContext) -> allowit::Result) -> allowit::Result {
     let c = AllowitContext {
-        env: AllowitEnv::default(),
+        env: AllowitEnv::new(),
         ..c.clone()
     };
     allowit::run(&c, execute)
@@ -137,7 +137,7 @@ fn host_context(v: &Vector) -> AllowitContext {
             .map(|items| items.iter().map(|i| address(*i)).collect())
     };
     AllowitContext {
-        env: AllowitEnv::default(),
+        env: AllowitEnv::new(),
         grant: AllowitGrant {
             transaction_cap: v.caps[0],
             spent_cap: v.caps[1],

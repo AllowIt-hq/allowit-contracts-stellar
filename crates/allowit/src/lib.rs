@@ -110,9 +110,21 @@ pub mod host {
     /// Host environment of one policy evaluation. Clones share it. It records the first rule
     /// failure, so `run` denies even if the policy catches the error. Create a new one for every
     /// evaluation.
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug)]
     pub struct AllowitEnv {
         failure: Rc<Cell<Option<AllowitError>>>,
+    }
+
+    impl AllowitEnv {
+        /// A new environment without a recorded failure. `AllowitEnv` does not implement
+        /// `Default`, so policy code cannot replace `ctx.env` with `Default::default()` on the
+        /// host: that would drop the record here while onchain it keeps the same contract storage.
+        #[allow(clippy::new_without_default)]
+        pub fn new() -> Self {
+            Self {
+                failure: Rc::new(Cell::new(None)),
+            }
+        }
     }
 
     /// Record the first rule failure of this evaluation.

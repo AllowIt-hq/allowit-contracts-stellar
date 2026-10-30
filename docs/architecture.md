@@ -141,9 +141,11 @@ after the policy returns, so policy code cannot turn a rule failure into a pass 
 `if let` or `let _`. `run` never clears the record. Context clones share it. Onchain, the record is
 the temporary-storage entry `rule_fail` of the running contract. The denial rolls the write back
 with the rest of the invocation, and the custom contract reads the key after every run, so its
-footprint includes that key. On the host, `AllowitEnv` holds the record; create a new one for every
-evaluation. Authored code can read `ctx.env` but must not call its methods, because the two
-environments have none in common.
+footprint includes that key. On the host, `AllowitEnv` holds the record; create one with
+`AllowitEnv::new()` for every evaluation. Authored code can read `ctx.env` but must not call its
+methods, because the two environments have none in common. `AllowitEnv` does not implement
+`Default`, so `c.env = Default::default()` compiles only onchain, where every `Env` reaches the same
+contract storage, and the std-only compile rejects it.
 
 | Rule and same-named Grant field | Native value | Pass value |
 | --- | --- | --- |
