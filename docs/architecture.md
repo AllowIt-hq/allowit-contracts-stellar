@@ -3,44 +3,89 @@
 Wallets keep one immutable underlying Stellar Asset Contract (SAC). The owner selects code, agent,
 independent server signer and Grant. SimplePolicyEngine relies on agent/server authorization.
 CommonPolicyEngine is the standard implementation for an owner-approved initial preflight prefix.
-CustomPolicy artifacts retain an explicit compiled-source binding. Shared checkers have no custody.
+CustomPolicy compiles a complete authored policy into its contract. Shared checkers have no custody.
 
-## One policy and its standard prefix
+## One portable policy source
 
-Source uses one matching Grant argument: `allowit::spent_cap(grant::spent_cap)?;`.
-The SDK extracts only consecutive initial top-level canonical calls. Any subset is valid.
-Conditional calls and other custom logic run offchain within the same policy.
-The standard contract receives the exact owner-approved ordered prefix, never caller selectors.
+Policy source is ordinary synchronous Rust against `crates/allowit`. The same file compiles
+unchanged for the offchain server, a CustomPolicy contract and the standard contract preflight:
 
-| Rule and same-named Grant key | Native value and meaning |
+```rust
+use allowit::prelude::*;
+pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
+    allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
+    allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+    allowit::recipients(ctx, &ctx.grant.recipients)?;
+    Ok(())
+}
+```
+
+`allowit` has two backends that share one rule implementation. Feature `soroban` uses Soroban
+`Address`, `String`, `Vec` and contract types. Feature `std` uses heap strings and vectors for the
+host evaluator; addresses are StrKey text. The CustomPolicy tests compile its source under both
+backends and require identical pass values and errors on a shared vector set.
+
+`AllowitEnv` is the complete rule input. The wallet or server computes it:
+
+| Field | Content |
 | --- | --- |
-| `transaction_cap` | Nonnegative I128/U64 gross underlying units for one operation |
-| `spent_cap` | Nonnegative cumulative irreversible-expense ceiling |
-| `day_spent_cap` | Nonnegative UTC-day irreversible-expense ceiling |
-| `day_total_cap` | Nonnegative UTC-day gross amount plus separate attributable gas |
-| `call_cap` | U64 successful operation count ceiling |
-| `recipients` | `Vec<Address>` permitted destinations, including vaults |
-| `expiry` | U64 exclusive Unix timestamp |
-| `tokens` | `Vec<Address>` exact permitted SAC identities |
+| `grant` | Typed owner `Grant`. Each field is an `Option`; `None` is unset |
+| `state` | Protected `AccountingHistory` proposed after this operation |
+| `request` | Operation name, immutable asset, recipient (deposit vault), amount, `now`, `expires_at` |
 
-Missing or Null owner parameters disable that selected check. Wrong non-Null types reject.
-Unreadable state never becomes absence. Unmentioned checks do not activate through Grant keys.
-Repeated rules retain exact order and use independent operation markers to avoid duplicate charges.
-Changed economic facts cannot reuse a prior operation marker. Grant changes preserve accounting.
-Protected `State.history` records every delegated success independently of selected or disabled rules.
-Rules read the proposed history through `EngineRequest.history`, separate from mutable business Spent.
-With cost bounds it records conservative expenses and gas. Without them it records raw gross and calls
-plus an unpriced liability. Active lifetime expense caps reject lifetime unpriced history.
-Daily expense/total caps reject unpriced history for that UTC day. Rollover clears only daily liability.
-No owner reconciliation or refund method silently clears this protected history.
+Rules are pure checks: `allowit::<rule>(ctx, &Option<V>) -> allowit::Result<T>`. Each returns only
+its passing constraint, or an `allowit::Error`. An unset field is `MissingGrant`. Policy code calls
+rules unguarded, so an unset parameter denies. Future server-only functions use the same shape.
+
+| Rule and same-named Grant field | Native value | Pass value |
+| --- | --- | --- |
+| `transaction_cap` | Nonnegative `i128` gross units for one operation | `cap - amount` |
+| `spent_cap` | Nonnegative `i128` cumulative irreversible-expense ceiling | `cap - state.spent` |
+| `day_spent_cap` | Nonnegative `i128` UTC-day irreversible-expense ceiling | `cap - state.day_spent` |
+| `day_total_cap` | Nonnegative `i128` UTC-day gross amount plus separate gas | `cap - state.day_total` |
+| `call_cap` | `u64` successful operation count ceiling; zero denies | `cap - state.calls` |
+| `recipients` | `Vec<Address>` permitted destinations, including vaults; empty denies | Matched recipient |
+| `tokens` | `Vec<Address>` exact permitted SAC identities; empty denies | Matched asset |
+| `expiry` | `u64` exclusive Unix timestamp; request expiry cannot exceed it | Seconds to `min(expiry, expires_at)` |
+
+A negative cap or nonpositive amount is `InvalidParameter`. Accounting caps reject negative history
+and history of another UTC day with `InvalidState`. Lifetime unpriced history denies `spent_cap`.
+Unpriced history of the day denies both daily caps (`Unpriced`). Deployment rejects negative caps.
+
+## Standard prefix
+
+The standard prefix is the consecutive leading top-level statements of exactly the form
+`allowit::<rule>(ctx, &ctx.grant.<rule>)?;`: one canonical rule and its same-named Grant field.
+Any other statement ends it. Later statements run offchain or in CustomPolicy.
+The standard contract receives the exact owner-approved ordered prefix as `rules`, never caller
+selectors. It runs each call as `if grant.<rule>.is_some() { allowit::<rule>(ctx, &grant.<rule>)?; }`
+and discards pass values. This preflight runner is the only place an unset field skips its rule.
+The offchain full policy still runs the unguarded call. Repeated rules read the same proposed
+history, so they cannot charge twice. Unknown or retired names reject at deployment.
+
+Rule denials map to `PolicyDenied`. `MissingGrant` and `InvalidParameter` map to `InvalidGrant`.
+`InvalidState` maps to `InvalidState`. A failed call rolls back its events, so only the host
+evaluator and the shared engine return the specific rule error.
+
+Protected `State.history` records every delegated success independently of selected or unset rules.
+With cost bounds it records conservative expenses and gas. Without them it records raw gross and
+calls plus an unpriced liability. Rollover clears only daily liability. No owner reconciliation or
+refund method silently clears this history. No mutable business usage map exists. The kernel's
+single-use `operation_id`, execution nonce and day checks reject replays, changed facts and
+backward clocks before rules run.
 
 ## Source and configuration binding
 
 Fixed standard `source_digest` is SHA-256 of canonical XDR containing the domain
 `allowit_std_prefix`, implementation kind, actual module hash, immutable SAC, transfer/deposit schema
-hashes and ordered `(rule, matching Grant reference)` pairs. It excludes Grant values and full
-source. The constructor and binding getter check it against the actual runtime module.
-Custom `source_digest` remains its exact compiled source hash.
+hashes and the ordered `(rule, matching Grant reference)` pairs. Each pair names the rule twice
+because the reference is always its same-named field. It excludes Grant values and full source.
+The constructor and binding getter check it against the actual runtime module.
+
+Custom `source_digest` is the plain SHA-256 of the exact bytes of `crates/custom-policy/policy/policy.rs`.
+`build.rs` computes `SOURCE_HASH` from the file that the contract includes verbatim, so they
+cannot drift. `ARGUMENT_SCHEMA_HASH` admits only `stellar::sep41_transfer`. The contract does not
+depend on SDK-generated code. `scripts/check-policy-bindings.py` checks the schema binding.
 
 The complete source has separate offline owner authorization, scoped to wallet, network, policy,
 prefix and monotonic source revision. Changing only that offchain suffix needs no chain call.
@@ -48,9 +93,20 @@ Each execution separately carries `source_hash`, covered by agent/server authori
 digest. Offline updates do not replace already signed operation bytes or their recovery identity.
 
 `deploy_policy` changes owner configuration at exactly the next `deployment_version`.
-With `wasm_hash=None`, Grant values change without code redeployment. Prefix, Spent, custody,
+With `wasm_hash=None`, Grant values change without code redeployment. Prefix, history, custody,
 execution nonce and pause remain intact when only Grant changes. The new revision rejects old
 inflight packets. A changed prefix or executable requires a new owner binding.
+
+The typed Grant changes the stored State layout, owner configuration packets and the CustomPolicy
+source hash. Wallets that store the retired Map Grant fail state decoding. They need an explicit
+redeploy or migration. No implicit migration exists.
+
+## Shared engine
+
+The shared engine exposes each canonical rule as `<rule>(ctx: AllowitEnv) -> Result<T, Error>`.
+It runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)` and returns the same pass value or rule error.
+It holds no custody, Grant or history, and policy wallets do not call it. It serves simulation
+and checker-upgrade administration through the engine parent. `engine_version` 2 marks this ABI.
 
 ## Expenses and native effects
 
@@ -63,10 +119,10 @@ decimals. Share units retain their independent native scale.
 gas units, conversion units, spent units, attributable fee ceiling, observation ledger and UTC day.
 Unknown fields, wrong types, noncanonical maps, extra data and oversized bytes reject.
 The server approves exact conservative economic ceilings. The kernel checks denomination, day,
-ledger and operation-class identities. It cannot observe final transaction gas. XLM/stroop identity
-conversion is intrinsic; other gas conversions need an admitted trusted source.
-Onchain counters retain ceilings. The server separately settles actual expenses and temporary loss.
-No automatic onchain refund authority follows from that accounting.
+ledger, operation class, nonnegative units and the fee/gas identity. It cannot observe final
+transaction gas. XLM/stroop identity conversion is intrinsic; other gas conversions need an
+admitted trusted source. Onchain counters retain ceilings. The server separately settles actual
+expenses and temporary loss. No automatic onchain refund authority follows from that accounting.
 
 `execute` and the owner-enabled x402 transfer hook require agent and server authority. The kernel
 checks source/module/schema, immutable asset, exact parties/amount, positive debit, pause, expiry,
@@ -91,7 +147,7 @@ Owner `invoke` can redeem shares independently. The server reconciles actual set
 Owner pause, configuration, recovery, upgrades and exact `invoke` bypass agent/server business checks
 and never call an engine. Owner authorization binds exact target, arguments and supplied subtrees.
 `policy_binding()` reports the default profile; `policy_binding_for(schema_digest)` checks another
-admitted profile. `policy_spent()` returns the complete raw map without a public setter.
+admitted profile. `state()` returns the typed Grant and protected history.
 Unknown stored layouts reject. Upgrades do not migrate state implicitly.
 
 Classic G-address multisig has no contract prefix enforcement. Owner-selected signer thresholds

@@ -2,7 +2,7 @@
 
 `mainnet_release.py` prepares bounded, unsigned Stellar release packets. It never signs or broadcasts. Keep plans, authorization requests and packets in a private directory. Do not place keys or seeds in them. Python and CLI versions follow [administration](admin.md).
 
-The tool pins contract source `b5a5d4b13e9162dc9034df85442ea2251f65a845`, compiler source `9e57f935807da615bc1258f6b4b72fc40be64386`, every build input and the exact engine, parent and CommonPolicyEngine Wasm hashes. The smoke wallet explicitly selects recipient, transaction, daily, total, call and expiry rules. Its source digest identifies the literal six-rule policy in the tool. The separate parent manages a shared checker; it has no custody authority over this wallet.
+The tool pins one reviewed contract source revision, every build input and the exact engine, parent and CommonPolicyEngine Wasm hashes. The previous pins (`b5a5d4b13e9162dc9034df85442ea2251f65a845`) encode the retired Map Grant, so the tool rejects every plan until a reviewed typed-Grant release is pinned. The smoke wallet selects the `recipients`, `transaction_cap`, `day_total_cap`, `spent_cap`, `call_cap` and `expiry` prefix, with the same-named Grant fields. The wallet `source_digest` is the standard prefix digest derived from the wallet artifact hash. The plan's `policy_source_digest` identifies the literal six-call source in the tool; executions carry it as `source_hash`. Each execution signs conservative XLM expense ceilings: the full execute fee cap is gas, and spent units are payment plus gas. The separate parent manages a shared checker; it has no custody authority over this wallet.
 
 ## Plan and accounts
 
@@ -51,6 +51,6 @@ Completion verifies the server signature, current signer profiles, original tran
 
 After funding, use `simulate-e2e` with the parent, wallet and a nonzero operation ID. It checks a positive receipt, forbidden recipient, excessive amount, stale deployment version and expiry. After execution, a fresh operation ID plus `--replay-id ORIGINAL_HEX` checks replay rejection. These record-mode simulations do not establish actual signatures or settlement; completion separately enforces the server signature.
 
-`settle` queries the original transaction hash. Missing or uncertain results stay unresolved. Success requires the exact receipt and a charged fee within the original bid and stage cap. Funding checks the wallet's exact balance increase. Execution checks wallet and recipient balances plus Common call and total counters. Concurrent owner activity can prevent exact comparison and requires reconciliation. Use a new status-output filename for each observation.
+`settle` queries the original transaction hash. Missing or uncertain results stay unresolved. Success requires the exact receipt and a charged fee within the original bid and stage cap. Funding checks the wallet's exact balance increase. Execution checks wallet and recipient balances plus protected history calls and spent (payment plus gas ceiling). Concurrent owner activity can prevent exact comparison and requires reconciliation. Use a new status-output filename for each observation.
 
 Read simulations do not renew TTL. Follow [administration](admin.md) for submitted lifetime maintenance and restoration. Network deployment and live settlement require separate operator authorization.

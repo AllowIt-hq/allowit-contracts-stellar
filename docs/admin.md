@@ -64,14 +64,16 @@ Select `allowit_simple_policy_engine.wasm`, `allowit_common_policy_engine.wasm`,
 `allowit_custom_policy.wasm`. Config contains exactly `owner`, `agent`, `server`, `asset`,
 `policy_instance`, `source_digest`, `rules`, `grant`, and `x402_enabled`.
 The asset is an immutable native SAC. Identity and source digests are nonzero 32-byte hex strings.
-`rules` contains the owner's ordered Common function names. An empty Common list selects no local business checks. Simple and Custom use an empty list.
+`rules` contains the owner's ordered standard prefix of canonical rule names. An empty Common list selects no local business checks. Simple and Custom use an empty list.
 The Custom sample's source digest must match its compiled source.
 
-Grant JSON maps names to canonical base64 SCVal XDR. The tool converts these exact values to the
-pinned CLI's tagged native JSON without guessing types. For example, generate a U64 limit with
-`stellar_sdk.scval.to_uint64(100000).to_xdr()` or bytes with `scval.to_bytes(value).to_xdr()`.
-Each selected Common rule requires its documented Grant parameter. Configuration changes and same-code redeployments reject missing or malformed values. Code changes defer the new tier validation to delegated admission.
-Duplicate JSON keys and noncanonical value encodings reject. Fund the wallet only with its
+Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,
+`spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`
+(unsigned 64-bit integers), `recipients` and `tokens` (address lists). A missing field or null is
+unset. The standard preflight skips an unset selected rule; full policy code denies it.
+Legacy names such as `per_transfer`, `daily_limit` or `max_calls` reject. Negative caps reject at
+configuration. Code changes defer the new tier validation to delegated admission.
+Duplicate JSON keys reject. Fund the wallet only with its
 installed asset. `recover` transfers only that asset.
 
 `admin --family wallet --contract ADDRESS --source "$OWNER" --method METHOD --arguments JSON` admits
@@ -80,7 +82,7 @@ admin source and three `--member` values.
 
 A deployment argument contains exactly `deployment_version`, `owner`, `agent`, `server`,
 `source_digest`, `rules`, `grant`, `x402_enabled`, and `wasm_hash`. The target version is current plus
-one. Use null for unchanged code. Deployment preserves pause and spent data. A changed owner must
+one. Use null for unchanged code. Deployment preserves pause and protected history. A changed owner must
 also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
 False disables x402 without changing direct two-role execution authorization. Classic signer rotation and `shutdown-wallet` do not revoke raw-key x402 delegation. The contract wallet owner must disable x402, pause, or replace the agent/server address through `deploy_policy`.
 
@@ -101,14 +103,17 @@ envelopes expire after five minutes. Save signed bytes before broadcast and reco
 hash after an uncertain response. The tool never signs, submits, restores or retries automatically.
 
 Use `read --contract POLICY_WALLET_ADDRESS --source "$OWNER" --method policy_binding` to inspect the contract
-release, policy instance, module/source digests and argument schema. `policy_spent` reads the full
-raw usage map. Archived data requires native restoration and is never reinitialized as an absent
-map. The SDK rejects unavailable or ambiguous state observations before new signing. Owner pause,
-deployment and recovery do not read spent data or depend on shared engine availability.
+release, policy instance, module/source digests and argument schema. `state` returns the typed
+Grant and protected history. Archived data requires native restoration and is never reinitialized.
+The SDK rejects unavailable or ambiguous state observations before new signing. Owner pause,
+deployment and recovery do not depend on shared engine availability.
+
+Wallets deployed with the retired Map Grant cannot decode under the typed layout. Redeploy them
+or use the explicit migration sequence below.
 
 Normal operations do not migrate state. An incompatible change uses this explicit maintenance
 sequence: pause, deploy and run a migration contract, deploy the new contract using the migrated
-state, then unpause. Compatible code updates retain the installed format and usage/replay records.
+state, then unpause. Compatible code updates retain the installed format, history and replay records.
 
 The parent stores `owner`, `version` and `engine`. Wallet deployment and contract release versions remain separate.
 Older parent state uses different field names. Migrate that state explicitly before installing this parent executable on an existing address.
