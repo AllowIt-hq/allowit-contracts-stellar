@@ -572,6 +572,27 @@ class ContractAdmin(unittest.TestCase):
             "const N: u32 = ::core::u32::MAX;\n",
             "fn g(x: ::core::primitive::u8) {}\n",
             "fn g() -> u8 { (|| ::core::primitive::u8::MAX)() }\n",
+            "use ::core::mem as m;\n",
+            "fn g() -> Result<(), ()> { return ::core::result::Result::Ok(()); }\n",
+            "fn g(x: u8) -> u8 { match x { _ => ::core::primitive::u8::MAX } }\n",
+            # Width and type introspection that differs between the backends.
+            "fn g() -> u32 { core::panic::Location::caller().line() }\n",
+            "const W: usize = core::mem::size_of::<usize>();\n",
+            "const W: u32 = usize::BITS;\n",
+            "fn g() -> bool { core::any::TypeId::of::<AllowitContext>() == core::any::TypeId::of::<u8>() }\n",
+            # Dependencies of the including crate, host functions and assembled paths.
+            "fn g() { let e = soroban_sdk::Env::default(); e.storage().instance().set(&1u32, &1u32); }\n",
+            "fn g() { <soroban_sdk::Env>::default(); }\n",
+            "fn g() { r#soroban_sdk::Env::default(); }\n",
+            "use soroban_sdk as Sdk;\n",
+            "use {soroban_sdk::Env};\n",
+            "fn g() { allowit_policy_wallet::policy_wallet(); }\n",
+            "fn g() { std::process::exit(0) }\n",
+            "fn g() { alloc::vec::Vec::<u8>::new(); }\n",
+            "mod helpers { pub fn one() {} }\nfn g() { helpers::one() }\n",
+            'unsafe extern "C" { fn put(k: u64) -> u64; }\n',
+            "fn g() { unsafe { core::hint::unreachable_unchecked() } }\n",
+            "macro_rules! m { ($($x:ident),*) => { $($x)::*::default() } }\n",
         )
         for code in outside:
             for text in (code + source(body), source(body) + code):
@@ -591,7 +612,9 @@ class ContractAdmin(unittest.TestCase):
         # Inline modules and mentions in comments or literals stay valid.
         allowed = ('mod helpers { pub fn one() -> u8 { 1 } }\n// include!("x")\nconst S: &str = "mod other;";\n'
                    "const T: &str = \"crate::x cfg!(test) ::core\";\npub(crate) fn two() -> u8 { Vec::<u8>::new().len() as u8 + 2 }\n"
-                   "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n")
+                   "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n"
+                   "fn four(x: &[i128]) -> i128 { x.iter().sum::<i128>() + i128::MAX.min(0) + Option::<i128>::None.unwrap_or(0) }\n"
+                   "use allowit::{AllowitError as Denied, DAY};\nfn five() -> Denied { Denied::MissingGrant }\n")
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
         # The `AllowitCustomPolicy` sources pass the same check.
         for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs"):

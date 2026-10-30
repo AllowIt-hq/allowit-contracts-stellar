@@ -24,19 +24,80 @@ ALLOWIT = re.compile(r"\ballowit\b")
 # Code that reads other files, the build environment or the including crate, so the one hashed
 # file would not be the whole policy, or that can behave differently in `AllowitCustomPolicy` and on the
 # host: file and environment macros, `#[path]`, `cfg_attr` (which can add `path`), an out-of-line
-# module, `extern crate`, conditional compilation, location and type-name introspection, and paths
-# rooted at `crate`, `super`, `self` or a bare `::`.
+# module, `extern` items, `unsafe` code and symbol attributes, macro definitions (which can assemble
+# paths that the root check below cannot see), conditional compilation, and location, type and
+# width introspection. Path roots are checked separately by `path_roots`.
 OUTSIDE = (
     (re.compile(r"\b(?:include|include_str|include_bytes|env|option_env)\b"), "file or environment macro"),
     (re.compile(r"#\s*\[\s*path\b"), "#[path] attribute"),
     (re.compile(r"\bcfg_attr\b"), "cfg_attr attribute"),
     (re.compile(r"\bmod\s+[^{};]*;"), "out-of-line module"),
-    (re.compile(r"\bextern\s+crate\b"), "extern crate"),
+    (re.compile(r"\bextern\b"), "extern item"),
+    (re.compile(r"\b(?:unsafe|no_mangle|export_name|link_section)\b"), "unsafe code or symbol attribute"),
+    (re.compile(r"\bmacro_rules\b"), "macro definition"),
     (re.compile(r"\bcfg\b"), "conditional compilation"),
-    (re.compile(r"\b(?:module_path|type_name|type_name_of_val)\b|\bfile\s*!"), "location or type-name introspection"),
+    (re.compile(r"\b(?:module_path|type_name|type_name_of_val|Location|TypeId|size_of|size_of_val|align_of|align_of_val|BITS)\b|\bfile\s*!"),
+     "location, type or width introspection"),
     (re.compile(r"\b(?:crate|super|self)\s*::"), "path into the including crate"),
-    (re.compile(r"(?:^|[^\w>\s])\s*::"), "path rooted at ::"),
 )
+# Path roots that name the same thing in every including crate: the canonical crate, `core` and
+# primitive types. A capitalized root is a type, trait, enum or generic parameter; no crate in the
+# extern prelude of an including crate has a capitalized name. Every other root, such as
+# `soroban_sdk`, `std`, `alloc` or `allowit_policy_wallet`, can reach a dependency of the including
+# crate, and a lowercase local name cannot be told apart from one lexically.
+ROOTS = frozenset(("allowit", "core", "bool", "char", "str", "f32", "f64") + tuple(
+    sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 128, "size")))
+KEYWORDS = frozenset((
+    "as", "async", "await", "box", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn",
+    "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
+    "static", "struct", "super", "trait", "type", "union", "unsafe", "use", "where", "while", "yield"))
+TOKEN = re.compile(r"r#[A-Za-z_]\w*|[A-Za-z_]\w*|::|=>|->|\$\w*|'\w+|\d\w*|\S")
+IDENT = re.compile(r"(?:r#)?[A-Za-z_]\w*")
+
+
+def root_error(name):
+    """Return why a path root is not allowed, or None."""
+    name = name.removeprefix("r#")
+    if name in ROOTS or name[:1].isupper():
+        return None
+    return "path rooted at `{}`; roots must be `allowit`, `core`, a primitive type or a capitalized type".format(name)
+
+
+def use_roots(tokens, i):
+    """Yield the root token of each tree of the `use` declaration whose tree starts at tokens[i]."""
+    if i >= len(tokens):
+        return
+    if tokens[i] != "{":
+        yield tokens[i]
+        return
+    depth, start = 0, i + 1
+    for j in range(i, len(tokens)):
+        depth += (tokens[j] == "{") - (tokens[j] == "}")
+        if depth == 1 and tokens[j] == "," or depth == 0:
+            yield from use_roots(tokens, start)
+            start = j + 1
+        if depth == 0:
+            return
+
+
+def path_roots(code):
+    """Raise ValueError when a path or `use` tree starts at a root other than `ROOTS` or a capitalized
+    name. A bare `::` root, after a keyword or punctuation other than `>`, reaches the extern prelude."""
+    tokens = TOKEN.findall(code)
+    for i, token in enumerate(tokens):
+        before = tokens[i - 1] if i else ""
+        if token == "::":
+            if not IDENT.fullmatch(before) and before != ">" or before in KEYWORDS:
+                raise ValueError("Policy source must be one self-contained file; it uses a path rooted at ::")
+            # A segment after `::` or `.` (method turbofish), or before `<` (turbofish), is no root.
+            segment = i >= 2 and tokens[i - 2] in ("::", ".") or tokens[i + 1:i + 2] == ["<"]
+            if IDENT.fullmatch(before) and not segment and (error := root_error(before)):
+                raise ValueError("Policy source must be one self-contained file; it uses a " + error)
+        elif token == "use" and before != ".":
+            for root in use_roots(tokens, i + 1):
+                if root not in ("::", "}") and (not IDENT.fullmatch(root) or (error := root_error(root))):
+                    raise ValueError("Policy source must be one self-contained file; it uses a "
+                                     + (error if IDENT.fullmatch(root) else "use tree rooted at " + root))
 
 
 def rust_code(source):
@@ -87,6 +148,7 @@ def checked_code(source):
     for pattern, name in OUTSIDE:
         if pattern.search(code):
             raise ValueError("Policy source must be one self-contained file; it uses " + name)
+    path_roots(code)
     return code
 
 

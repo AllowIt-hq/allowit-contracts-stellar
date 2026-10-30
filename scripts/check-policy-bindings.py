@@ -2,8 +2,8 @@
 """Check the custom policy's argument-schema binding and report its source digest.
 
 The contract compiles policy/policy.rs verbatim as a module. build.rs derives SOURCE_HASH from the same
-bytes, so the file must be the whole policy: it must not read other files or the environment, and it
-must bind `allowit` only to the canonical crate. The host portability test includes the file, which
+bytes, so the file must be the whole policy: it must not read other files, the environment or crates
+other than `allowit` and `core`, and it must bind `allowit` only to the canonical crate. The host portability test includes the file, which
 rejects inner attributes and doc comments."""
 import ast
 import hashlib

@@ -57,13 +57,32 @@ The file must therefore be the whole policy: it must not use `include!`, `includ
 `include_bytes!`, `env!`, `option_env!`, `#[path]`, `cfg_attr` or an out-of-line `mod name;`. The
 host portability test includes the file, so it must not use inner attributes or inner doc comments.
 The same file must also behave the same offchain and onchain, so it must not use `cfg` or `cfg!`,
-`module_path!`, `file!`, `type_name` or `type_name_of_val`, or paths rooted at `crate::`, `super::`,
-`self::` or a bare `::`, which reach the including crate or select code by build target.
-`check-policy-bindings.py` and the owner packet tooling of every tier reject all of these.
+`module_path!`, `file!`, `type_name`, `type_name_of_val`, `Location`, `TypeId`, `size_of`,
+`size_of_val`, `align_of`, `align_of_val` or `BITS`, which select code by build target or expose the
+backend's paths, types or widths. It must not use `unsafe`, `extern` items, `no_mangle`,
+`export_name`, `link_section` or `macro_rules!`.
+
+The file must also not reach the dependencies of the including crate. In `AllowitCustomPolicy`
+those include `soroban_sdk`, whose `Env::default()` gives a live host environment, and the wallet
+crates. Every path and `use` tree must start at `allowit`, `core`, a primitive type such as `u32`, or
+a capitalized type, trait, enum or generic parameter such as `AllowitOperation` or `Self`. Roots such
+as `soroban_sdk`, `std`, `alloc`, `allowit_policy_wallet`, `crate`, `super`, `self`, a bare `::` or a
+lowercase local module reject. The capitalized rule assumes that no direct dependency of an
+including crate has a capitalized crate name. Macro definitions reject because they can assemble
+a path from separate tokens. `check-policy-bindings.py` and the owner packet tooling of every tier
+reject all of these.
 
 These checks are lexical. They cannot prove that the two backends behave the same, for example
-when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host. The
-dual-backend test below is the remaining guard.
+when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host. They also do
+not compile the file. Two compiles are therefore required guards for every owner source:
+
+- The dual-backend test below compiles the file under both backends and compares results. It runs
+  inside `allowit-custom-policy`, which also depends on `soroban_sdk`, so it cannot detect a path
+  into that crate.
+- The std-only compile in the `policy` job of `.github/workflows/contracts.yml` builds the file
+  with plain `rustc` against `allowit` alone, as the offchain server does. A path into any other
+  crate fails there. `scripts/contract_admin.py` does not compile the source, so run this compile on
+  every owner source before deployment.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec` and contract types. Feature `std` uses heap strings and vectors
