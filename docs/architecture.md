@@ -21,13 +21,21 @@ CustomPolicy compile the file verbatim:
 
 ```rust
 use allowit::prelude::*;
+/// Let my agent pay our invoices. Cap every payment, cap its total spending and pay only vendors
+/// I approve.
 pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+    // "Cap every payment"
     allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
+    // "cap its total spending"
     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+    // "pay only vendors I approve"
     allowit::recipients(ctx, &ctx.grant.recipients)?;
     Ok(())
 }
 ```
+
+The function doc comment keeps the owner's original policy prompt. Each inline comment quotes the
+prompt clause that the next call implements.
 
 The standard contract runs only its leading canonical calls, supplied by the owner as `rules`.
 `scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes

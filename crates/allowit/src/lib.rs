@@ -4,8 +4,11 @@
 //!
 //! ```ignore
 //! use allowit::prelude::*;
+//! /// Let my agent pay our invoices. Cap its total spending and pay only vendors I approve.
 //! pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+//!     // "Cap its total spending"
 //!     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+//!     // "pay only vendors I approve"
 //!     allowit::recipients(ctx, &ctx.grant.recipients)?;
 //!     Ok(())
 //! }

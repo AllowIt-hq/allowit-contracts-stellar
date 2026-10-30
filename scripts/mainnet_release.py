@@ -31,12 +31,20 @@ BUILD_SCRIPTS = ("build-contracts.sh", "check-policy-bindings.py", "policy_sourc
 
 # The smoke policy is entirely one standard prefix of canonical calls. Its rules derive from the source.
 SMOKE_SOURCE = b"""use allowit::prelude::*;
+/// Smoke-test my mainnet wallet. Pay only the pinned recipient, cap each payment, cap the daily
+/// volume, cap total spending, allow only a few payments and stop when the grant expires.
 pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+    // "Pay only the pinned recipient"
     allowit::recipients(ctx, &ctx.grant.recipients)?;
+    // "cap each payment"
     allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
+    // "cap the daily volume"
     allowit::day_total_cap(ctx, &ctx.grant.day_total_cap)?;
+    // "cap total spending"
     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+    // "allow only a few payments"
     allowit::call_cap(ctx, &ctx.grant.call_cap)?;
+    // "stop when the grant expires"
     allowit::expiry(ctx, &ctx.grant.expiry)?;
     Ok(())
 }
