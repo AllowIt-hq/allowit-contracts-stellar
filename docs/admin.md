@@ -70,7 +70,7 @@ Simple and Custom bind an empty list. `--tier custom` also requires `source_dige
 SHA-256 of that file. Owner `deploy_policy` packets take the same two options for the target tier.
 Every tier requires one self-contained, portable source file. The tooling rejects every
 construct listed in [One portable policy source](architecture.md#one-portable-policy-source). It
-does not compile the file; run the std-only compile described there before deployment.
+does not compile the file; run the std-only and Soroban compiles described there before deployment.
 
 Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`

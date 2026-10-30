@@ -34,15 +34,14 @@
 //! uses heap strings and vectors, and records rule failures in a host `AllowitEnv`. The selected
 //! backend backs the crate root, which authored policy names. The offchain server depends on
 //! `allowit = { default-features = false, features = ["std"] }` and must not unify `soroban`:
-//! enabling both is a compile error. Feature `dual` enables both for portability tests only;
-//! `soroban` then backs the root and `allowit::host` stays available.
+//! enabling both is a compile error.
 #[cfg(feature = "std")]
 extern crate alloc;
 
 #[cfg(not(any(feature = "soroban", feature = "std")))]
 compile_error!("Enable feature `soroban` or `std`");
 
-#[cfg(all(feature = "soroban", feature = "std", not(feature = "dual")))]
+#[cfg(all(feature = "soroban", feature = "std"))]
 compile_error!(
     "Features `soroban` and `std` select different crate-root types; use `default-features = false`"
 );
@@ -143,7 +142,7 @@ pub mod host {
 #[cfg(feature = "soroban")]
 pub use soroban::*;
 
-#[cfg(all(feature = "std", not(feature = "soroban")))]
+#[cfg(feature = "std")]
 pub use host::*;
 
 #[cfg(all(test, feature = "soroban"))]

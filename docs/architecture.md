@@ -77,25 +77,45 @@ a path from separate tokens. `check-policy-bindings.py` and the owner packet too
 reject all of these.
 
 These checks are lexical. They cannot prove that the two backends behave the same, for example
-when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host. They also do
-not compile the file. Two compiles are therefore required guards for every owner source:
+when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host, or calls a
+method of `ctx.env`. They also do not compile the file. Two compiles are therefore required guards
+for every owner source:
 
-- The dual-backend test below compiles the file under both backends and compares results. It runs
-  inside `allowit-custom-policy`, which also depends on `soroban_sdk`, so it cannot detect a path
-  into that crate.
-- The std-only compile in the `policy` job of `.github/workflows/contracts.yml` builds the file
-  with plain `rustc` against `allowit` alone, as the offchain server does. A path into any other
-  crate fails there. `scripts/contract_admin.py` does not compile the source, so run this compile on
-  every owner source before deployment.
+- The std-only compile builds `scripts/policy-smoke.rs`, which includes the file, with plain
+  `rustc` against `allowit` with only the `std` feature, as the offchain server does. A path into
+  `soroban_sdk`, a wallet crate or any other crate fails there, and so does a call to a Soroban
+  `Env` method. `cargo test` runs it in the portability test below, and the `policy` job of
+  `.github/workflows/contracts.yml` runs it on every pull request.
+- The Soroban compile builds the file into `AllowitCustomPolicy`. A host-only name, such as
+  `allowit::AllowitEnv`, fails there.
+
+`scripts/contract_admin.py` does not compile the source, so run both compiles on every owner source
+before deployment.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec`, `Env` and contract types. Feature `std` uses heap strings and vectors
-for the host evaluator; addresses are StrKey text and the environment is a host `AllowitEnv`. The selected backend backs the crate root that
-authored policy names. The offchain server depends on
+for the host evaluator; addresses are StrKey text and the environment is a host `AllowitEnv`. The
+selected backend backs the crate root that authored policy names. The offchain server depends on
 `allowit = { default-features = false, features = ["std"] }`. Enabling both backends is a compile
-error, so a server cannot silently unify `soroban` through another crate. Feature `dual` enables
-both for tests only. The `AllowitCustomPolicy` tests compile its source under both backends and require
-identical pass values and errors on a shared vector set.
+error, so a server cannot silently unify `soroban` through another crate.
+
+The portability test, `crates/policy-wallet/src/portability_tests.rs`, runs one shared vector set,
+`scripts/policy-vectors.rs`, through four targets:
+
+1. The host backend: the std-only compile of `scripts/policy-smoke.rs` prints its outcomes.
+2. `AllowitCustomPolicy`: the Soroban backend of the same sources must give identical pass values
+   and errors. The real custom Wasm must then return the mapped policy result.
+3. `AllowitCommonPolicyEngine`: the real standard Wasm, bound to the sample policy's prefix, must
+   return the mapped first prefix preflight error. It skips unset Grant fields.
+4. `AllowitSimplePolicyEngine`: the real simple Wasm must accept every vector that the kernel
+   accepts.
+
+The test seeds each Wasm with the vector's Grant and the history before the operation, so the
+kernel proposes exactly the history that the host evaluated, and checks the committed history after
+each success. Vectors that the kernel cannot produce, such as another UTC day, a deposit into the
+transfer-only custom contract or a negative cap, run only on the two backends. Kernel violations
+(another asset, payment to the wallet, request expiry, stale nonce, replay and pause) reject with the
+same kernel error in all three contracts.
 
 Portable authored code beyond canonical calls uses typed scalar fields and enum comparisons, such
 as `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list methods differ (`len` returns

@@ -37,5 +37,6 @@ The `AllowitCustomPolicy` sample source is `crates/custom-policy/policy/policy.r
 file verbatim as a module, and `build.rs` binds `SOURCE_HASH` to its bytes. No SDK code generation is involved.
 The canonical rules and their Grant fields are in `crates/allowit/`; the custody mixins are in
 `crates/policy-wallet/`. `scripts/policy-smoke.rs` compiles the sample against the host backend with
-plain `rustc`.
+plain `rustc`. `cargo test` builds and runs it, then compares its outcomes on the shared vectors in
+`scripts/policy-vectors.rs` with the Soroban backend and the custom, standard and simple Wasm.
 Save signed bytes before broadcast and reconcile the original transaction hash after uncertainty.

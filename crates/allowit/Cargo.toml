@@ -13,8 +13,6 @@ default = ["soroban"]
 soroban = ["dep:soroban-sdk"]
 # Host backend for the offchain server and SDK evaluator: heap strings and vectors.
 std = []
-# Both backends for portability tests. `soroban` backs the crate root.
-dual = ["soroban", "std"]
 
 [dependencies]
 soroban-sdk = { workspace = true, optional = true }
