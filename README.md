@@ -1,4 +1,4 @@
-# AllowIt Stellar policy wallets
+# Allowit Stellar policy wallets
 
 Three owner-controlled contract implementations share custody and administration mixins:
 
