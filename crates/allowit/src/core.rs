@@ -103,8 +103,8 @@ mod types {
     }
 
     /// Complete rule input, computed and supplied by the wallet or server. Plain data: `env` is
-    /// the backend environment, a Soroban `Env` onchain and an `AllowitEnv` on the host. A failed
-    /// rule records its error in `env`.
+    /// the backend environment, a Soroban `Env` onchain and an `AllowitEnv` on the host. The
+    /// rule-failure record does not live in `env`.
     #[derive(Clone)]
     pub struct AllowitContext {
         pub env: AllowitEnv,
@@ -184,10 +184,10 @@ fn left(cap: i128, used: i128, exceeded: AllowitError) -> Result<i128> {
     }
 }
 
-/// Record a failed rule in `ctx.env`, so `run` denies even if the policy catches the error.
-fn failed<T>(ctx: &AllowitContext, result: Result<T>) -> Result<T> {
+/// Record a failed rule for the running evaluation, so `run` denies even if the policy catches it.
+fn failed<T>(result: Result<T>) -> Result<T> {
     if let Err(error) = &result {
-        record(&ctx.env, *error);
+        record(*error);
     }
     result
 }
@@ -197,7 +197,7 @@ fn failed<T>(ctx: &AllowitContext, result: Result<T>) -> Result<T> {
 /// Returns `cap - request.amount`, the headroom left for this operation.
 /// A negative cap or nonpositive amount is `InvalidParameter`.
 pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(ctx, check_transaction_cap(ctx, cap))
+    failed(check_transaction_cap(ctx, cap))
 }
 
 /// `transaction_cap` without recording a failure.
@@ -217,7 +217,7 @@ fn check_transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i12
 ///
 /// Returns `cap - state.spent`. Lifetime unpriced history is `Unpriced`.
 pub fn spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(ctx, check_spent_cap(ctx, cap))
+    failed(check_spent_cap(ctx, cap))
 }
 
 /// `spent_cap` without recording a failure.
@@ -238,7 +238,7 @@ fn check_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
 /// Returns `cap - state.day_spent`. Unpriced history for that day is `Unpriced`.
 /// `state.day` must equal `request.now / DAY`.
 pub fn day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(ctx, check_day_spent_cap(ctx, cap))
+    failed(check_day_spent_cap(ctx, cap))
 }
 
 /// `day_spent_cap` without recording a failure.
@@ -255,7 +255,7 @@ fn check_day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128>
 /// Returns `cap - state.day_total`. Unpriced history for that day is `Unpriced`.
 /// `state.day` must equal `request.now / DAY`.
 pub fn day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    failed(ctx, check_day_total_cap(ctx, cap))
+    failed(check_day_total_cap(ctx, cap))
 }
 
 /// `day_total_cap` without recording a failure.
@@ -270,7 +270,7 @@ fn check_day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128>
 ///
 /// Returns `cap - state.calls`. A zero cap always denies.
 pub fn call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
-    failed(ctx, check_call_cap(ctx, cap))
+    failed(check_call_cap(ctx, cap))
 }
 
 /// `call_cap` without recording a failure.
@@ -287,7 +287,7 @@ fn check_call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
 ///
 /// Returns the matched `request.recipient`. An empty list denies.
 pub fn recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
-    failed(ctx, check_recipients(ctx, allowed))
+    failed(check_recipients(ctx, allowed))
 }
 
 /// `recipients` without recording a failure.
@@ -305,7 +305,7 @@ fn check_recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Res
 ///
 /// Returns the matched `request.asset`. An empty list denies.
 pub fn tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
-    failed(ctx, check_tokens(ctx, allowed))
+    failed(check_tokens(ctx, allowed))
 }
 
 /// `tokens` without recording a failure.
@@ -323,7 +323,7 @@ fn check_tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<
 ///
 /// Returns `expiry - request.now`, the seconds the grant has left.
 pub fn expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
-    failed(ctx, check_expiry(ctx, expiry))
+    failed(check_expiry(ctx, expiry))
 }
 
 /// `expiry` without recording a failure.
@@ -391,10 +391,10 @@ pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
 /// such rule error even if the policy caught it and returned `Ok`. A nested `run` keeps the outer
 /// record, so a policy cannot clear a failure by calling `run` itself.
 pub fn run(ctx: &AllowitContext, execute: fn(&AllowitContext) -> Result) -> Result {
-    let outer = swap(&ctx.env, None);
+    let outer = swap(None);
     let result = execute(ctx);
-    let failure = swap(&ctx.env, None);
-    swap(&ctx.env, outer.or(failure));
+    let failure = swap(None);
+    swap(outer.or(failure));
     match failure {
         Some(error) => Err(error),
         None => result,

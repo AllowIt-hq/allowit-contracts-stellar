@@ -101,6 +101,25 @@ fn approval_denies_a_caught_rule_failure() {
         Err(AllowitError::SpentCapExceeded)
     );
 }
+/// Authored source that replaces `ctx.env` before it catches a rule failure. The policy gate
+/// rejects it. The host record must deny it too, as the onchain record does.
+fn detaching(ctx: &AllowitContext) -> allowit::Result {
+    let mut d = ctx.clone();
+    d.env = allowit::AllowitEnv::new();
+    if let Err(e) = allowit::spent_cap(&d, &d.grant.spent_cap) {
+        let _ = e;
+    }
+    Ok(())
+}
+#[test]
+fn approval_denies_a_caught_rule_failure_in_a_replaced_env() {
+    let mut c = context();
+    assert_eq!(run(&c, detaching), Ok(()));
+    c.state.spent = 50;
+    c.grant.spent_cap = Some(5);
+    assert_eq!(detaching(&c), Ok(()));
+    assert_eq!(run(&c, detaching), Err(AllowitError::SpentCapExceeded));
+}
 #[test]
 fn limits_boundary_denial_and_accounting() {
     let mut c = context();

@@ -158,7 +158,7 @@ computes it:
 
 | Field | Content |
 | --- | --- |
-| `env` | Backend environment: the contract's Soroban `Env` onchain, a new `AllowitEnv` per host evaluation |
+| `env` | Backend environment: the contract's Soroban `Env` onchain, a stateless `AllowitEnv` on the host |
 | `grant` | Typed owner `AllowitGrant`. Each field is an `Option`; `None` is unset |
 | `state` | Protected `AllowitAccountingHistory` proposed after this operation |
 | `request` | Typed `AllowitOperation`, immutable asset, recipient (deposit vault), amount, `now`, `expires_at` |
@@ -170,12 +170,13 @@ rules unguarded, so an unset parameter denies. Future server-only functions use 
 A failed rule also records its first error for the running evaluation, and `allowit::run`
 denies with the first error recorded during the policy call after the policy returns. Policy code
 therefore cannot turn a rule failure into a pass with `match`, `if let` or `let _`. A nested `run`
-keeps the outer record, and context clones share it. A failure recorded before `run` starts, for
-example by an earlier `run` in the same invocation, does not deny it.
+keeps the outer record. A failure recorded before `run` starts, for example by an earlier `run` in
+the same invocation, does not deny it.
 
-On the host, `AllowitEnv` in `ctx.env` holds the record; create one with `AllowitEnv::new()` for
-every evaluation. `AllowitEnv` does not implement `Default`, so `c.env = Default::default()`
-compiles only onchain, and the std-only compile rejects it. Onchain, the record is a private
+The record does not live in `ctx.env` on either backend, so policy code that clones the context,
+replaces `ctx.env` or creates another environment cannot drop it. On the host, the record is a
+thread-local of the evaluating thread, and `AllowitEnv` carries no state; the server creates one
+with `AllowitEnv::new()` for every evaluation. Onchain, the record is a private
 static in the memory of the running contract instance. Soroban runs every contract invocation in
 a new VM instance, so the record starts empty and ends with the invocation. Native tests keep it
 in a thread-local. The record is not ledger state: a failed rule reads and writes no storage entry,

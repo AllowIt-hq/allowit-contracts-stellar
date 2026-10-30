@@ -16,11 +16,12 @@
 //!
 //! Rules check only the facts they read. Each returns its passing constraint or an
 //! `AllowitError`. An unset Grant field is `MissingGrant`. A failed rule also records its error
-//! for the running evaluation: in the host `AllowitEnv` of `ctx.env`, or onchain in the memory of
-//! the running contract instance. `run` runs a complete policy: a failed rule ends the run with a
-//! denial, even if the policy catches the error. The standard contract runs only the leading
-//! canonical calls, supplied by the owner as `rules`, through `preflight`, which skips unset
-//! fields. `scripts/contract_admin.py` derives `rules` from the source.
+//! for the running evaluation: on the host in a thread-local of the evaluating thread, onchain in
+//! the memory of the running contract instance. Neither lives in `ctx.env`, so policy code that
+//! replaces or clones `ctx.env` cannot drop it. `run` runs a complete policy: a failed rule ends
+//! the run with a denial, even if the policy catches the error. The standard contract runs only
+//! the leading canonical calls, supplied by the owner as `rules`, through `preflight`, which skips
+//! unset fields. `scripts/contract_admin.py` derives `rules` from the source.
 //!
 //! `AllowitContext` is plain data: `env`, `grant`, `state` and `request`. Portable authored code
 //! uses rule calls, typed scalar fields and enum comparisons such as
@@ -32,8 +33,8 @@
 //! Types and rule logic are written once in `core.rs` and compiled per backend. Each backend binds
 //! `Address`, `AllowitEnv` and `Vec`. Feature `soroban` (default) uses host values, contract types
 //! and the Soroban `Env`, and records rule failures in the memory of the running contract
-//! instance, not in ledger storage. Feature `std` uses unordered StrKey addresses and heap
-//! vectors, and records rule failures in a host `AllowitEnv`. The selected backend backs the crate
+//! instance, not in ledger storage. Feature `std` uses unordered StrKey addresses, heap vectors
+//! and a stateless host `AllowitEnv`, and records rule failures in a thread-local. The selected backend backs the crate
 //! root, which authored policy names.
 //!
 //! The offchain server depends on `allowit = { default-features = false, features = ["std"] }`
@@ -43,8 +44,9 @@
 #[cfg(feature = "std")]
 extern crate alloc;
 
-// The Soroban backend keeps its rule-failure record in a thread-local in native builds.
-#[cfg(all(feature = "soroban", not(target_family = "wasm")))]
+// The host backend, and the Soroban backend in native builds, keep the rule-failure record in a
+// thread-local.
+#[cfg(any(feature = "std", all(feature = "soroban", not(target_family = "wasm"))))]
 extern crate std;
 
 #[cfg(not(any(feature = "soroban", feature = "std")))]
@@ -98,7 +100,7 @@ pub mod soroban {
     }
 
     /// Record the first rule failure of the running contract instance.
-    fn record(_env: &AllowitEnv, error: AllowitError) {
+    fn record(error: AllowitError) {
         let first = exchange(error as u32);
         if first != 0 {
             exchange(first);
@@ -106,7 +108,7 @@ pub mod soroban {
     }
 
     /// Replace the recorded rule failure of the running contract instance; return the old one.
-    fn swap(_env: &AllowitEnv, failure: Option<AllowitError>) -> Option<AllowitError> {
+    fn swap(failure: Option<AllowitError>) -> Option<AllowitError> {
         let code = exchange(failure.map_or(0, |error| error as u32));
         Some(match code {
             0 => return None,
@@ -130,7 +132,7 @@ pub mod soroban {
 /// Host backend for the offchain server and SDK evaluator. Addresses are StrKey strings.
 #[cfg(feature = "std")]
 pub mod host {
-    use alloc::{rc::Rc, string::String, vec::Vec};
+    use alloc::{string::String, vec::Vec};
 
     /// Exact Stellar account or contract identity, held as its StrKey text. It compares only for
     /// equality. Soroban orders addresses by `ScAddress`, so accounts sort before contracts, while
@@ -152,36 +154,41 @@ pub mod host {
     }
     use core::cell::Cell;
 
-    /// Host environment of one policy evaluation. Clones share it. It records the first rule
-    /// failure, so `run` denies even if the policy catches the error. Create a new one for every
-    /// evaluation.
+    /// Host environment of one policy evaluation. It carries no state: the rule-failure record
+    /// is a thread-local of the evaluating thread, as onchain it is memory of the running
+    /// contract instance. So replacing `ctx.env`, cloning it or creating another `AllowitEnv`
+    /// inside policy code cannot drop a recorded failure.
     #[derive(Clone, Debug)]
     pub struct AllowitEnv {
-        failure: Rc<Cell<Option<AllowitError>>>,
+        _private: (),
     }
 
     impl AllowitEnv {
-        /// A new environment without a recorded failure. `AllowitEnv` does not implement
-        /// `Default`, so policy code cannot replace `ctx.env` with `Default::default()` on the
-        /// host: that would drop the record here while onchain it keeps the same contract storage.
+        /// The environment of a new evaluation.
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
-            Self {
-                failure: Rc::new(Cell::new(None)),
+            Self { _private: () }
+        }
+    }
+
+    // `run` clears the record when it starts and restores the outer record when it returns, so
+    // evaluations on one thread do not see each other's failures.
+    std::thread_local! {
+        static FAILURE: Cell<Option<AllowitError>> = const { Cell::new(None) };
+    }
+
+    /// Record the first rule failure of the evaluation running on this thread.
+    fn record(error: AllowitError) {
+        FAILURE.with(|failure| {
+            if failure.get().is_none() {
+                failure.set(Some(error));
             }
-        }
+        });
     }
 
-    /// Record the first rule failure of this evaluation.
-    fn record(env: &AllowitEnv, error: AllowitError) {
-        if env.failure.get().is_none() {
-            env.failure.set(Some(error));
-        }
-    }
-
-    /// Replace the recorded rule failure of this evaluation; return the old one.
-    fn swap(env: &AllowitEnv, failure: Option<AllowitError>) -> Option<AllowitError> {
-        env.failure.replace(failure)
+    /// Replace the recorded rule failure of this thread; return the old one.
+    fn swap(failure: Option<AllowitError>) -> Option<AllowitError> {
+        FAILURE.with(|cell| cell.replace(failure))
     }
     macro_rules! value {
         ($item:item) => {
