@@ -58,46 +58,71 @@ identifier, such as `mod allowit`, `use core as allowit`, `extern crate`, `macro
 `AllowitCustomPolicy` compiles the file as a module with `#[path]`, and `SOURCE_HASH` covers only that file.
 The file must therefore be the whole policy: it must not use `include!`, `include_str!`,
 `include_bytes!`, `env!`, `option_env!`, `#[path]`, `cfg_attr` or an out-of-line `mod name;`. The
-names of those macros may appear only after a single `.`, as in the context field `ctx.env`. The
-host portability test includes the file, so it must not use inner attributes or inner doc comments.
-The same file must also behave the same offchain and onchain, so it must not use `cfg` or `cfg!`,
-`module_path!`, `file!`, `type_name`, `type_name_of_val`, `Location`, `TypeId`, `size_of`,
-`size_of_val`, `align_of`, `align_of_val` or `BITS`, which select code by build target or expose the
-backend's paths, types or widths. It must not use `unsafe`, `extern` items, `no_mangle`,
-`export_name`, `link_section` or `macro_rules!`.
+names of those macros may appear only as the bare context field read `ctx.env`: after a single `.`
+and not followed by `.`, `(` or `!`. So `ctx.env.storage()` and a value's Soroban `env()` method
+reject. The host portability test includes the file, so it must not use inner attributes or inner
+doc comments.
+
+The same file must also behave the same offchain and onchain. The tooling therefore rejects:
+
+- Code selected by build target or build profile: `cfg`, `cfg!`, `debug_assert!`,
+  `debug_assert_eq!` and `debug_assert_ne!`. Debug assertions run in the plain-rustc smoke and in
+  native tests but not in the release Wasm.
+- `static` items. A mutable static, such as an atomic counter, keeps its value across evaluations
+  in one server process, but starts again in every contract instance.
+- Location, type, layout and width introspection: `module_path!`, `file!`, `type_name`,
+  `type_name_of_val`, `Location`, `caller`, `TypeId`, `type_id`, `size_of`, `size_of_val`,
+  `align_of`, `align_of_val`, `needs_drop`, `Layout`, `offset_of` and `BITS`. Host and Wasm types
+  have different sizes and drop glue, so these reveal the backend.
+- The pointer-width types `usize` and `isize`, which are 32 bits onchain and 64 bits on the host.
+- Pointer introspection: raw pointer types (`*const`, `*mut`), `ptr`, `addr_of`, `addr_of_mut`,
+  `as_ptr`, `as_mut_ptr`, `.addr()` and `expose_provenance`.
+- Formatting: `fmt`, `write!`, `writeln!` and `format_args!`. Backend `Debug` output differs, and
+  `{:p}` prints addresses.
+- `unsafe`, `extern` items, `no_mangle`, `export_name`, `link_section` and `macro_rules!`.
 
 The file must also not reach the dependencies of the including crate. In `AllowitCustomPolicy`
 those include `soroban_sdk`, whose `Env::default()` gives a live host environment, and the wallet
-crates. Every path and `use` tree must start at `allowit`, `core`, a primitive type such as `u32`, or
-a capitalized type, trait, enum or generic parameter such as `AllowitOperation` or `Self`. Roots such
-as `soroban_sdk`, `std`, `alloc`, `allowit_policy_wallet`, `crate`, `super`, `self`, a bare `::` or a
-lowercase local module reject. The capitalized rule assumes that no direct dependency of an
-including crate has a capitalized crate name. Macro definitions reject because they can assemble
-a path from separate tokens. `check-policy-bindings.py` and the owner packet tooling of every tier
-reject all of these.
+crates. Every path and `use` tree must start at `allowit`, `core`, a fixed-width primitive type
+such as `u32`, or a capitalized type, trait, enum or generic parameter such as `AllowitOperation`
+or `Self`. Roots such as `soroban_sdk`, `std`, `alloc`, `allowit_policy_wallet`, `crate`, `super`,
+`self`, a bare `::` (also after a keyword, as in `use ::core` or `return ::core`) or a lowercase
+local module reject. The capitalized rule assumes that no direct dependency of an including crate
+has a capitalized crate name. Macro definitions reject because they can assemble a path from
+separate tokens. `scripts/policy_source.py` implements these checks; `check-policy-bindings.py` and
+the owner packet tooling of every tier apply them.
 
-These checks are lexical. They cannot prove that the two backends behave the same, for example
-when code depends on `usize` width, which is 32 bits onchain and 64 bits on the host, or calls a
-method of `ctx.env`. They also do not compile the file. Two compiles are therefore required guards
-for every owner source:
+These checks are lexical, so they cannot see types. Every owner source therefore also passes two
+compiles:
 
-- The std-only compile builds `scripts/policy-smoke.rs`, which includes the file, with plain
-  `rustc` against `allowit` with only the `std` feature, as the offchain server does. A path into
-  `soroban_sdk`, a wallet crate or any other crate fails there, and so does a call to a Soroban
-  `Env` method. `cargo test` runs it in the portability test below, and the `policy` job of
-  `.github/workflows/contracts.yml` runs it on every pull request.
+- The std-only compile builds the file as a module of a `no_std` crate whose only dependency is
+  `allowit` with only the `std` feature, as the offchain server uses it, with overflow checks on.
+  A path into `soroban_sdk`, a wallet crate or any other crate fails there. So does a call to a
+  Soroban `Env` or `Address` method, also through an alias such as `let e = &ctx.env;`, an
+  address comparison with `<`, `min`, `max`, `sort` or `binary_search`, and a `std` prelude item
+  such as `vec!`. On the host, `Address` is a StrKey newtype that compares only for equality:
+  Soroban orders addresses by `ScAddress`, so accounts sort before contracts, while text would
+  sort by StrKey. `scripts/policy_source.py` runs this compile in `check-policy-bindings.py`, and
+  so in `scripts/build-contracts.sh`, and in `scripts/contract_admin.py` for the owner packets of
+  every tier. These tools need `rustc` (from `RUSTC` or `PATH`). The portability test below and the
+  `policy` job of `.github/workflows/contracts.yml` also compile `scripts/policy-smoke.rs`, which
+  includes the branch sources, the same way.
 - The Soroban compile builds the file into `AllowitCustomPolicy`. A host-only name, such as
-  `allowit::AllowitEnv`, fails there.
+  `allowit::AllowitEnv` or `Address::as_str`, fails there. `scripts/build-contracts.sh` runs it for
+  the branch source. Build the reviewed custom Wasm from the owner source before deployment.
 
-`scripts/contract_admin.py` does not compile the source, so run both compiles on every owner source
-before deployment.
+One known boundary remains. Values whose type Rust infers as `usize` without naming it, such as a
+slice index or the result of `count()`, are 32 bits onchain and 64 bits on the host. Arithmetic or
+`wrapping_*`, `checked_*` and `overflowing_*` calls on them can therefore differ. Neither the
+lexical gate nor the two compiles can see an inferred type. Authored code must not compute with
+such values; it reads lists only through `recipients` and `tokens`.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec`, `Env` and contract types. Feature `std` uses heap strings and vectors
-for the host evaluator; addresses are StrKey text and the environment is a host `AllowitEnv`. The
-selected backend backs the crate root that authored policy names. The offchain server depends on
-`allowit = { default-features = false, features = ["std"] }`. Enabling both backends is a compile
-error, so a server cannot silently unify `soroban` through another crate.
+for the host evaluator; addresses are unordered StrKey newtypes and the environment is a host
+`AllowitEnv`. The selected backend backs the crate root that authored policy names. The offchain
+server depends on `allowit = { default-features = false, features = ["std"] }`. Enabling both backends is a compile error, so a server cannot silently
+unify `soroban` through another crate.
 
 The portability test, `crates/policy-wallet/src/portability_tests.rs`, runs one shared vector set,
 `scripts/policy-vectors.rs`, through four targets:

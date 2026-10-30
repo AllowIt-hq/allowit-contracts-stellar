@@ -1,8 +1,20 @@
-"""Lex authored AllowIt policy source and derive its standard prefix. Standard library only.
+"""Lex authored AllowIt policy source, derive its standard prefix and compile it against the
+std-only `allowit` backend. Standard library only, plus `rustc` for `host_compile`.
 
 `check-policy-bindings.py` and `contract_admin.py` share this module. Comments and literals are
 removed with Rust lexing first, so they cannot add, hide or rebind code."""
+import atexit
+import functools
+import hashlib
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+ALLOWIT = ROOT / "crates/allowit/src"
 
 # Typed Grant fields, which are also the canonical rule names.
 GRANT_FIELDS = ("transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap", "call_cap", "recipients", "tokens", "expiry")
@@ -20,14 +32,15 @@ CHAR = re.compile(r"(?<![A-Za-z0-9_])b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{
 # `allowit` names the canonical crate only as a path root: `allowit::<item>`. Any other use of the
 # identifier declares or imports a replacement (`mod allowit`, `use x as allowit`, `fn allowit`,
 # `macro_rules! allowit`, `let allowit`) or reaches another module (`self::allowit`).
-ALLOWIT = re.compile(r"\ballowit\b")
+ALLOWIT_NAME = re.compile(r"\ballowit\b")
 # Code that reads other files, the build environment or the including crate, so the one hashed
-# file would not be the whole policy, or that can behave differently in `AllowitCustomPolicy` and on the
-# host: `#[path]`, `cfg_attr` (which can add `path`), an out-of-line
-# module, `extern` items, `unsafe` code and symbol attributes, macro definitions (which can assemble
-# paths that the root check below cannot see), conditional compilation, and location, type and
-# width introspection. File and environment macros are checked by `MACRO_NAMES`, and path roots by
-# `path_roots`.
+# file would not be the whole policy, or that can behave differently in `AllowitCustomPolicy` and on
+# the host: `#[path]`, `cfg_attr` (which can add `path`), an out-of-line module, `extern` items,
+# `unsafe` code and symbol attributes, macro definitions (which can assemble paths that the root
+# check below cannot see), conditional compilation, debug-only assertions, mutable statics (which
+# keep values across host evaluations but start again in every contract instance), and location,
+# type, layout, width, pointer and formatting introspection. File and environment macros are
+# checked by `MACRO_NAMES`, and path roots by `path_roots`.
 OUTSIDE = (
     (re.compile(r"#\s*\[\s*path\b"), "#[path] attribute"),
     (re.compile(r"\bcfg_attr\b"), "cfg_attr attribute"),
@@ -36,20 +49,27 @@ OUTSIDE = (
     (re.compile(r"\b(?:unsafe|no_mangle|export_name|link_section)\b"), "unsafe code or symbol attribute"),
     (re.compile(r"\bmacro_rules\b"), "macro definition"),
     (re.compile(r"\bcfg\b"), "conditional compilation"),
-    (re.compile(r"\b(?:module_path|type_name|type_name_of_val|Location|TypeId|size_of|size_of_val|align_of|align_of_val|BITS)\b|\bfile\s*!"),
-     "location, type or width introspection"),
+    (re.compile(r"\bdebug_assert(?:_eq|_ne)?\b"), "debug-only assertion"),
+    (re.compile(r"(?<!')\bstatic\b"), "static item"),
+    (re.compile(r"\b(?:module_path|type_name|type_name_of_val|Location|caller|TypeId|type_id|size_of|size_of_val|"
+                r"align_of|align_of_val|needs_drop|Layout|offset_of|BITS|usize|isize)\b|\bfile\s*!"),
+     "location, type, layout or width introspection"),
+    (re.compile(r"\*\s*(?:const|mut)\b|\b(?:ptr|addr_of|addr_of_mut|as_ptr|as_mut_ptr|expose_provenance)\b|\.\s*addr\s*\("),
+     "pointer introspection"),
+    (re.compile(r"\b(?:fmt|write|writeln|format_args)\b"), "formatting"),
     (re.compile(r"\b(?:crate|super|self)\s*::"), "path into the including crate"),
 )
-# File and environment macros. Their names may appear only after a single `.`, as in the context
-# field `ctx.env`, never as a macro, a path segment, an import or a binding.
+# File and environment macros. Their names may appear only as the bare context field read
+# `ctx.env`: after a single `.` and not followed by `.`, `(` or `!`, so neither `ctx.env.<method>`
+# nor a value's `env()` method, such as the Soroban `Address::env`, passes.
 MACRO_NAMES = re.compile(r"\b(?:include|include_str|include_bytes|env|option_env)\b")
 # Path roots that name the same thing in every including crate: the canonical crate, `core` and
-# primitive types. A capitalized root is a type, trait, enum or generic parameter; no crate in the
-# extern prelude of an including crate has a capitalized name. Every other root, such as
-# `soroban_sdk`, `std`, `alloc` or `allowit_policy_wallet`, can reach a dependency of the including
-# crate, and a lowercase local name cannot be told apart from one lexically.
+# the fixed-width primitive types. A capitalized root is a type, trait, enum or generic parameter;
+# no crate in the extern prelude of an including crate has a capitalized name. Every other root,
+# such as `soroban_sdk`, `std`, `alloc` or `allowit_policy_wallet`, can reach a dependency of the
+# including crate, and a lowercase local name cannot be told apart from one lexically.
 ROOTS = frozenset(("allowit", "core", "bool", "char", "str", "f32", "f64") + tuple(
-    sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 128, "size")))
+    sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 128)))
 KEYWORDS = frozenset((
     "as", "async", "await", "box", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn",
     "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
@@ -144,14 +164,14 @@ def checked_code(source):
     if re.search(r"^\s*(//!|/\*!|#\s*!\s*\[)", source, re.M):
         raise ValueError("Policy source must not use inner attributes or inner doc comments")
     code = rust_code(source)
-    for found in ALLOWIT.finditer(code):
+    for found in ALLOWIT_NAME.finditer(code):
         before, after = code[:found.start()].rstrip(), code[found.end():].lstrip()
         if not after.startswith("::") or before.endswith("::"):
             raise ValueError("Policy source must use `allowit` only as the path root `allowit::`; it must not rebind it")
     for found in MACRO_NAMES.finditer(code):
         before, after = code[:found.start()].rstrip(), code[found.end():].lstrip()
         field = before.endswith(".") and not before.endswith("..")
-        if not field or after.startswith("!") and not after.startswith("!="):
+        if not field or after.startswith((".", "(")) or after.startswith("!") and not after.startswith("!="):
             raise ValueError("Policy source must be one self-contained file; it uses file or environment macro")
     for pattern, name in OUTSIDE:
         if pattern.search(code):
@@ -174,3 +194,43 @@ def standard_prefix(source):
             break
         rules.append(call[1])
     return rules
+
+
+@functools.lru_cache(maxsize=None)
+def _host_allowit(rustc, digest):
+    """Compile `allowit` with only the `std` feature once per process and sources digest."""
+    out = Path(tempfile.mkdtemp(prefix="allowit-host-"))
+    atexit.register(shutil.rmtree, out, True)
+    lib = out / "liballowit.rlib"
+    _rustc(rustc, ["--crate-type=rlib", "--crate-name=allowit", "--cfg", 'feature="std"',
+                   str(ALLOWIT / "lib.rs"), "-o", str(lib)], "allowit std backend")
+    return lib
+
+
+def _rustc(rustc, args, what):
+    command = [rustc, "--edition=2024", "-C", "overflow-checks=on"] + args
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise ValueError("The std-only policy compile requires rustc (set RUSTC or PATH)") from None
+    if result.returncode:
+        raise ValueError("Policy source fails the std-only compile of the " + what + ":\n" + result.stderr.strip())
+
+
+def host_compile(path):
+    """Compile authored policy source as the offchain server does: as a module of a `no_std` crate
+    whose only dependency is `allowit` with only the `std` feature, with overflow checks on. Raise
+    ValueError when it does not compile, for example when it names `soroban_sdk`, calls a Soroban
+    `Env` or `Address` method, orders addresses or uses a host-only `std` prelude item."""
+    rustc = os.environ.get("RUSTC") or "rustc"
+    digest = hashlib.sha256(b"".join((ALLOWIT / name).read_bytes() for name in ("lib.rs", "core.rs"))).hexdigest()
+    lib = _host_allowit(rustc, digest)
+    source = str(Path(path).resolve())
+    if '"#' in source or "\n" in source:
+        raise ValueError("Policy source path cannot be named in a Rust raw string")
+    with tempfile.TemporaryDirectory(prefix="allowit-policy-") as out:
+        crate = Path(out) / "policy_host.rs"
+        crate.write_text("#![no_std]\n#[path = r#\"" + source + "\"#]\nmod policy;\n"
+                         "pub const EXECUTE: fn(&allowit::AllowitContext) -> allowit::Result = policy::execute;\n")
+        _rustc(rustc, ["--crate-type=rlib", "--crate-name=policy_host", "--extern", "allowit=" + str(lib),
+                       str(crate), "-o", str(Path(out) / "libpolicy_host.rlib")], "policy")

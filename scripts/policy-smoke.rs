@@ -17,8 +17,8 @@ use vectors::{Outcome, Vector};
 
 const NOW: u64 = 3 * DAY + 10;
 fn context() -> AllowitContext {
-    let recipient = "GRECIPIENT".to_string();
-    let asset = "CASSET".to_string();
+    let recipient = Address::new("GRECIPIENT");
+    let asset = Address::new("CASSET");
     AllowitContext {
         env: AllowitEnv::new(),
         grant: AllowitGrant {
@@ -126,9 +126,9 @@ fn limits_boundary_denial_and_accounting() {
     assert_eq!(run(&c, policy::execute), Err(AllowitError::CallCapExceeded));
 }
 
-/// Host StrKey-shaped text of each universe address.
-fn address(index: usize) -> String {
-    format!("CADDRESS{index}")
+/// Host address with StrKey-shaped text for each universe index.
+fn address(index: usize) -> Address {
+    Address::new(format!("CADDRESS{index}"))
 }
 fn host_context(v: &Vector) -> AllowitContext {
     let list = |items: &Option<Vec<usize>>| {

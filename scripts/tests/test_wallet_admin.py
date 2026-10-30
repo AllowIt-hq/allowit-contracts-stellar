@@ -589,11 +589,46 @@ class ContractAdmin(unittest.TestCase):
             "use ::core::mem as m;\n",
             "fn g() -> Result<(), ()> { return ::core::result::Result::Ok(()); }\n",
             "fn g(x: u8) -> u8 { match x { _ => ::core::primitive::u8::MAX } }\n",
-            # Width and type introspection that differs between the backends.
+            "fn g() -> u8 { if true { 0 } else { ::core::primitive::u8::MAX } }\n",
+            "fn g() { for _ in ::core::iter::empty::<u8>() {} }\n",
+            "fn g(x: u16) -> u8 { x as ::core::primitive::u8 }\n",
+            "fn g() -> u8 { let x = ::core::primitive::u8::MAX; x }\n",
+            "fn g() -> u8 { loop { break ::core::primitive::u8::MAX; } }\n",
+            "fn g() -> bool { true && ::core::primitive::bool::default() }\n",
+            # Location, width, type, layout and pointer introspection that differs between the backends.
             "fn g() -> u32 { core::panic::Location::caller().line() }\n",
+            "use core::panic::Location as L;\nfn g() -> u32 { L::caller().line() }\n",
             "const W: usize = core::mem::size_of::<usize>();\n",
+            "fn g(c: &AllowitContext) -> u64 { core::mem::size_of_val(&c.request) as u64 }\n",
+            "fn g() -> u64 { core::mem::align_of::<Address>() as u64 }\n",
             "const W: u32 = usize::BITS;\n",
+            "const W: u32 = u32::BITS;\n",
+            "const W: u64 = usize::MAX as u64;\n",
+            "fn g(x: isize) -> bool { x > 0 }\n",
             "fn g() -> bool { core::any::TypeId::of::<AllowitContext>() == core::any::TypeId::of::<u8>() }\n",
+            "fn g(c: &AllowitContext) -> bool { core::any::Any::type_id(&c.state) == core::any::Any::type_id(&0u8) }\n",
+            "fn g() -> bool { core::mem::needs_drop::<Address>() }\n",
+            "use core::mem::needs_drop as n;\nfn g() -> bool { n::<Address>() }\n",
+            "fn g() -> u64 { core::alloc::Layout::new::<Address>().size() as u64 }\n",
+            "fn g() -> u64 { core::mem::offset_of!(AllowitRequest, amount) as u64 }\n",
+            "fn g(x: &u8) -> bool { (x as *const u8).is_null() }\n",
+            "fn g(x: &[u8]) -> bool { x.as_ptr().addr() > 0 }\n",
+            "fn g(x: &u8) -> bool { core::ptr::addr_of!(*x).is_aligned() }\n",
+            # Formatting exposes backend Debug output, and pointer formatting exposes addresses.
+            "fn g(w: &mut dyn core::fmt::Write, c: &AllowitContext) { let _ = write!(w, \"{:?}\", c.request.asset); }\n",
+            "fn g(c: &AllowitContext) { let _ = format_args!(\"{:p}\", c); }\n",
+            # Debug-only assertions run in the plain-rustc smoke and native tests, not in release Wasm.
+            "fn g(c: &AllowitContext) { debug_assert!(c.request.amount > 0); }\n",
+            "fn g(c: &AllowitContext) { debug_assert_eq!(c.request.amount, 1); }\n",
+            "fn g(c: &AllowitContext) { debug_assert_ne!(c.request.amount, 1); }\n",
+            # Mutable statics keep values across host evaluations and start again in every contract instance.
+            "static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);\n",
+            "fn g() -> u32 { static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0); N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) }\n",
+            # Soroban-only calls through the environment: methods of ctx.env and of values.
+            "fn g(ctx: &AllowitContext) { ctx.env.storage().temporary().remove(&0u32); }\n",
+            "fn g(ctx: &AllowitContext) -> u32 { ctx . env . ledger().sequence() }\n",
+            "fn g(ctx: &AllowitContext) { let _ = ctx.request.asset.env(); }\n",
+            "fn g(ctx: &AllowitContext) { let _ = ctx.request.asset.env (); }\n",
             # Dependencies of the including crate, host functions and assembled paths.
             "fn g() { let e = soroban_sdk::Env::default(); e.storage().instance().set(&1u32, &1u32); }\n",
             "fn g() { <soroban_sdk::Env>::default(); }\n",
@@ -629,7 +664,8 @@ class ContractAdmin(unittest.TestCase):
                    "fn three(file: u8, x: core :: primitive :: u8) -> u8 { <u8 as Default>::default() + file + x }\n"
                    "fn four(x: &[i128]) -> i128 { x.iter().sum::<i128>() + i128::MAX.min(0) + Option::<i128>::None.unwrap_or(0) }\n"
                    "use allowit::{AllowitError as Denied, DAY};\nfn five() -> Denied { Denied::MissingGrant }\n"
-                   "fn six(ctx: &AllowitContext) -> AllowitContext { let c = ctx . env.clone(); let _ = c; ctx.clone() }\n")
+                   "fn six(ctx: &AllowitContext) -> AllowitContext { let c = &ctx . env; let _ = c; ctx.clone() }\n"
+                   "fn seven<'a>(x: &'static str, y: &'a str) -> bool { x != y && 0u32 != 1 }\n")
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["expiry"])
         # The `AllowitCustomPolicy` sources pass the same check.
         for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs",
@@ -637,6 +673,44 @@ class ContractAdmin(unittest.TestCase):
             ca.checked_code((ROOT / path).read_text())
         result = subprocess.run([sys.executable, str(ROOT / "scripts/check-policy-bindings.py")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_policy_source_passes_the_std_only_compile_of_the_offchain_server(self):
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+
+            def compiled(text):
+                policy.write_text(text)
+                ca.host_compile(policy)
+
+            compiled(source(call("recipients") + call("expiry")))
+            # A policy that reaches the Soroban SDK fails the lexical gate and the std-only compile.
+            sdk = source("    let e = soroban_sdk::Env::default();\n    let _ = e;\n")
+            with self.assertRaisesRegex(ValueError, "self-contained"):
+                ca.checked_code(sdk)
+            with self.assertRaisesRegex(ValueError, "std-only compile"):
+                compiled(sdk)
+            # Code that passes the lexical gate but compiles only onchain or diverges between the
+            # backends: Soroban methods of an aliased environment or an address, address order and
+            # std prelude macros.
+            for body in ("    let _ = allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n    let e = &ctx.env;\n"
+                         "    e.storage().temporary().remove(&0u32);\n",
+                         "    if ctx.request.asset < ctx.request.recipient {\n        return Err(AllowitError::RecipientNotAllowed);\n    }\n",
+                         "    let _ = ctx.grant.recipients.clone().map(|r| r.binary_search(&ctx.request.recipient));\n",
+                         "    let _ = ctx.grant.recipients < ctx.grant.tokens;\n",
+                         "    let _ = vec![ctx.request.amount];\n",
+                         "    let _ = ctx.request.recipient.to_string();\n"):
+                text = source(body)
+                with self.subTest(body=body):
+                    ca.checked_code(text)
+                    with self.assertRaisesRegex(ValueError, "std-only compile"):
+                        compiled(text)
+            # The owner packet path of every tier runs the same compile.
+            policy.write_text(source("    let _ = ctx.request.asset < ctx.request.recipient;\n"))
+            digest = hashlib.sha256(policy.read_bytes()).hexdigest()
+            for tier, rules, source_digest in (("common", [], "22" * 32), ("custom", [], digest), ("simple", [], "22" * 32)):
+                with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "std-only compile"):
+                    ca.policy_rules({"rules": rules, "source_digest": source_digest}, tier, str(policy))
 
     def test_wallet_code_changes_require_custody_layout_2(self):
         self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"2"))), 2)

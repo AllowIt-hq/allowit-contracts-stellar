@@ -14,7 +14,7 @@ from pathlib import Path
 from stellar_sdk import Address, Network, xdr, StrKey, TransactionEnvelope, InvokeHostFunction, Preconditions, TimeBounds
 from wallet_admin import admin as verify_admin, fetch, owner_only, PASSPHRASE
 # Typed Grant fields are the canonical rule names. Unset fields are null.
-from policy_source import GRANT_FIELDS, checked_code, standard_prefix
+from policy_source import GRANT_FIELDS, checked_code, host_compile, standard_prefix
 
 # No transfers, token approvals, general calls or arbitrary method dispatch.
 WALLET = {
@@ -180,12 +180,14 @@ TIERS = ("simple", "common", "custom")
 
 def policy_rules(value, tier, source_path):
     """Bind an owner packet to its authored source. Every tier requires one self-contained file that
-    binds `allowit` only to the canonical crate. Common binds the source's standard prefix; Simple and
-    Custom bind none. Custom also binds the source bytes."""
+    binds `allowit` only to the canonical crate and passes the std-only compile of the offchain
+    server. Common binds the source's standard prefix; Simple and Custom bind none. Custom also binds
+    the source bytes."""
     if tier not in TIERS or not source_path:
         raise ValueError("Owner packets require --tier (" + ", ".join(TIERS) + ") and --policy-source")
     source = Path(source_path).read_bytes()
     checked_code(source.decode())
+    host_compile(source_path)
     expected = standard_prefix(source.decode()) if tier == "common" else []
     if value["rules"] != expected:
         raise ValueError("Rules must be the standard prefix derived from the policy source: " + json.dumps(expected))
