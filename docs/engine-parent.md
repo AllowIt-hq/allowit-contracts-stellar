@@ -2,7 +2,7 @@
 
 The engine parent owns one shared engine's executable reference. Its owner can replace the engine
 code, transfer parent administration, and upgrade the parent. This authority controls shared checks.
-It does not control wallet custody code, wallet owner operations, Grant, Spent, or server signing keys.
+It does not control wallet custody code, wallet owner operations, Grant, protected history, or server signing keys.
 
 ## State and creation
 

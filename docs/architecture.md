@@ -7,8 +7,8 @@ CustomPolicy compiles a complete authored policy into its contract. Shared check
 
 ## One portable policy source
 
-Policy source is ordinary synchronous Rust against `crates/allowit`. The same file compiles
-unchanged for the offchain server, a CustomPolicy contract and the standard contract preflight:
+Policy source is ordinary synchronous Rust against `crates/allowit`. The offchain server and
+CustomPolicy compile the file verbatim:
 
 ```rust
 use allowit::prelude::*;
@@ -20,10 +20,17 @@ pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
 }
 ```
 
-`allowit` has two backends that share one rule implementation. Feature `soroban` uses Soroban
-`Address`, `String`, `Vec` and contract types. Feature `std` uses heap strings and vectors for the
-host evaluator; addresses are StrKey text. The CustomPolicy tests compile its source under both
-backends and require identical pass values and errors on a shared vector set.
+The standard contract runs only its leading canonical calls, supplied by the owner as `rules`, and
+skips unset fields. Matching `rules` to the source is part of the owner's offchain authorization.
+
+`allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
+Soroban `Address`, `String`, `Vec` and contract types. Feature `std` uses heap strings and vectors
+for the host evaluator; addresses are StrKey text. The selected backend backs the crate root that
+authored policy names. The offchain server depends on
+`allowit = { default-features = false, features = ["std"] }`. Enabling both backends is a compile
+error, so a server cannot silently unify `soroban` through another crate. Feature `dual` enables
+both for tests only. The CustomPolicy tests compile its source under both backends and require
+identical pass values and errors on a shared vector set.
 
 `AllowitEnv` is the complete rule input. The wallet or server computes it:
 
@@ -46,7 +53,7 @@ rules unguarded, so an unset parameter denies. Future server-only functions use 
 | `call_cap` | `u64` successful operation count ceiling; zero denies | `cap - state.calls` |
 | `recipients` | `Vec<Address>` permitted destinations, including vaults; empty denies | Matched recipient |
 | `tokens` | `Vec<Address>` exact permitted SAC identities; empty denies | Matched asset |
-| `expiry` | `u64` exclusive Unix timestamp; request expiry cannot exceed it | Seconds to `min(expiry, expires_at)` |
+| `expiry` | `u64` exclusive Unix timestamp; request expiry cannot exceed it | Seconds to `expires_at` |
 
 A negative cap or nonpositive amount is `InvalidParameter`. Accounting caps reject negative history
 and history of another UTC day with `InvalidState`. Lifetime unpriced history denies `spent_cap`.
@@ -57,11 +64,12 @@ Unpriced history of the day denies both daily caps (`Unpriced`). Deployment reje
 The standard prefix is the consecutive leading top-level statements of exactly the form
 `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`: one canonical rule and its same-named Grant field.
 Any other statement ends it. Later statements run offchain or in CustomPolicy.
-The standard contract receives the exact owner-approved ordered prefix as `rules`, never caller
-selectors. It runs each call as `if grant.<rule>.is_some() { allowit::<rule>(ctx, &grant.<rule>)?; }`
+The standard contract receives the exact owner-approved ordered prefix as `rules: Vec<Rule>`, never
+caller selectors. `Rule` is a typed enum whose variants are the canonical names, so unknown or
+retired names fail argument decoding. It runs each call through `allowit::preflight` as `if grant.<rule>.is_some() { allowit::<rule>(ctx, &grant.<rule>)?; }`
 and discards pass values. This preflight runner is the only place an unset field skips its rule.
 The offchain full policy still runs the unguarded call. Repeated rules read the same proposed
-history, so they cannot charge twice. Unknown or retired names reject at deployment.
+history, so they cannot charge twice.
 
 Rule denials map to `PolicyDenied`. `MissingGrant` and `InvalidParameter` map to `InvalidGrant`.
 `InvalidState` maps to `InvalidState`. A failed call rolls back its events, so only the host
@@ -78,8 +86,8 @@ backward clocks before rules run.
 
 Fixed standard `source_digest` is SHA-256 of canonical XDR containing the domain
 `allowit_std_prefix`, implementation kind, actual module hash, immutable SAC, transfer/deposit schema
-hashes and the ordered `(rule, matching Grant reference)` pairs. Each pair names the rule twice
-because the reference is always its same-named field. It excludes Grant values and full source.
+hashes and the ordered `Vec<Rule>`. Each unit variant encodes as a one-symbol vector of its rule
+name; its Grant reference is always the same-named field. It excludes Grant values and full source.
 The constructor and binding getter check it against the actual runtime module.
 
 Custom `source_digest` is the plain SHA-256 of the exact bytes of `crates/custom-policy/policy/policy.rs`.
@@ -97,9 +105,18 @@ With `wasm_hash=None`, Grant values change without code redeployment. Prefix, hi
 execution nonce and pause remain intact when only Grant changes. The new revision rejects old
 inflight packets. A changed prefix or executable requires a new owner binding.
 
-The typed Grant changes the stored State layout, owner configuration packets and the CustomPolicy
-source hash. Wallets that store the retired Map Grant fail state decoding. They need an explicit
-redeploy or migration. No implicit migration exists.
+Owner packets bind their exact meaning. Struct decoding ignores extra keys and reads absent
+`Option` keys as `None`, so the constructor and `deploy_policy` require owner authorization for
+the canonical re-encoding of the decoded packet. A packet with legacy, extra or absent keys fails
+authorization unless the owner signed that canonical form.
+
+`contract_version` 2 stores the typed Grant and `Vec<Rule>`. Version 1 stored an untyped Grant map
+and symbol rules. Execution, `state()` and `set_pause` accept only the exact canonical encoding of
+version 2, including nested Grant and history. Owner `recover`, `invoke` and `deploy_policy` read
+only the fields they keep, so an in-place upgrade from version 1 never locks custody. A complete
+typed `deploy_policy` packet replaces Grant, rules and roles, keeps history, nonce, pause and
+asset, and writes version 2. Later versions reject even owner calls, because their kept fields may
+change meaning. New source and schema hashes need new owner bindings.
 
 ## Shared engine
 
@@ -127,6 +144,7 @@ expenses and temporary loss. No automatic onchain refund authority follows from 
 `execute` and the owner-enabled x402 transfer hook require agent and server authority. The kernel
 checks source/module/schema, immutable asset, exact parties/amount, positive debit, pause, expiry,
 configuration version, execution nonce and single-use operation ID independently of business checks.
+The x402 hook decodes its execution like `execute` and admits only the canonical transfer profile.
 State, effects and receipts commit atomically. Denials and native failures roll them back.
 
 SEP-56 deposits bind vault, assets, minimum shares and wallet source/operator/share receiver.
@@ -148,7 +166,8 @@ Owner pause, configuration, recovery, upgrades and exact `invoke` bypass agent/s
 and never call an engine. Owner authorization binds exact target, arguments and supplied subtrees.
 `policy_binding()` reports the default profile; `policy_binding_for(schema_digest)` checks another
 admitted profile. `state()` returns the typed Grant and protected history.
-Unknown stored layouts reject. Upgrades do not migrate state implicitly.
+Unknown stored layouts reject. Upgrades do not migrate state implicitly; only an explicit owner
+packet rewrites a version 1 layout.
 
 Classic G-address multisig has no contract prefix enforcement. Owner-selected signer thresholds
 control native transactions. Its policy source and economic checks run offchain before signing.

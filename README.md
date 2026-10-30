@@ -6,10 +6,12 @@ Three owner-controlled contract implementations share custody and administration
 - `CommonPolicyEngine` runs the owner-approved standard prefix of canonical rule calls.
 - `CustomPolicy` compiles a complete authored policy verbatim into its own contract and reuses the same wallet mixins.
 
-Policy source is portable Rust against `crates/allowit`: `allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;`
-compiles unchanged for the offchain server, custom contracts and the standard preflight. Rules are
-pure checks over `AllowitEnv` (typed Grant, protected history, request) and return their passing
-constraint or an error.
+Policy source is portable Rust against `crates/allowit`: `allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;`.
+The offchain server and CustomPolicy compile the file verbatim. The standard contract runs only its
+leading canonical calls, supplied by the owner as `rules`, and skips unset fields. Matching `rules`
+to the source is part of the owner's offchain authorization. Rules are pure checks over
+`AllowitEnv` (typed Grant, protected history, request) and return their passing constraint or an
+error. The server uses `allowit = { default-features = false, features = ["std"] }`.
 
 The owner controls wallet upgrades, configuration, pause, recovery and exact passthrough calls.
 Shared checker upgrades belong to a separate parent and grant no wallet custody authority.

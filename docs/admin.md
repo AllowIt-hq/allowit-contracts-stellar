@@ -108,8 +108,11 @@ Grant and protected history. Archived data requires native restoration and is ne
 The SDK rejects unavailable or ambiguous state observations before new signing. Owner pause,
 deployment and recovery do not depend on shared engine availability.
 
-Wallets deployed with the retired Map Grant cannot decode under the typed layout. Redeploy them
-or use the explicit migration sequence below.
+Wallets with layout `contract_version` 1 store the retired Map Grant and cannot execute under the
+typed release. Owner `recover`, `invoke` and `deploy_policy` still work after an in-place upgrade,
+because they read only the fields they keep. Repair an upgraded wallet with one complete typed
+`deploy_policy` packet, or drain it with `recover` and redeploy. `contract_admin.py` builds owner
+packets only for layout 2; read the version 1 state with that release's tooling.
 
 Normal operations do not migrate state. An incompatible change uses this explicit maintenance
 sequence: pause, deploy and run a migration contract, deploy the new contract using the migrated
