@@ -10,10 +10,12 @@ Policy source is portable Rust against `crates/allowit`: `allowit::spent_cap(ctx
 The offchain server and `AllowitCustomPolicy` compile the file verbatim. The standard contract runs only its
 leading canonical calls, supplied by the owner as `rules`, and skips unset fields.
 `scripts/contract_admin.py` derives `rules` from the source. Rules are checks over
-`AllowitContext` (backend environment, typed Grant, protected history, request) and return their
-passing constraint or an error. `allowit::run` denies after any failed rule, even if the policy
-caught the error. The server uses `allowit = { default-features = false, features = ["std"] }` and
-builds with `overflow-checks = true`.
+`AllowitContext` (backend environment, typed Grant, current policy state, request). They add the
+request's own contribution to the current state and return their passing constraint or an error.
+Only an error that the policy returns denies; a caught error lets the policy continue. After
+approval the wallet and the server run the same `allowit::post_flight`, which updates the standard
+state keys and applies the policy's `allowit::set_state` writes. The server uses
+`allowit = { default-features = false, features = ["std"] }` and builds with `overflow-checks = true`.
 
 The owner controls wallet upgrades, configuration, pause, recovery and exact passthrough calls.
 Shared checker upgrades belong to a separate parent and grant no wallet custody authority.

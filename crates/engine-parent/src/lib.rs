@@ -72,6 +72,7 @@ fn authorize(env: &Env, version: u64) -> Result<AllowitParentState, AllowitParen
 mod engine {
     use super::*;
 
+    /// Renew the engine's instance and code lifetime and return its address.
     pub(super) fn load(env: &Env, address: Address) -> Address {
         let ttl = env.storage().max_ttl();
         env.deployer().extend_ttl(address.clone(), ttl / 2, ttl);

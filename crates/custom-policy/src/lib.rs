@@ -26,9 +26,11 @@ pub const ARGUMENT_SCHEMA_HASH: [u8; 32] = [
 pub struct AllowitCustom;
 impl AllowitPolicy for AllowitCustom {
     const KIND: &'static str = "custom_policy";
+    /// The digest of the compiled policy source.
     fn source_digest(env: &Env) -> Option<BytesN<32>> {
         Some(BytesN::from_array(env, &SOURCE_HASH))
     }
+    /// Transfers only.
     fn argument_schema_digest(env: &Env) -> BytesN<32> {
         BytesN::from_array(env, &ARGUMENT_SCHEMA_HASH)
     }

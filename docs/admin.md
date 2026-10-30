@@ -92,10 +92,10 @@ admin source and three `--member` values.
 A deployment argument contains exactly `deployment_version`, `owner`, `agent`, `server`,
 `source_digest`, `rules`, `grant`, `x402_enabled`, and `wasm_hash`. The target version is current plus
 one. Use null for unchanged code. A non-null `wasm_hash` also requires `--wasm PATH` with that hash;
-the tool refuses Wasm without `allowit_custody_layout` metadata equal to 2. Code for another custody
-layout cannot read the stored State, so such a change, including a rollback to a version 1 release,
+the tool refuses Wasm without `allowit_custody_layout` metadata equal to 3. Code for another custody
+layout cannot read the stored State, so such a change, including a rollback to an earlier release,
 locks custody permanently. Recover funds before any change across layouts. Deployment preserves
-pause and protected history. A changed owner must also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
+pause and policy state. A changed owner must also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
 False disables x402 without changing direct two-role execution authorization. Classic signer rotation and `shutdown-wallet` do not revoke raw-key x402 delegation. The contract wallet owner must disable x402, pause, or replace the agent/server address through `deploy_policy`.
 
 Owner passthrough uses `invoke(contract, function, args, auth)`. Prepare this exact call with the
@@ -115,21 +115,22 @@ envelopes expire after five minutes. Save signed bytes before broadcast and reco
 hash after an uncertain response. The tool never signs, submits, restores or retries automatically.
 
 Use `read --contract POLICY_WALLET_ADDRESS --source "$OWNER" --method policy_binding` to inspect the contract
-release, policy instance, module/source digests and argument schema. `state` returns the typed
-Grant and protected history. Archived data requires native restoration and is never reinitialized.
+release, policy instance, module/source digests and argument schema. `state` returns the custody
+State, including the typed Grant and `policy_state`; `policy_state` returns the current policy state
+map alone. Archived data requires native restoration and is never reinitialized.
 The SDK rejects unavailable or ambiguous state observations before new signing. Owner pause,
 deployment and recovery do not depend on shared engine availability.
 
-Wallets with layout `contract_version` 1 store the retired Map Grant and cannot execute under the
-typed release. Owner `recover`, `invoke` and `deploy_policy` still work after an in-place upgrade,
-because they read only the fields they keep. Repair an upgraded wallet with one complete typed
-`deploy_policy` packet, or drain it with `recover` and redeploy. `contract_admin.py` builds
-`deploy_policy` packets only for layout 2; read the version 1 state with that release's tooling.
-`recover` does not read `state()`, so the tool also drains an upgraded version 1 wallet.
+Wallets with layout `contract_version` 1 (Map Grant) or 2 (accounting history struct) cannot
+execute under layout 3, and their accounting does not migrate. Owner `recover` and `invoke` still
+work after an in-place upgrade, because they read only the fields they keep; `deploy_policy` rejects
+an earlier layout with `InvalidState`. Drain such a wallet with `recover` and deploy a new one.
+`contract_admin.py` builds `deploy_policy` packets only for layout 3; read an earlier state with that
+release's tooling. `recover` does not read `state()`, so the tool also drains an upgraded wallet.
 
 Normal operations do not migrate state. An incompatible change uses this explicit maintenance
 sequence: pause, deploy and run a migration contract, deploy the new contract using the migrated
-state, then unpause. Compatible code updates retain the installed format, history and replay records.
+state, then unpause. Compatible code updates retain the installed format, policy state and replay records.
 
 The parent stores `owner`, `version` and `engine`. Wallet deployment and contract release versions remain separate.
 Older parent state uses different field names. Migrate that state explicitly before installing this parent executable on an existing address.

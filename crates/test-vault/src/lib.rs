@@ -14,10 +14,12 @@ pub struct AllowitShareMint {
 pub struct AllowitSep56TestVault;
 #[contractimpl]
 impl AllowitSep56TestVault {
+    /// Fix the underlying asset and the hostile behavior code.
     pub fn __constructor(env: Env, asset: Address, behavior: u32) {
         env.storage().instance().set(&0u32, &asset);
         env.storage().instance().set(&1u32, &behavior);
     }
+    /// The underlying asset; behaviors 9 and 10 also change effects after a deposit.
     pub fn query_asset(env: Env) -> Address {
         let asset: Address = env.storage().instance().get(&0u32).unwrap();
         let behavior: u32 = env.storage().instance().get(&1u32).unwrap();
@@ -38,6 +40,7 @@ impl AllowitSep56TestVault {
         }
         asset
     }
+    /// Underlying value of `shares`; behavior 11 undervalues by two, 12 destroys shares.
     pub fn preview_redeem(env: Env, shares: i128) -> i128 {
         let behavior: u32 = env.storage().instance().get(&1u32).unwrap();
         if behavior == 12
@@ -47,9 +50,11 @@ impl AllowitSep56TestVault {
         }
         if behavior == 11 { shares - 2 } else { shares }
     }
+    /// Share decimals.
     pub fn decimals(_env: Env) -> u32 {
         7
     }
+    /// Code that behavior 8 installs during a deposit.
     pub fn set_upgrade(env: Env, hash: BytesN<32>) {
         env.storage().instance().set(&2u32, &hash);
     }
@@ -59,9 +64,11 @@ impl AllowitSep56TestVault {
             .instance()
             .set(&5u32, &(contract, function, args));
     }
+    /// Share balance of `owner`.
     pub fn balance(env: Env, owner: Address) -> i128 {
         env.storage().persistent().get(&owner).unwrap_or(0)
     }
+    /// Pull `assets` and mint shares, with the configured hostile behavior.
     pub fn deposit(
         env: Env,
         assets: i128,

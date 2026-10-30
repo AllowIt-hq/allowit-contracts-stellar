@@ -148,6 +148,10 @@ pub trait AllowitPolicy {
     fn check(ctx: &AllowitContext, rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError>;
 }
 
+/// A checked arithmetic result, or `Overflow`.
+fn checked<T>(value: Option<T>) -> Result<T, AllowitWalletError> {
+    value.ok_or(AllowitWalletError::Overflow)
+}
 /// Read initialized state and maintain its instance and code lifetime. Constructor initialization is explicit.
 fn load(env: &Env, initial: Option<AllowitState>) -> Result<AllowitState, AllowitWalletError> {
     if let Some(state) = initial {
@@ -164,11 +168,13 @@ fn load(env: &Env, initial: Option<AllowitState>) -> Result<AllowitState, Allowi
     extend(env);
     Ok(state)
 }
+/// Renew the instance and code lifetime of this wallet.
 fn extend(env: &Env) {
     let ttl = env.storage().max_ttl();
     env.deployer()
         .extend_ttl(env.current_contract_address(), ttl / 2, ttl);
 }
+/// Write the custody State.
 fn store(env: &Env, state: &AllowitState) {
     env.storage().instance().set(&STATE_KEY, state);
 }
@@ -206,12 +212,14 @@ fn kept_policy_state(env: &Env) -> Result<Map<Symbol, Val>, AllowitWalletError> 
         .ok_or(AllowitWalletError::InvalidState)?;
     Map::try_from_val(env, &raw).map_err(|_| AllowitWalletError::InvalidState)
 }
+/// The raw stored State, before layout decoding.
 fn stored(env: &Env) -> Result<Val, AllowitWalletError> {
     env.storage()
         .instance()
         .get(&STATE_KEY)
         .ok_or(AllowitWalletError::InvalidState)
 }
+/// The ed25519 key of a G-account address; any other address is `InvalidActor`.
 fn public_key(env: &Env, address: &Address) -> Result<BytesN<32>, AllowitWalletError> {
     let encoded = address.to_xdr(env);
     let prefix = [0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -250,6 +258,7 @@ pub fn standard_prefix_digest(
         )
         .to_bytes()
 }
+/// The standard prefix digest of this executable, asset and rules.
 fn checked_prefix<P: AllowitPolicy>(
     env: &Env,
     asset: &Address,
@@ -266,6 +275,7 @@ fn checked_prefix<P: AllowitPolicy>(
         rules,
     ))
 }
+/// Check owner configuration: distinct roles, identities, source binding, Grant, rules and x402 keys.
 fn validate<P: AllowitPolicy>(
     env: &Env,
     config: &AllowitPolicyConfig,
@@ -316,11 +326,13 @@ fn decoded<T: IntoVal<Env, Val> + TryFromVal<Env, Val>>(
     }
     Ok(())
 }
+/// SHA-256 of a native argument schema descriptor.
 fn schema_digest(env: &Env, descriptor: &[u8]) -> BytesN<32> {
     env.crypto()
         .sha256(&Bytes::from_slice(env, descriptor))
         .to_bytes()
 }
+/// The installed binding for one admitted argument schema.
 fn binding_for<P: AllowitPolicy>(
     env: &Env,
     state: &AllowitState,
@@ -350,6 +362,7 @@ fn binding_for<P: AllowitPolicy>(
         entrypoint: Symbol::new(env, "execute"),
     })
 }
+/// The installed binding for the default argument schema.
 fn binding<P: AllowitPolicy>(
     env: &Env,
     state: &AllowitState,
@@ -363,6 +376,7 @@ enum NativeOperation {
     Deposit(AllowitSep56DepositArgs),
 }
 impl NativeOperation {
+    /// The underlying debit as a transfer: deposits move `assets` to the vault.
     fn transfer(&self, asset: &Address) -> AllowitSep41TransferArgs {
         match self {
             Self::Transfer(args) => args.clone(),
@@ -374,6 +388,7 @@ impl NativeOperation {
             },
         }
     }
+    /// The typed operation that rules read.
     fn kind(&self) -> AllowitOperation {
         match self {
             Self::Transfer(_) => AllowitOperation::sep41_transfer,
@@ -381,6 +396,7 @@ impl NativeOperation {
         }
     }
 }
+/// Decode the canonical native operation of a request; only the installed asset and wallet roles pass.
 fn decode_operation(
     env: &Env,
     execution: &AllowitExecutionRequest,
@@ -422,6 +438,7 @@ fn decode_operation(
     Ok(NativeOperation::Deposit(args))
 }
 
+/// The SAC symbol of the asset, cached at construction for issuer checks.
 fn token_label(env: &Env, asset: &Address) -> String {
     let native = env
         .deployer()
@@ -435,6 +452,7 @@ fn token_label(env: &Env, asset: &Address) -> String {
 }
 // A transfer to a classic issuer burns its asset. Derive the immutable SAC identity
 // from the cached symbol and candidate issuer without reentering the active SAC.
+/// Whether `to` is the classic issuer of the asset, where a transfer burns it.
 fn issuer_destination(
     env: &Env,
     token: &String,
@@ -491,6 +509,7 @@ fn issuer_destination(
         .deployed_address()
         == *asset)
 }
+/// Transfer `amount` from this wallet and check both exact balance effects.
 fn move_tokens(
     env: &Env,
     asset: &Address,
@@ -503,19 +522,15 @@ fn move_tokens(
     if before < amount {
         return Err(AllowitWalletError::InsufficientFunds);
     }
-    let after_from = before
-        .checked_sub(amount)
-        .ok_or(AllowitWalletError::Overflow)?;
-    let after_to = client
-        .balance(to)
-        .checked_add(amount)
-        .ok_or(AllowitWalletError::Overflow)?;
+    let after_from = checked(before.checked_sub(amount))?;
+    let after_to = checked(client.balance(to).checked_add(amount))?;
     client.transfer(&from, to, &amount);
     if client.balance(&from) != after_from || client.balance(to) != after_to {
         return Err(AllowitWalletError::InvalidEffects);
     }
     Ok(())
 }
+/// Decode optional canonical expense bounds.
 fn decode_expense(
     env: &Env,
     raw: Option<&Bytes>,
@@ -580,16 +595,13 @@ fn validate_expense(
             expense.conversion_units
         }
     };
-    if expense.spent_units
-        != principal
-            .checked_add(expense.gas_units)
-            .ok_or(AllowitWalletError::Overflow)?
-    {
+    if expense.spent_units != checked(principal.checked_add(expense.gas_units))? {
         return Err(AllowitWalletError::InvalidInvocation);
     }
     Ok(())
 }
 
+/// Deposit into a SEP-56 vault with exactly one delegated transfer, then check share and asset effects.
 fn deposit_tokens(
     env: &Env,
     asset: &Address,
@@ -653,12 +665,8 @@ fn deposit_tokens(
     if after_asset != *asset {
         return Err(AllowitWalletError::InvalidEffects);
     }
-    let expected_assets = before_assets
-        .checked_sub(args.assets)
-        .ok_or(AllowitWalletError::Overflow)?;
-    let expected_shares = before_shares
-        .checked_add(shares)
-        .ok_or(AllowitWalletError::Overflow)?;
+    let expected_assets = checked(before_assets.checked_sub(args.assets))?;
+    let expected_shares = checked(before_shares.checked_add(shares))?;
     let after_shares = shares_client.balance(&wallet);
     // The immutable SAC read is last: no untrusted vault code runs after these final observations.
     let after_assets = asset_client.balance(&wallet);
@@ -749,10 +757,7 @@ fn admit<P: AllowitPolicy>(
         return Err(AllowitWalletError::InvalidRecipient);
     }
     validate_expense(env, &state, expense, operation)?;
-    let nonce = state
-        .nonce
-        .checked_add(1)
-        .ok_or(AllowitWalletError::Overflow)?;
+    let nonce = checked(state.nonce.checked_add(1))?;
     P::validate(&state.rules)?;
     let ctx = rule_input(env, &state, operation, expense, now, execution.expires_at);
     P::check(&ctx, &state.rules)?;
@@ -773,6 +778,7 @@ fn admit<P: AllowitPolicy>(
     Ok(persistent::load(env, &replay_key, Some(&receipt)).unwrap())
 }
 
+/// Initialize custody from an owner-signed configuration.
 pub fn construct<P: AllowitPolicy>(
     env: &Env,
     config: AllowitPolicyConfig,
@@ -809,6 +815,7 @@ pub fn construct<P: AllowitPolicy>(
     )?;
     Ok(())
 }
+/// Read the custody State.
 pub fn state(env: &Env) -> Result<AllowitState, AllowitWalletError> {
     load(env, None)
 }
@@ -816,6 +823,7 @@ pub fn state(env: &Env) -> Result<AllowitState, AllowitWalletError> {
 pub fn policy_state(env: &Env) -> Result<Map<Symbol, Val>, AllowitWalletError> {
     Ok(load(env, None)?.policy_state)
 }
+/// Read the installed binding for the default argument schema.
 pub fn policy_binding<P: AllowitPolicy>(
     env: &Env,
 ) -> Result<AllowitPolicyBinding, AllowitWalletError> {
@@ -836,6 +844,7 @@ pub fn deposit_receipt(
     load(env, None)?;
     Ok(persistent::load(env, &Key::Deposit(operation_id), None))
 }
+/// Run one agent- and server-authorized native operation under the installed policy.
 pub fn execute<P: AllowitPolicy>(
     env: &Env,
     execution: AllowitExecutionRequest,
@@ -880,6 +889,7 @@ pub fn execute<P: AllowitPolicy>(
     }
     Ok(receipt)
 }
+/// Apply a complete owner update; kept fields and policy state carry over.
 pub fn deploy_policy<P: AllowitPolicy>(
     env: &Env,
     deployment: AllowitPolicyDeployment,
@@ -888,12 +898,7 @@ pub fn deploy_policy<P: AllowitPolicy>(
     // The current and any new owner sign the canonical encoding of the decoded packet.
     let signed: Vec<Val> = (deployment.clone(),).into_val(env);
     kept.owner.require_auth_for_args(signed.clone());
-    if kept
-        .deployment_version
-        .checked_add(1)
-        .ok_or(AllowitWalletError::Overflow)?
-        != deployment.deployment_version
-    {
+    if checked(kept.deployment_version.checked_add(1))? != deployment.deployment_version {
         return Err(AllowitWalletError::StaleRequest);
     }
     let policy_state = kept_policy_state(env)?;
@@ -946,16 +951,20 @@ pub fn deploy_policy<P: AllowitPolicy>(
     }
     Ok(())
 }
+/// Validation of a packet that installs new code: the new code checks its own rules on its next call.
 struct UpgradeConfig;
 impl AllowitPolicy for UpgradeConfig {
     const KIND: &'static str = "upgrade";
+    /// The new code validates its rules itself.
     fn validate(_rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         Ok(())
     }
+    /// Never used to execute.
     fn check(_ctx: &AllowitContext, _rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         Err(AllowitWalletError::PolicyDenied)
     }
 }
+/// Pause or resume delegated execution; the owner targets the next deployment version.
 pub fn set_pause(
     env: &Env,
     paused: bool,
@@ -963,12 +972,7 @@ pub fn set_pause(
 ) -> Result<(), AllowitWalletError> {
     let mut state = load(env, None)?;
     state.owner.require_auth();
-    if state
-        .deployment_version
-        .checked_add(1)
-        .ok_or(AllowitWalletError::Overflow)?
-        != deployment_version
-    {
+    if checked(state.deployment_version.checked_add(1))? != deployment_version {
         return Err(AllowitWalletError::StaleRequest);
     }
     state.paused = paused;
@@ -976,6 +980,7 @@ pub fn set_pause(
     store(env, &state);
     Ok(())
 }
+/// Owner recovery of funds under any readable layout.
 pub fn recover(env: &Env, recipient: Address, amount: i128) -> Result<(), AllowitWalletError> {
     let kept = kept(env)?;
     kept.owner.require_auth();
@@ -1001,6 +1006,7 @@ pub fn invoke(
     env.authorize_as_current_contract(auth);
     Ok(env.invoke_contract(&contract, &function, args))
 }
+/// x402: admit one token transfer that the agent and server signed, as `execute` does.
 pub fn check_auth<P: AllowitPolicy>(
     env: &Env,
     payload: Hash<32>,
@@ -1072,15 +1078,21 @@ pub fn check_auth<P: AllowitPolicy>(
     Ok(())
 }
 
+/// The transfer and SEP-56 deposit schemas that the standard tiers admit.
+fn native_schema(env: &Env, digest: &BytesN<32>) -> bool {
+    *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
+        || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
+}
 /// Fixed minimal policy: server approval is mandatory, with no onchain business predicates.
 pub struct AllowitSimple;
 impl AllowitPolicy for AllowitSimple {
     const KIND: &'static str = "simple_policy_engine";
     const STANDARD_PREFIX: bool = true;
+    /// Transfers and SEP-56 deposits.
     fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
-        *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
-            || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
+        native_schema(env, digest)
     }
+    /// No onchain rules: the kernel and the shared post-flight only.
     fn check(_ctx: &AllowitContext, _rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         Ok(())
     }
@@ -1090,9 +1102,9 @@ pub struct AllowitCommon;
 impl AllowitPolicy for AllowitCommon {
     const KIND: &'static str = "common_policy_engine";
     const STANDARD_PREFIX: bool = true;
+    /// Transfers and SEP-56 deposits.
     fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
-        *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
-            || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
+        native_schema(env, digest)
     }
     /// Any ordered list of typed rules. The kernel decodes each element before storing it.
     fn validate(_rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
