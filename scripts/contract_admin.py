@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Prepare explicit Stellar contract setup/admin XDR. Never signs or submits."""
 import argparse
-import base64
 import copy
 import hashlib
 import time
@@ -75,24 +74,35 @@ def pinned_wasm(path, expected_hash):
     return expected_hash
 
 
+# Typed Grant fields, which are also the canonical rule names. Unset fields are null.
+GRANT_FIELDS = ("transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap", "call_cap", "recipients", "tokens", "expiry")
+CAPS = {"transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap"}
+LISTS = {"recipients", "tokens"}
+
+
 def grant(value):
-    """Validate named canonical native values without imposing a policy schema."""
-    if not isinstance(value, dict) or any(not isinstance(name, str) for name in value):
-        raise ValueError("Grant must map names to canonical base64 SCVal XDR values")
-    for name, encoded in value.items():
-        name.encode("utf-8")
-        if not isinstance(encoded, str):
-            raise ValueError("Grant values must be canonical base64 SCVal XDR")
-        raw = base64.b64decode(encoded, validate=True)
-        decoded = xdr.SCVal.from_xdr_bytes(raw)
-        if decoded.to_xdr() != encoded:
-            raise ValueError("Grant value encoding is not canonical")
-    return value
+    """Validate a typed Grant and return all fields in canonical order. Missing fields are null."""
+    if not isinstance(value, dict) or any(name not in GRANT_FIELDS for name in value):
+        raise ValueError("Grant fields must be canonical rule names: " + ", ".join(GRANT_FIELDS))
+    result = {}
+    for name in GRANT_FIELDS:
+        item = value.get(name)
+        if item is None:
+            pass
+        elif name in LISTS:
+            if not isinstance(item, list):
+                raise ValueError("Grant " + name + " must be a list of addresses")
+            for entry in item:
+                address(entry)
+        elif type(item) is not int or not 0 <= item <= (2**127 - 1 if name in CAPS else 2**64 - 1):
+            raise ValueError("Grant " + name + " must be a nonnegative native integer")
+        result[name] = item
+    return result
 
 
 def grant_cli(value):
-    # Pinned CLI ScType::Val uses the standard tagged SCVal JSON decoder.
-    return {name: xdr.SCVal.from_xdr(encoded).to_json_dict() for name, encoded in grant(value).items()}
+    # Pinned CLI spec JSON: Option is null or its value; i128 as a decimal string avoids float decoding.
+    return {name: str(item) if name in CAPS and item is not None else item for name, item in grant(value).items()}
 
 
 def deployment(value):
@@ -105,8 +115,8 @@ def deployment(value):
         address(value[role])
     grant(value["grant"])
     code_hash(value["source_digest"])
-    if not isinstance(value["rules"], list) or any(not isinstance(rule, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,32}", rule) for rule in value["rules"]):
-        raise ValueError("Rules must contain native Symbol names")
+    if not isinstance(value["rules"], list) or any(rule not in GRANT_FIELDS for rule in value["rules"]):
+        raise ValueError("Rules must name canonical rules: " + ", ".join(GRANT_FIELDS))
     if type(value["x402_enabled"]) is not bool:
         raise ValueError("x402_enabled must be boolean")
     if value["x402_enabled"] and any(not StrKey.is_valid_ed25519_public_key(value[role]) for role in ("agent", "server")):
@@ -291,8 +301,8 @@ def command(args):
     if not StrKey.is_valid_contract(args.contract):
         raise ValueError("Target must be a contract C address")
     if args.action == "read":
-        if args.method not in ("state", "engine", "policy_binding", "policy_spent"):
-            raise ValueError("Only state, engine, policy_binding and policy_spent reads are supported")
+        if args.method not in ("state", "engine", "policy_binding"):
+            raise ValueError("Only state, engine and policy_binding reads are supported")
         return ["contract", "invoke", "--id", args.contract, "--send=no"] + base + ["--", args.method]
     methods = WALLET if args.family == "wallet" else PARENT
     if args.method not in methods:

@@ -1,6 +1,6 @@
-# Policy identity hashes the literal source bytes. Preserve the release bytes
+# Custom policy identity hashes the literal source bytes. Preserve the release bytes
 # when cloning on Windows with core.autocrlf enabled.
-/policy/*.rs text eol=lf
+/crates/custom-policy/policy/*.rs text eol=lf
 
 # Authored source and generated module digests cover exact input bytes.
 /crates/odc/policy/*.rs text eol=lf

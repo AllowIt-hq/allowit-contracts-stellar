@@ -28,9 +28,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/check-policy.py
           python3 scripts/check-policy-bindings.py
-          rustc --edition=2021 --test scripts/policy-smoke.rs -o "$RUNNER_TEMP/policy-smoke"
+          rustc --edition=2024 --crate-type=rlib --crate-name=allowit --cfg 'feature="std"' crates/allowit/src/lib.rs -o "$RUNNER_TEMP/liballowit.rlib"
+          rustc --edition=2024 --test --extern allowit="$RUNNER_TEMP/liballowit.rlib" scripts/policy-smoke.rs -o "$RUNNER_TEMP/policy-smoke"
           "$RUNNER_TEMP/policy-smoke" "${{ matrix.flow }}" --nocapture | tee "$RUNNER_TEMP/policy.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/policy.log"
   contracts:
@@ -47,7 +47,6 @@ jobs:
           key: stellar-contracts
       - name: Check shared policy identity and formatting
         run: |
-          python3 scripts/check-policy.py
           python3 scripts/check-policy-bindings.py
           cargo fmt --all --check
       - name: Install pinned Stellar CLI

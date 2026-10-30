@@ -21,13 +21,14 @@ WASM = Path(__file__).resolve().parents[2] / "target/wasm32v1-none/release/allow
 
 @unittest.skipUnless(CLI and WASM.exists(), "Build policy wallet Wasm and set STELLAR_BIN to test CLI encoding")
 class RealCliEncoding(unittest.TestCase):
-    def test_generic_grant_exact_native_encoding(self):
+    def test_typed_grant_exact_native_encoding(self):
         code = WASM.read_bytes()
         digest = hashlib.sha256(code).digest()
         account = Keypair.from_raw_ed25519_seed(bytes([1]) * 32).public_key
         contract = StrKey.encode_contract(bytes([2]) * 32)
         recipient = Keypair.from_raw_ed25519_seed(bytes([3]) * 32).public_key
-        grant = {"per_transfer": scval.to_int128(10).to_xdr(), "custom_bytes": scval.to_bytes(b"preserved").to_xdr(), "max_calls": scval.to_uint64(0).to_xdr(), "unrelated": scval.to_bool(True).to_xdr()}
+        big = 2**127 - 1
+        grant = {"transaction_cap": big, "spent_cap": 0, "call_cap": 0, "expiry": 2**64 - 1, "recipients": [recipient, contract], "tokens": []}
         methods = []
         class Rpc(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -74,12 +75,16 @@ class RealCliEncoding(unittest.TestCase):
                 args = tx.transaction.operations[0].host_function.invoke_contract.args
                 packet = {entry.key.sym.sc_symbol.decode(): entry.val for entry in args[0].map.sc_map}
                 self.assertEqual(packet["deployment_version"].u64.uint64, 1)
-                values = {entry.key.str.sc_string.decode(): entry.val for entry in packet["grant"].map.sc_map}
-                self.assertEqual(values["per_transfer"].type, xdr.SCValType.SCV_I128)
-                self.assertEqual(values["per_transfer"].i128.lo.uint64, 10)
-                self.assertEqual(values["max_calls"].u64.uint64, 0)
-                for name, encoded in grant.items():
-                    self.assertEqual(values[name].to_xdr(), encoded)
+                values = {entry.key.sym.sc_symbol.decode(): entry.val for entry in packet["grant"].map.sc_map}
+                self.assertEqual(list(values), sorted(ca.GRANT_FIELDS))
+                self.assertEqual(values["transaction_cap"], scval.to_int128(big))
+                self.assertEqual(values["spent_cap"], scval.to_int128(0))
+                self.assertEqual(values["call_cap"], scval.to_uint64(0))
+                self.assertEqual(values["expiry"], scval.to_uint64(2**64 - 1))
+                self.assertEqual(values["recipients"], scval.to_vec([scval.to_address(recipient), scval.to_address(contract)]))
+                self.assertEqual(values["tokens"], scval.to_vec([]))
+                for unset in ("day_spent_cap", "day_total_cap"):
+                    self.assertEqual(values[unset], scval.to_void())
                 for action, wasm in (("deploy-parent", WASM.with_name("allowit_engine_parent.wasm")), ("deploy-wallet", WASM)):
                     with self.subTest(action=action):
                         expected = hashlib.sha256(wasm.read_bytes()).hexdigest()

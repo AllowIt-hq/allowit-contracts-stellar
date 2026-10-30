@@ -160,17 +160,26 @@ class ContractAdmin(unittest.TestCase):
         self.assertNotIn("approve", ca.WALLET)
         self.assertNotIn("set_grant", ca.PARENT)
 
-    def test_generic_grant_preserves_native_types_and_rejects_noncanonical_values(self):
-        values = {"bytes": scval.to_bytes(b"custom").to_xdr(), "negative": scval.to_int128(-9).to_xdr(),
-                  "enabled": scval.to_bool(True).to_xdr(), "amount": scval.to_uint64(0).to_xdr()}
-        self.assertEqual(ca.grant(values), values)
-        self.assertEqual(ca.grant({}), {})
+    def test_typed_grant_uses_canonical_fields_and_native_ranges(self):
+        values = {"spent_cap": 2**127 - 1, "call_cap": 0, "recipients": [KEYS[1]], "tokens": []}
+        complete = ca.grant(values)
+        self.assertEqual(list(complete), list(ca.GRANT_FIELDS))
+        self.assertEqual({k: v for k, v in complete.items() if v is not None}, values)
+        self.assertEqual(ca.grant({}), dict.fromkeys(ca.GRANT_FIELDS))
         tagged = json.loads(ca.serialize({"grant": values})[1])
-        for name, value in tagged.items():
-            self.assertEqual(xdr.SCVal.from_json_dict(value).to_xdr(), values[name])
-        for invalid in ({"x": 1}, {"x": "invalid"}, {"x": values["bytes"] + "="}, {1: values["bytes"]}):
+        self.assertEqual(tagged["spent_cap"], str(2**127 - 1))
+        self.assertIsNone(tagged["expiry"])
+        for invalid in ({"per_transfer": 1}, {"max_calls": 1}, {"daily_limit": 1}, {"spent_cap": -1}, {"spent_cap": 2**127},
+                        {"call_cap": 2**64}, {"expiry": True}, {"transaction_cap": "1"}, {"recipients": KEYS[1]},
+                        {"tokens": ["not-an-address"]}, {1: 1}):
             with self.assertRaises((ValueError, TypeError)):
                 ca.grant(invalid)
+        deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
+                      "rules": ["spent_cap", "recipients"], "grant": values, "x402_enabled": False, "wasm_hash": None}
+        ca.deployment(deployment)
+        for removed in ("set_cap_per_day", "cap_per_transaction", "require_recipient", "require_asset", "allow_actions", "state_remove", "fail", "daily_cap"):
+            with self.assertRaises(ValueError):
+                ca.deployment(dict(deployment, rules=[removed]))
         with self.assertRaises(ValueError):
             ca.public_json('{"custom":1,"custom":2}')
 
@@ -360,7 +369,7 @@ class ContractAdmin(unittest.TestCase):
             path.write_bytes(b"reviewed-artifact")
             asset = StrKey.encode_contract(bytes([2]) * 32)
             engine = StrKey.encode_contract(bytes([3]) * 32)
-            values = {"custom": scval.to_bytes(b"preserved").to_xdr()}
+            values = {"expiry": 2000000000}
             config = {"owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "asset": asset,
                 "source_digest": "22" * 32, "rules": [], "grant": values, "x402_enabled": False, "policy_instance": "11" * 32}
             args = SimpleNamespace(action="deploy-wallet", network="testnet", allow_mainnet=False,

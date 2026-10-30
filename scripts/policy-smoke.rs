@@ -1,43 +1,81 @@
-// Compile the production portable policy without chain dependencies.
-#[path = "../policy/policy_api.rs"]
-mod policy_api;
-#[path = "../policy/policy.rs"]
+//! Compile the authored custom policy against the allowit host backend without chain dependencies.
+//! rustc --edition=2024 --crate-type=rlib --crate-name=allowit --cfg 'feature="std"' crates/allowit/src/lib.rs
+//! rustc --edition=2024 --test --extern allowit=liballowit.rlib scripts/policy-smoke.rs
+#[path = "../crates/custom-policy/policy/policy.rs"]
 mod policy;
-use policy_api::*;
-fn context() -> Context {
-    Context { approved: true, amount: 1, daily_limit: 10, spent: 9, spent_day: 0, now: 0 }
+use allowit::prelude::*;
+use allowit::{DAY, Error};
+
+const NOW: u64 = 3 * DAY + 10;
+fn context() -> AllowitEnv {
+    let recipient = "GRECIPIENT".to_string();
+    let asset = "CASSET".to_string();
+    AllowitEnv {
+        grant: Grant {
+            transaction_cap: Some(10),
+            spent_cap: Some(30),
+            day_spent_cap: Some(20),
+            day_total_cap: Some(20),
+            call_cap: Some(2),
+            recipients: Some(vec![recipient.clone()]),
+            tokens: Some(vec![asset.clone()]),
+            expiry: Some(NOW + 100),
+        },
+        state: State {
+            calls: 1,
+            spent: 10,
+            day: NOW / DAY,
+            day_spent: 10,
+            day_total: 10,
+            ..Default::default()
+        },
+        request: Request {
+            operation: "stellar::sep41_transfer".into(),
+            asset,
+            recipient,
+            amount: 10,
+            now: NOW,
+            expires_at: NOW + 50,
+        },
+    }
 }
 #[test]
-fn approval_required() {
-    let mut c = context();
-    c.approved = false;
-    assert_eq!(policy::execute(&c), Err(PolicyError::NotApproved));
-    c.approved = true;
-    assert_eq!(policy::execute(&c), Ok(10));
+fn approval_passes_with_exact_constraints() {
+    let c = context();
+    assert_eq!(policy::execute(&c), Ok(()));
+    assert_eq!(
+        allowit::transaction_cap(&c, &c.grant.transaction_cap),
+        Ok(0)
+    );
+    assert_eq!(allowit::spent_cap(&c, &c.grant.spent_cap), Ok(20));
+    assert_eq!(
+        allowit::recipients(&c, &c.grant.recipients),
+        Ok(c.request.recipient.clone())
+    );
+    assert_eq!(allowit::expiry(&c, &c.grant.expiry), Ok(50));
 }
 #[test]
-fn limits_boundary_and_denial() {
+fn approval_denies_unset_grant_fields() {
     let mut c = context();
-    assert_eq!(policy::execute(&c), Ok(10));
-    c.amount = 2;
-    assert_eq!(policy::execute(&c), Err(PolicyError::DailyLimitExceeded));
-    c.amount = 0;
-    assert_eq!(policy::execute(&c), Err(PolicyError::ZeroAmount));
-    c.amount = 1;
-    c.daily_limit = MAX_DAILY_LIMIT + 1;
-    assert_eq!(policy::execute(&c), Err(PolicyError::ParameterOutOfBounds));
+    c.grant.tokens = None;
+    assert_eq!(policy::execute(&c), Err(Error::MissingGrant));
+    assert_eq!(allowit::preflight(&c, "tokens"), Ok(()));
 }
 #[test]
-fn limits_day_rollover_and_clock() {
+fn limits_boundary_denial_and_accounting() {
     let mut c = context();
-    c.now = DAY_SECONDS;
-    assert_eq!(policy::execute(&c), Ok(1));
-    c.spent_day = 2;
-    assert_eq!(policy::execute(&c), Err(PolicyError::ClockWentBackwards));
-}
-#[test]
-fn limits_overflow_denied() {
+    c.request.amount = 11;
+    assert_eq!(policy::execute(&c), Err(Error::TransactionCapExceeded));
     let mut c = context();
-    c.spent = u64::MAX;
-    assert_eq!(policy::execute(&c), Err(PolicyError::Overflow));
+    c.state.day_spent = 21;
+    assert_eq!(policy::execute(&c), Err(Error::DaySpentCapExceeded));
+    let mut c = context();
+    c.state.unpriced = true;
+    assert_eq!(policy::execute(&c), Err(Error::Unpriced));
+    let mut c = context();
+    c.state.day -= 1;
+    assert_eq!(policy::execute(&c), Err(Error::InvalidState));
+    let mut c = context();
+    c.state.calls = 3;
+    assert_eq!(policy::execute(&c), Err(Error::CallCapExceeded));
 }

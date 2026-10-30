@@ -28,14 +28,14 @@ class ReleaseTests(unittest.TestCase):
         self.addCleanup(revision_patch.stop)
         keys = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 10)]
         self.plan = dict(schema=1, network='mainnet', network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
-            source_revision=release.DEFAULT_REVISION, codegen_revision=json.loads((release.ROOT/'scripts/policy-codegen.json').read_text())['revision'],
+            source_revision=release.DEFAULT_REVISION,
             policy_source_digest=release.digest(release.SMOKE_SOURCE), artifact_manifest='manifest.json',
             owner=keys[0], admin=keys[1], agent=keys[2], recipient=keys[3], forbidden_recipient=keys[4], admin_members=keys[5:8], server=keys[8], asset=Asset.native().contract_id(Network.PUBLIC_NETWORK_PASSPHRASE), policy_instance='01'*32,
-            grant=dict(recipients=[keys[3]], per_transfer=10000, daily_limit=20000, total_limit=20000, max_calls=2, expires_at=2000000000),
-            fund_stroops=20000, payment_stroops=10000, fee_caps_stroops=dict.fromkeys(release.STAGES, 100000000), total_fee_cap_stroops=700000000, artifacts={})
+            grant=dict(recipients=[keys[3]], transaction_cap=10000, day_total_cap=20020000, spent_cap=20020000, call_cap=2, expiry=2000000000),
+            fund_stroops=20000, payment_stroops=10000, fee_caps_stroops=dict.fromkeys(release.STAGES, 10000000), total_fee_cap_stroops=70000000, artifacts={})
         files = [release.ROOT/n for n in ('Cargo.toml','Cargo.lock','rust-toolchain.toml')]
         files += list((release.ROOT/'crates').rglob('*.rs')) + list((release.ROOT/'crates').rglob('Cargo.toml'))
-        files += [release.ROOT/'scripts'/n for n in ('policy-codegen.json','build-contracts.sh','check-policy-bindings.py','verify-generated-policies.py')]
+        files += [release.ROOT/'scripts'/n for n in release.BUILD_SCRIPTS]
         manifest = dict(git_revision=release.DEFAULT_REVISION, sources=[dict(path=str(f.relative_to(release.ROOT)),sha256=release.digest(f.read_bytes())) for f in files], artifacts=[])
         hashes = {}
         for name, filename in release.NAMES.items():
@@ -63,16 +63,34 @@ class ReleaseTests(unittest.TestCase):
         (self.base/release.NAMES['wallet']).write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError,'hash differs'): self.load()
 
-    def test_reject_compiler_drift(self):
+    def test_reject_unpinned_or_stale_release_and_legacy_plan_fields(self):
+        self.path.write_text(json.dumps(self.plan))
+        with patch.object(release,'DEFAULT_REVISION',None), patch.object(release,'DEFAULT_HASHES',self.hashes):
+            with self.assertRaisesRegex(ValueError,'re-pin'): release.load_plan(self.path)
         self.plan['codegen_revision']='00'*20
-        with self.assertRaisesRegex(ValueError,'Compiler revision'): self.load()
+        with self.assertRaisesRegex(ValueError,'schema 1'): self.load()
+        del self.plan['codegen_revision']
+        self.plan['policy_source_digest']='00'*32
+        with self.assertRaisesRegex(ValueError,'source differs'): self.load()
+
+    def test_reject_legacy_or_partial_grant_names(self):
+        for legacy in ('per_transfer','daily_limit','total_limit','max_calls','expires_at'):
+            plan=copy.deepcopy(self.plan);plan['grant'][legacy]=1
+            with self.assertRaisesRegex(ValueError,'canonical rule'): release.smoke_grant(plan)
+        plan=copy.deepcopy(self.plan);del plan['grant']['call_cap']
+        with self.assertRaisesRegex(ValueError,'canonical rule'): release.smoke_grant(plan)
+        plan=copy.deepcopy(self.plan);plan['grant']['day_total_cap']=10009999
+        with self.assertRaisesRegex(ValueError,'daily capacity'): release.smoke_grant(plan)
 
     def test_reject_fee_aggregate(self):
         self.plan['total_fee_cap_stroops']=100
         with self.assertRaisesRegex(ValueError,'aggregate'): self.load()
 
     def test_reject_funding_above_grant(self):
-        self.plan['fund_stroops']=20001
+        self.plan['fund_stroops']=20020001
+        with self.assertRaisesRegex(ValueError,'inconsistent'): self.load()
+        self.plan['fund_stroops']=20000
+        self.plan['grant']['spent_cap']=10009999
         with self.assertRaisesRegex(ValueError,'inconsistent'): self.load()
 
     def test_reject_network_and_signer_overlap(self):
@@ -113,9 +131,9 @@ class ReleaseTests(unittest.TestCase):
         packet.update(expected_receipt=expected,expected_effects=dict(wallet=self.plan['asset'],wallet_balance=20000,recipient_balance=50,calls=0,spent_total=0))
         meta=SimpleNamespace(v=4,v4=SimpleNamespace(soroban_meta=SimpleNamespace(return_value=value)))
         response=dict(status='SUCCESS',envelopeXdr=packet['unsigned_xdr'],resultMetaXdr='mock',resultXdr=xdr.TransactionResult(xdr.Int64(100),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr())
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,total=10000)), patch.object(release,'balance',side_effect=[10000,10050]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(history=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[10000,10050]):
             self.assertEqual(release.settle(self.plan,packet)['status'],'success')
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(calls=1,total=10000)), patch.object(release,'balance',side_effect=[9999]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(history=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[9999]):
             with self.assertRaisesRegex(ValueError,'balances or counters'):release.settle(self.plan,packet)
 
     def test_funding_settlement_checks_exact_principal_and_fee(self):
@@ -145,7 +163,7 @@ class ReleaseTests(unittest.TestCase):
         wallet=self.plan['asset']
         state=dict(nonce=0,deployment_version=0)
         binding=dict(module_digest=self.hashes['wallet'],entrypoint='_execute',argument_schema_digest=release.digest(release.SCHEMA))
-        request=release.execution(self.plan,wallet,state,binding,'ab'*32)
+        request=release.execution(self.plan,wallet,state,binding,'ab'*32,90)
         tx=TransactionBuilder(Account(self.plan['agent'],1),Network.PUBLIC_NETWORK_PASSPHRASE,100).add_time_bounds(0,int(time.time())+300).append_invoke_contract_function_op(wallet,'execute',[request]).build()
         root=xdr.SorobanAuthorizedInvocation(xdr.SorobanAuthorizedFunction(xdr.SorobanAuthorizedFunctionType.SOROBAN_AUTHORIZED_FUNCTION_TYPE_CONTRACT_FN,contract_fn=tx.transaction.operations[0].host_function.invoke_contract),[])
         source=xdr.SorobanAuthorizationEntry(xdr.SorobanCredentials(xdr.SorobanCredentialsType.SOROBAN_CREDENTIALS_SOURCE_ACCOUNT),copy.deepcopy(root))
@@ -168,12 +186,12 @@ class ReleaseTests(unittest.TestCase):
             tx.transaction.soroban_data=xdr.SorobanTransactionData(xdr.SorobanTransactionDataExt(0),xdr.SorobanResources(xdr.LedgerFootprint([],[]),xdr.Uint32(100),xdr.Uint32(0),xdr.Uint32(0)),xdr.Int64(123))
             if mutate: mutate(tx)
             return tx.to_xdr()
-        with patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.wa,'owner_only'),patch.object(release,'rpc',return_value={'sequence':100}),patch.object(release.ca,'cli_run',side_effect=simulate),patch.object(release,'read_contract',return_value={}),patch.object(release,'balance',side_effect=[20000,50]):
+        with patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.wa,'owner_only'),patch.object(release,'rpc',return_value={'sequence':100}),patch.object(release.ca,'cli_run',side_effect=simulate),patch.object(release,'read_contract',return_value=dict(history=dict(calls=0,spent=0))),patch.object(release,'balance',side_effect=[20000,50]):
             return release.complete_execute(self.plan,packet,signed.to_xdr())
 
     def test_execute_prepare_retains_unsigned_server_request_and_original_effects(self):
         packet,_,state,binding=self.execution_packet()
-        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']),patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']) as prepare,patch.object(release,'balance',side_effect=[20000,50]),patch.object(release,'read_contract',return_value={}),patch.object(release,'rpc',return_value={'sequence':100}):
+        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']),patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']) as prepare,patch.object(release,'balance',side_effect=[20000,50]),patch.object(release,'read_contract',return_value=dict(history=dict(calls=0,spent=0))),patch.object(release,'rpc',return_value={'sequence':100}):
             result=release.prepare(self.plan,self.base,'execute',parent=self.plan['asset'],wallet=self.plan['asset'],operation_id='ab'*32)
         self.assertFalse(result['signing_ready'])
         self.assertEqual(result['expected_effects']['recipient_balance'],50)
@@ -228,13 +246,38 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release,'rpc',side_effect=AssertionError('must reject before network')):
             with self.assertRaisesRegex(ValueError,'Complete'):release.settle(self.plan,packet)
 
-    def test_common_config_selects_all_smoke_rules_and_native_grant_types(self):
+    def test_common_config_selects_all_smoke_rules_and_typed_grant(self):
         config=release.wallet_config(self.plan)
         self.assertEqual(config['rules'],release.RULES)
         self.assertEqual(config['server'],self.plan['server'])
         self.assertFalse(config['x402_enabled'])
-        self.assertEqual(xdr.SCVal.from_xdr(config['grant']['per_transfer']).type,xdr.SCValType.SCV_I128)
-        self.assertEqual(xdr.SCVal.from_xdr(config['grant']['max_calls']).type,xdr.SCValType.SCV_U64)
+        self.assertEqual(list(config['grant']),list(release.ca.GRANT_FIELDS))
+        self.assertEqual(config['grant']['transaction_cap'],10000)
+        self.assertIsNone(config['grant']['day_spent_cap'])
+        self.assertIsNone(config['grant']['tokens'])
+        self.assertEqual(config['source_digest'],release.prefix_digest(release.WALLET_KIND,self.hashes['wallet'],self.plan['asset'],release.RULES))
+        self.assertEqual(release.SMOKE_SOURCE.decode().count('(ctx, &ctx.grant.'),len(release.RULES))
+
+    def test_prefix_digest_matches_the_contract_vector(self):
+        # crates/policy-wallet/src/sep56_tests.rs standard_prefix_digest_matches_independent_xdr_vector_and_binds_context
+        asset='CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ'
+        expected=bytes([152,233,25,0,157,157,73,184,118,168,228,141,147,251,67,32,58,162,116,189,17,83,162,152,5,132,219,76,55,163,51,159]).hex()
+        self.assertEqual(release.prefix_digest('common_policy_engine','01'*32,asset,['spent_cap','recipients']),expected)
+        self.assertNotEqual(release.prefix_digest('common_policy_engine','01'*32,asset,['recipients','spent_cap']),expected)
+
+    def test_execution_binds_full_source_and_conservative_xlm_expense(self):
+        state=dict(nonce=3,deployment_version=1)
+        binding=dict(module_digest=self.hashes['wallet'],entrypoint='_execute',argument_schema_digest=release.digest(release.SCHEMA))
+        request=scval.from_struct(release.execution(self.plan,self.plan['asset'],state,binding,'ab'*32,90,day=7))
+        self.assertEqual(scval.to_native(request['source_hash']).hex(),self.plan['policy_source_digest'])
+        raw=scval.to_native(request['expense'])
+        cost={k:scval.to_native(v) for k,v in scval.from_struct(xdr.SCVal.from_xdr_bytes(raw)).items()}
+        self.assertEqual(cost['gas_units'],10000000)
+        self.assertEqual(cost['max_fee_stroops'],10000000)
+        self.assertEqual(cost['spent_units'],10010000)
+        self.assertEqual(cost['conversion_units'],0)
+        self.assertEqual((cost['decimals'],cost['observed_ledger'],cost['day']),(7,90,7))
+        self.assertEqual(xdr.SCVal.from_xdr_bytes(raw).to_xdr_bytes(),raw)
 
 
 if __name__=='__main__': unittest.main()

@@ -20,15 +20,19 @@ RPC = {"mainnet": "https://mainnet.sorobanrpc.com", "testnet": "https://soroban-
 STAGES = ("upload-engine", "upload-parent", "upload-wallet", "deploy-parent", "deploy-wallet", "fund", "execute")
 NAMES = {"engine": "allowit_wallet_engine.wasm", "parent": "allowit_engine_parent.wasm", "wallet": "allowit_common_policy_engine.wasm"}
 READ_METHODS = {"getNetwork", "getLatestLedger", "getLedgerEntries", "simulateTransaction", "getTransaction"}
-DEFAULT_REVISION = "b5a5d4b13e9162dc9034df85442ea2251f65a845"
-DEFAULT_HASHES = {'engine': '672b46a55d067d9d8b7dbea79c5e469bad8f697df6e13af25fb65ff6c47f3a2f', 'parent': '64e9348a33cda21a3bd5e797c52defa1087bb33e1e45ef2a0a7084e8a0d632ff', 'wallet': '8d369d50186d375eba47c8c21f16fbe184e30bc1bdd22e06e00db0c7b35dc7cc'}
+# The previously reviewed release encodes the retired Map Grant. Re-pin a reviewed typed-Grant release.
+DEFAULT_REVISION = None
+DEFAULT_HASHES = {}
 SCHEMA = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)"
+DEPOSIT_SCHEMA = b"allowit.stellar.sep56_deposit.v1:ScValMap(assets:i128,from:Address,min_shares:i128,operator:Address,receiver:Address,vault:Address)"
+WALLET_KIND = "common_policy_engine"
+POLICY_DENIED = 18
+BUILD_SCRIPTS = ("build-contracts.sh", "check-policy-bindings.py")
 
-RULES = ["recipient", "transaction_cap", "daily_cap", "total_cap", "call_cap", "expiry"]
-SMOKE_SOURCE = ("use allowit::v1::prelude::*;\nasync fn _execute(request: &Context, grant: &Grant, state: &State) -> Result<Spent, PolicyError> {\n" + "".join(
-    f"    let spent{i} = self::{rule}(request, {'state' if i == 0 else '&state' + str(i-1)})?;\n" +
-    (f"    let state{i} = allowit::with_spent({'state' if i == 0 else '&state' + str(i-1)}, spent{i})?;\n" if i < len(RULES)-1 else f"    Ok(spent{i})\n")
-    for i, rule in enumerate(RULES)) + "}\n").encode()
+# The smoke policy is entirely one standard prefix of canonical calls.
+RULES = ["recipients", "transaction_cap", "day_total_cap", "spent_cap", "call_cap", "expiry"]
+SMOKE_SOURCE = ("use allowit::prelude::*;\npub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n"
+    + "".join(f"    allowit::{rule}(ctx, &ctx.grant.{rule})?;\n" for rule in RULES) + "    Ok(())\n}\n").encode()
 
 
 # Bind every delegated CLI operation to the same endpoint and passphrase as direct RPC reads.
@@ -87,22 +91,40 @@ def check_network(network):
     return actual
 
 
+def gas(plan):
+    """Attributable XLM gas ceiling of one smoke execution: its full fee cap in stroops."""
+    return plan["fee_caps_stroops"]["execute"]
+
+
 def smoke_grant(plan):
+    """Return the complete typed Grant. Only the selected rules' fields are set."""
     grant = plan["grant"]
-    fields = {"recipients", "per_transfer", "daily_limit", "total_limit", "max_calls", "expires_at"}
-    if not isinstance(grant, dict) or set(grant) != fields or grant["recipients"] != [plan["recipient"]]:
-        raise ValueError("Smoke Grant requires the six fixed rule parameters and pinned recipient")
-    for name in fields - {"recipients"}:
+    if not isinstance(grant, dict) or set(grant) != set(RULES) or grant["recipients"] != [plan["recipient"]]:
+        raise ValueError("Smoke Grant requires exactly the selected canonical rule parameters and pinned recipient")
+    for name in set(RULES) - {"recipients"}:
         integer(grant[name])
-    if grant["daily_limit"] < plan["payment_stroops"]:
-        raise ValueError("Smoke payment exceeds daily capacity")
-    return grant
+    if grant["day_total_cap"] < plan["payment_stroops"] + gas(plan):
+        raise ValueError("Smoke payment and gas exceed daily capacity")
+    return ca.grant(grant)
+
+
+def prefix_digest(kind, module, asset, rules):
+    """The contract's standard_prefix_digest: SHA-256 of canonical XDR of its binding tuple."""
+    checks = scval.to_vec([scval.to_vec([scval.to_symbol(rule), scval.to_symbol(rule)]) for rule in rules])
+    value = scval.to_vec([scval.to_symbol("allowit_std_prefix"), scval.to_symbol(kind), scval.to_bytes(bytes.fromhex(module)), scval.to_address(asset),
+                          scval.to_bytes(hashlib.sha256(SCHEMA).digest()), scval.to_bytes(hashlib.sha256(DEPOSIT_SCHEMA).digest()), checks])
+    return digest(value.to_xdr_bytes())
 
 
 def wallet_config(plan):
-    grant = smoke_grant(plan)
-    values = {name: (scval.to_vec([scval.to_address(v) for v in value]) if name == "recipients" else scval.to_uint64(value) if name in ("max_calls", "expires_at") else scval.to_int128(value)).to_xdr() for name, value in grant.items()}
-    return {"owner":plan["owner"],"agent":plan["agent"],"server":plan["server"],"asset":plan["asset"],"policy_instance":plan["policy_instance"],"source_digest":plan["policy_source_digest"],"rules":RULES,"grant":values,"x402_enabled":False}
+    source = prefix_digest(WALLET_KIND, plan["artifacts"]["wallet"]["sha256"], plan["asset"], RULES)
+    return {"owner":plan["owner"],"agent":plan["agent"],"server":plan["server"],"asset":plan["asset"],"policy_instance":plan["policy_instance"],"source_digest":source,"rules":RULES,"grant":smoke_grant(plan),"x402_enabled":False}
+
+
+def usage(plan, wallet):
+    """Protected custody history: successful calls and lifetime irreversible expenses."""
+    history = read_contract(plan, wallet, "state")["history"]
+    return int(history["calls"]), int(history["spent"])
 
 
 def server_entry(envelope, plan, signed):
@@ -160,16 +182,19 @@ def complete_execute(plan, prepared, signed_xdr):
     invocation = host.invoke_contract
     if host.type != xdr.HostFunctionType.HOST_FUNCTION_TYPE_INVOKE_CONTRACT or invocation is None or len(invocation.args) != 1:
         raise ValueError("Expected the exact wallet execution invocation")
-    expiry = scval.to_native(scval.from_struct(invocation.args[0])["expires_at"])
+    original_request = scval.from_struct(invocation.args[0])
+    expiry = scval.to_native(original_request["expires_at"])
     if expiry > bounds.max_time:
         raise ValueError("Execution expiry exceeds the original transaction bounds")
-    expected = execution(plan,prepared["wallet"],state,binding,prepared["operation_id"],expires_at=expiry)
+    cost = scval.from_struct(xdr.SCVal.from_xdr_bytes(scval.to_native(original_request["expense"])))
+    observed, day = scval.to_native(cost["observed_ledger"]), scval.to_native(cost["day"])
+    expected = execution(plan,prepared["wallet"],state,binding,prepared["operation_id"],observed,expires_at=expiry,day=day)
     if invocation.contract_address != Address(prepared["wallet"]).to_xdr_sc_address() or invocation.function_name.sc_symbol != b"execute" or invocation.args != [expected]:
         raise ValueError("Execution differs from the plan's exact transfer")
     if prepared["expected_receipt"] != expected_receipt(plan,prepared["wallet"],state,prepared["operation_id"]):
         raise ValueError("Execution state changed after preparation")
-    spent = read_contract(plan,prepared["wallet"],"policy_spent") or {}
-    effects = {"wallet":prepared["wallet"],"wallet_balance":balance(plan,prepared["wallet"]),"recipient_balance":balance(plan,plan["recipient"]),"calls":int(spent.get("calls",0)),"spent_total":int(spent.get("total",0))}
+    calls, spent = usage(plan,prepared["wallet"])
+    effects = {"wallet":prepared["wallet"],"wallet_balance":balance(plan,prepared["wallet"]),"recipient_balance":balance(plan,plan["recipient"]),"calls":calls,"spent_total":spent}
     if prepared["expected_effects"] != effects:
         raise ValueError("Wallet balances or usage changed after original preparation")
     for role in ("agent","server"):
@@ -208,7 +233,7 @@ def complete_execute(plan, prepared, signed_xdr):
 def load_plan(path):
     path = Path(path).resolve()
     plan = json.loads(path.read_text())
-    fields = {"schema", "network", "network_passphrase", "source_revision", "codegen_revision", "policy_source_digest", "artifact_manifest", "artifacts", "owner", "admin", "admin_members", "agent", "server", "asset", "recipient", "forbidden_recipient", "policy_instance", "grant", "fund_stroops", "payment_stroops", "fee_caps_stroops", "total_fee_cap_stroops"}
+    fields = {"schema", "network", "network_passphrase", "source_revision", "policy_source_digest", "artifact_manifest", "artifacts", "owner", "admin", "admin_members", "agent", "server", "asset", "recipient", "forbidden_recipient", "policy_instance", "grant", "fund_stroops", "payment_stroops", "fee_caps_stroops", "total_fee_cap_stroops"}
     if set(plan) != fields or plan["schema"] != 1:
         raise ValueError("Plan fields must match schema 1 exactly")
     network = plan["network"]
@@ -216,14 +241,11 @@ def load_plan(path):
         raise ValueError("Select the exact Stellar network and passphrase")
     if not re.fullmatch(r"[0-9a-f]{40}", plan["source_revision"]):
         raise ValueError("Pin the complete contract source revision")
-    if plan["source_revision"] != DEFAULT_REVISION:
-        raise ValueError("This smoke tool admits only the reviewed default contract revision")
+    if DEFAULT_REVISION is None or plan["source_revision"] != DEFAULT_REVISION:
+        raise ValueError("This smoke tool admits only the reviewed default contract revision; re-pin one built from typed-Grant sources")
     if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() != plan["source_revision"]:
         # Tooling commits may follow the contract revision, but every build source must match it.
         subprocess.run(["git", "merge-base", "--is-ancestor", plan["source_revision"], "HEAD"], cwd=ROOT, check=True)
-    codegen = json.loads((ROOT / "scripts/policy-codegen.json").read_text())
-    if plan["codegen_revision"] != codegen["revision"]:
-        raise ValueError("Compiler revision differs from the contract build pin")
     if plan["policy_source_digest"] != digest(SMOKE_SOURCE):
         raise ValueError("Policy source differs from the plan")
     manifest_path = Path(plan["artifact_manifest"])
@@ -262,10 +284,10 @@ def load_plan(path):
         raise ValueError("Release smoke tests require native XLM and one pinned recipient")
     integer(plan["payment_stroops"])
     integer(plan["fund_stroops"])
-    if not plan["payment_stroops"] <= plan["fund_stroops"] <= grant["total_limit"]:
-        raise ValueError("Payment, funding and grant total caps are inconsistent")
-    if plan["payment_stroops"] > grant["per_transfer"]:
-        raise ValueError("Smoke payment exceeds the per-transfer limit")
+    if not plan["payment_stroops"] <= plan["fund_stroops"] <= grant["spent_cap"] or plan["payment_stroops"] + gas(plan) > grant["spent_cap"]:
+        raise ValueError("Payment, gas, funding and grant spent caps are inconsistent")
+    if plan["payment_stroops"] > grant["transaction_cap"]:
+        raise ValueError("Smoke payment exceeds the transaction cap")
     caps = plan["fee_caps_stroops"]
     if set(caps) != set(STAGES):
         raise ValueError("Set one fee cap for every release stage")
@@ -292,7 +314,7 @@ def load_plan(path):
             raise ValueError("Test-feature artifacts cannot be deployed")
         if digest(artifact_path.read_bytes()) != artifact["sha256"].lower():
             raise ValueError("Artifact hash differs from plan: " + name)
-    if set(entry["path"] for entry in manifest["sources"]) != set(str(f.relative_to(ROOT)) for f in [ROOT / n for n in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")] + list((ROOT / "crates").rglob("*.rs")) + list((ROOT / "crates").rglob("Cargo.toml")) + [ROOT / "scripts" / n for n in ("policy-codegen.json", "build-contracts.sh", "check-policy-bindings.py", "verify-generated-policies.py")]):
+    if set(entry["path"] for entry in manifest["sources"]) != set(str(f.relative_to(ROOT)) for f in [ROOT / n for n in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")] + list((ROOT / "crates").rglob("*.rs")) + list((ROOT / "crates").rglob("Cargo.toml")) + [ROOT / "scripts" / n for n in BUILD_SCRIPTS]):
         raise ValueError("Manifest must include every contract build source")
     return plan, digest(canonical(plan)), path.parent
 
@@ -303,7 +325,7 @@ def artifact_path(plan, base, name):
 
 
 def read_contract(plan, contract, method):
-    if method not in ("state","policy_binding","policy_spent","engine"):
+    if method not in ("state","policy_binding","engine"):
         raise ValueError("Only public wallet and parent state reads are admitted")
     raw=raw_invoke(plan,plan["owner"],ca.contract(contract),method,[])
     result=rpc(plan["network"],"simulateTransaction",{"transaction":raw})
@@ -334,17 +356,14 @@ def wallet_state(plan, wallet, parent):
     parent_state = read_contract(plan, parent, "state")
     if parent_state["owner"] != plan["admin"]:
         raise ValueError("Parent authority differs from the plan")
-    expected_grant = plan["grant"]
-    actual_grant = dict(state["grant"])
-    for key in ("per_transfer", "daily_limit", "total_limit", "max_calls", "expires_at"):
-        actual_grant[key] = int(actual_grant[key])
-    if state["owner"] != plan["owner"] or state["agent"] != plan["agent"] or state["server"] != plan["server"] or state["asset"] != plan["asset"] or state["rules"] != RULES or state["x402_enabled"] or actual_grant != expected_grant:
+    expected = wallet_config(plan)
+    if state["owner"] != plan["owner"] or state["agent"] != plan["agent"] or state["server"] != plan["server"] or state["asset"] != plan["asset"] or state["rules"] != RULES or state["x402_enabled"] or state["grant"] != expected["grant"]:
         raise ValueError("Wallet authority or grant differs from the plan")
     if state["paused"]:
         raise ValueError("Wallet is paused")
     if binding["policy_instance"] != plan["policy_instance"] or binding["module_digest"] != plan["artifacts"]["wallet"]["sha256"]:
         raise ValueError("Wallet policy identity or executable differs from the plan")
-    if binding["source_digest"] != plan["policy_source_digest"] or binding["engine_kind"] != "common_policy_engine" or int(binding["contract_version"]) != 1:
+    if binding["source_digest"] != expected["source_digest"] or binding["engine_kind"] != WALLET_KIND or int(binding["contract_version"]) != 1:
         raise ValueError("Installed compiled policy differs from the plan")
     if binding["entrypoint"] != "_execute" or binding["argument_schema_digest"] != digest(SCHEMA):
         raise ValueError("Wallet does not use the admitted transfer ABI")
@@ -356,20 +375,26 @@ def raw_invoke(plan, source, contract, method, arguments):
     return TransactionBuilder(Account(source, int(account["sequence"])), wa.PASSPHRASE[plan["network"]], base_fee=100).add_time_bounds(0, int(time.time()) + 300).append_invoke_contract_function_op(contract, method, arguments).build().to_xdr()
 
 
-def execution(plan, wallet, state, binding, operation_id, case="positive", expires_at=None):
+def execution(plan, wallet, state, binding, operation_id, observed_ledger, case="positive", expires_at=None, day=None):
     ca.code_hash(operation_id)
     if int(operation_id, 16) == 0:
         raise ValueError("Operation identity must be nonzero")
     recipient = plan["forbidden_recipient"] if case == "denied-recipient" else plan["recipient"]
-    amount = plan["grant"]["per_transfer"] + 1 if case == "over-limit" else plan["payment_stroops"]
+    amount = plan["grant"]["transaction_cap"] + 1 if case == "over-limit" else plan["payment_stroops"]
     now = int(time.time())
-    expires = expires_at if expires_at is not None else now - 1 if case == "expired" else min(now + 240, plan["grant"]["expires_at"])
-    if expires > plan["grant"]["expires_at"]: raise ValueError("Execution exceeds the grant expiry")
+    expires = expires_at if expires_at is not None else now - 1 if case == "expired" else min(now + 240, plan["grant"]["expiry"])
+    if expires > plan["grant"]["expiry"]: raise ValueError("Execution exceeds the grant expiry")
     if case != "expired" and expires <= now + 30:
         raise ValueError("The grant must remain valid for at least 30 seconds")
     arguments = scval.to_struct({"amount": scval.to_int128(amount), "from": scval.to_address(wallet), "to": scval.to_address(recipient), "token": scval.to_address(plan["asset"])}).to_xdr_bytes()
+    # Conservative XLM ceilings: the full execute fee cap is attributable gas; a payment spends principal plus gas.
+    expense = scval.to_struct({"asset": scval.to_address(plan["asset"]), "decimals": scval.to_uint32(7), "gas_units": scval.to_int128(gas(plan)),
+        "conversion_units": scval.to_int128(0), "spent_units": scval.to_int128(amount + gas(plan)), "max_fee_stroops": scval.to_uint32(gas(plan)),
+        "observed_ledger": scval.to_uint32(integer(observed_ledger, 1, 2**32 - 1)), "day": scval.to_uint64(now // 86_400 if day is None else day)}).to_xdr_bytes()
     request = scval.to_struct({
         "policy_instance": scval.to_bytes(bytes.fromhex(plan["policy_instance"])),
+        "source_hash": scval.to_bytes(bytes.fromhex(plan["policy_source_digest"])),
+        "expense": scval.to_bytes(expense),
         "operation_id": scval.to_bytes(bytes.fromhex(operation_id)),
         "nonce": scval.to_uint64(int(state["nonce"])),
         "deployment_version": scval.to_uint64(int(state["deployment_version"]) + (1 if case == "stale-version" else 0)),
@@ -431,7 +456,7 @@ def prepare(plan, base, stage, parent=None, wallet=None, operation_id=None):
         state, binding = wallet_state(plan, wallet, parent)
         if stage == "fund":
             wa.owner_only(wa.fetch(network, source))
-            if int((read_contract(plan, wallet, "policy_spent") or {}).get("calls", 0)) or int((read_contract(plan, wallet, "policy_spent") or {}).get("total", 0)):
+            if usage(plan, wallet) != (0, 0):
                 raise ValueError("Initial funding requires an unused release wallet")
             initial_balance = balance(plan, wallet)
             if initial_balance != 0:
@@ -441,9 +466,11 @@ def prepare(plan, base, stage, parent=None, wallet=None, operation_id=None):
         else:
             if not operation_id:
                 raise ValueError("Execution requires --operation-id")
-            raw = raw_invoke(plan, source, wallet, "execute", [execution(plan, wallet, state, binding, operation_id)])
+            ledger = integer(int(rpc(network, "getLatestLedger")["sequence"]), 1, 2**32 - 1)
+            raw = raw_invoke(plan, source, wallet, "execute", [execution(plan, wallet, state, binding, operation_id, ledger)])
             expected = expected_receipt(plan, wallet, state, operation_id)
-            effects = {"wallet": wallet, "wallet_balance": balance(plan, wallet), "recipient_balance": balance(plan, plan["recipient"]), "calls": int((read_contract(plan, wallet, "policy_spent") or {}).get("calls", 0)), "spent_total": int((read_contract(plan, wallet, "policy_spent") or {}).get("total", 0))}
+            calls, spent = usage(plan, wallet)
+            effects = {"wallet": wallet, "wallet_balance": balance(plan, wallet), "recipient_balance": balance(plan, plan["recipient"]), "calls": calls, "spent_total": spent}
         assembled = ca.prepare_xdr(raw, source, network, max_fee=cap, candidate=plan["server"] if stage == "execute" else None)
     envelope = TransactionEnvelope.from_xdr(assembled, wa.PASSPHRASE[network])
     if stage == "execute":
@@ -461,14 +488,15 @@ def prepare(plan, base, stage, parent=None, wallet=None, operation_id=None):
 
 def simulate_cases(plan, parent, wallet, operation_id, replay_id=None):
     state, binding = wallet_state(plan, wallet, parent)
-    cases = {"positive": None, "denied-recipient": 10, "over-limit": 10, "stale-version": 5, "expired": 7}
+    cases = {"positive": None, "denied-recipient": POLICY_DENIED, "over-limit": POLICY_DENIED, "stale-version": 5, "expired": 7}
+    ledger = integer(int(rpc(plan["network"], "getLatestLedger")["sequence"]), 1, 2**32 - 1)
     if replay_id:
         ca.code_hash(replay_id)
         cases["replay"] = 19
     results = {}
     for case, code in cases.items():
         selected_id = replay_id if case == "replay" else operation_id
-        raw = raw_invoke(plan, plan["agent"], wallet, "execute", [execution(plan, wallet, state, binding, selected_id, case)])
+        raw = raw_invoke(plan, plan["agent"], wallet, "execute", [execution(plan, wallet, state, binding, selected_id, ledger, case)])
         response = rpc(plan["network"], "simulateTransaction", {"transaction": raw, "authMode": "record"})
         if code is None:
             if "error" in response:
@@ -519,9 +547,9 @@ def settle(plan, prepared):
             raise ValueError("Settled funding balance differs from the exact approved principal")
     elif prepared.get("expected_effects"):
         before = prepared["expected_effects"]
-        state = read_contract(plan, before["wallet"], "state")
         amount = plan["payment_stroops"]
-        if (balance(plan, before["wallet"]) != before["wallet_balance"] - amount or balance(plan, plan["recipient"]) != before["recipient_balance"] + amount or int((read_contract(plan, before["wallet"], "policy_spent") or {}).get("calls", 0)) != before["calls"] + 1 or int((read_contract(plan, before["wallet"], "policy_spent") or {}).get("total", 0)) != before["spent_total"] + amount):
+        calls, spent = usage(plan, before["wallet"])
+        if (balance(plan, before["wallet"]) != before["wallet_balance"] - amount or balance(plan, plan["recipient"]) != before["recipient_balance"] + amount or calls != before["calls"] + 1 or spent != before["spent_total"] + amount + gas(plan)):
             raise ValueError("Current balances or counters differ from the exact smoke payment. Reconcile concurrent activity")
     return {"status": "success", "transaction_hash": envelope.hash_hex(), "fee_charged_stroops": charged, "rpc": result}
 
