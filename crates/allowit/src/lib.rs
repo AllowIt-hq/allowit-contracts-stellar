@@ -1,6 +1,6 @@
 #![no_std]
-//! Canonical AllowIt policy rules. One authored policy source compiles unchanged for the offchain
-//! server, custom contracts and the standard contract preflight:
+//! Canonical AllowIt policy rules. The offchain server and CustomPolicy compile one authored
+//! policy file verbatim:
 //!
 //! ```ignore
 //! use allowit::prelude::*;
@@ -12,17 +12,27 @@
 //! ```
 //!
 //! Rules are pure checks. Each returns its passing constraint or an `Error`. An unset Grant field
-//! is `MissingGrant`. Only the standard contract preflight runner skips it.
+//! is `MissingGrant`. The standard contract runs only the leading canonical calls, supplied by the
+//! owner as `rules`, through `preflight`, which skips unset fields. Matching `rules` to the source
+//! is part of the owner's offchain authorization.
 //!
 //! Types and rule logic are written once in `core.rs` and compiled per backend. Each backend binds
-//! `Address`, `String` and `Vec`. Feature `soroban` uses host values and contract types. Feature
-//! `std` uses heap strings and vectors. Both backends can be enabled together: `soroban` then backs
-//! the crate root and `allowit::host` stays available.
+//! `Address`, `String` and `Vec`. Feature `soroban` (default) uses host values and contract types.
+//! Feature `std` uses heap strings and vectors. The selected backend backs the crate root, which
+//! authored policy names. The offchain server depends on
+//! `allowit = { default-features = false, features = ["std"] }` and must not unify `soroban`:
+//! enabling both is a compile error. Feature `dual` enables both for portability tests only;
+//! `soroban` then backs the root and `allowit::host` stays available.
 #[cfg(feature = "std")]
 extern crate alloc;
 
 #[cfg(not(any(feature = "soroban", feature = "std")))]
 compile_error!("Enable feature `soroban` or `std`");
+
+#[cfg(all(feature = "soroban", feature = "std", not(feature = "dual")))]
+compile_error!(
+    "Features `soroban` and `std` select different crate-root types; use `default-features = false`"
+);
 
 /// Onchain backend. Owner-signed Grant and every rule input are Soroban contract types.
 #[cfg(feature = "soroban")]

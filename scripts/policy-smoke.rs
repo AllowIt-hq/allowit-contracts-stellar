@@ -21,7 +21,7 @@ fn context() -> AllowitEnv {
             tokens: Some(vec![asset.clone()]),
             expiry: Some(NOW + 100),
         },
-        state: State {
+        state: AccountingHistory {
             calls: 1,
             spent: 10,
             day: NOW / DAY,
@@ -59,7 +59,7 @@ fn approval_denies_unset_grant_fields() {
     let mut c = context();
     c.grant.tokens = None;
     assert_eq!(policy::execute(&c), Err(Error::MissingGrant));
-    assert_eq!(allowit::preflight(&c, "tokens"), Ok(()));
+    assert_eq!(allowit::preflight(&c, allowit::Rule::tokens), Ok(()));
 }
 #[test]
 fn limits_boundary_denial_and_accounting() {

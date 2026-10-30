@@ -2,7 +2,7 @@
 //! yields identical pass values and errors on a shared vector set.
 extern crate std;
 use super::*;
-use allowit::{DAY, RULES};
+use allowit::DAY;
 use soroban_sdk::{Address, Bytes, String, testutils::Address as _};
 use std::{format, string::String as Text, string::ToString, vec::Vec as List};
 
@@ -10,6 +10,30 @@ use std::{format, string::String as Text, string::ToString, vec::Vec as List};
 mod host_policy {
     use ::allowit::host as allowit;
     include!("../policy/policy.rs");
+}
+
+/// Every canonical rule of one backend, in Grant field order.
+macro_rules! rules {
+    ($lib:path) => {{
+        use $lib as lib;
+        [
+            lib::Rule::transaction_cap,
+            lib::Rule::spent_cap,
+            lib::Rule::day_spent_cap,
+            lib::Rule::day_total_cap,
+            lib::Rule::call_cap,
+            lib::Rule::recipients,
+            lib::Rule::tokens,
+            lib::Rule::expiry,
+        ]
+    }};
+}
+/// Canonical rule names, which are also the Grant field names.
+fn names() -> List<Text> {
+    rules!(::allowit::soroban)
+        .iter()
+        .map(|rule| format!("{rule:?}"))
+        .collect()
 }
 
 /// Backend-neutral rule input. Addresses are indices into a shared address universe.
@@ -105,8 +129,8 @@ macro_rules! outcome {
                     .map(|v| v.to_string())
                     .map_err(code),
             ],
-            preflight: RULES
-                .iter()
+            preflight: rules!($lib)
+                .into_iter()
                 .map(|rule| lib::preflight(&ctx, rule).map_err(code))
                 .collect(),
         }
@@ -154,7 +178,7 @@ impl Universe {
                 tokens: list(&v.tokens),
                 expiry: v.expiry,
             },
-            state: allowit::State {
+            state: allowit::AccountingHistory {
                 calls: v.calls,
                 spent: v.spent,
                 unpriced: v.unpriced,
@@ -190,7 +214,7 @@ impl Universe {
                 tokens: list(&v.tokens),
                 expiry: v.expiry,
             },
-            state: allowit::host::State {
+            state: allowit::host::AccountingHistory {
                 calls: v.calls,
                 spent: v.spent,
                 unpriced: v.unpriced,
@@ -348,7 +372,8 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
 
 /// Consecutive leading statements of the exact form `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`.
 fn standard_prefix(source: &str) -> List<&str> {
-    let body = source.split_once("-> allowit::Result {").unwrap().1;
+    let signature = source.split_once("pub fn execute(").unwrap().1;
+    let body = signature.split_once('{').unwrap().1;
     let mut prefix = List::new();
     for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let Some(call) = line
@@ -360,7 +385,7 @@ fn standard_prefix(source: &str) -> List<&str> {
         let Some((rule, field)) = call.split_once("(ctx, &ctx.grant.") else {
             break;
         };
-        if rule != field || !RULES.contains(&rule) {
+        if rule != field || !names().iter().any(|name| name == rule) {
             break;
         }
         prefix.push(rule);
@@ -371,10 +396,12 @@ fn standard_prefix(source: &str) -> List<&str> {
 #[test]
 fn sample_standard_prefix_is_every_canonical_call_in_order() {
     let source = include_str!("../policy/policy.rs");
-    assert_eq!(standard_prefix(source), RULES.to_vec());
+    assert_eq!(standard_prefix(source), names());
     let custom = "use allowit::prelude::*;\npub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n    allowit::recipients(ctx, &ctx.grant.recipients)?;\n    allowit::spent_cap(ctx, &ctx.grant.day_spent_cap)?;\n    allowit::expiry(ctx, &ctx.grant.expiry)?;\n    Ok(())\n}\n";
     // A mismatched Grant reference ends the prefix; later calls run offchain.
     assert_eq!(standard_prefix(custom), std::vec!["recipients"]);
+    let explicit = custom.replace("allowit::Result {", "allowit::Result<()> {");
+    assert_eq!(standard_prefix(&explicit), std::vec!["recipients"]);
 }
 
 #[test]

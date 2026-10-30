@@ -1,8 +1,8 @@
 #![no_std]
 //! Bespoke policy compiled verbatim from `policy/policy.rs` into the shared custody mixins.
-use allowit::AllowitEnv;
+use allowit::{AllowitEnv, Rule};
 use allowit_policy_wallet::{Error, Policy};
-use soroban_sdk::{BytesN, Env, Symbol, Vec};
+use soroban_sdk::{BytesN, Env, Vec};
 
 /// Authored policy source, compiled unchanged. The offchain server compiles the same file.
 mod policy {
@@ -29,7 +29,7 @@ impl Policy for Custom {
         BytesN::from_array(env, &ARGUMENT_SCHEMA_HASH)
     }
     /// Run the complete authored policy. An unset Grant field denies.
-    fn check(_env: &Env, ctx: &AllowitEnv, _rules: &Vec<Symbol>) -> Result<(), Error> {
+    fn check(_env: &Env, ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(policy::execute(ctx)?)
     }
 }

@@ -4,21 +4,11 @@
 /// UTC day length in seconds.
 pub const DAY: u64 = 86_400;
 
-/// Canonical rule names. Each rule reads only its same-named Grant field.
-pub const RULES: [&str; 8] = [
-    "transaction_cap",
-    "spent_cap",
-    "day_spent_cap",
-    "day_total_cap",
-    "call_cap",
-    "recipients",
-    "tokens",
-    "expiry",
-];
-
 pub use types::*;
 
 /// Contract types. Kept apart from `Result` so generated code sees the standard prelude.
+/// Rule variants keep the snake-case names of their functions and Grant fields.
+#[allow(non_camel_case_types)]
 mod types {
     use super::{Address, String, Vec};
 
@@ -88,6 +78,21 @@ mod types {
     }
 
     value! {
+        /// Canonical rule. Each variant names its rule function and its same-named Grant field.
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum Rule {
+            transaction_cap,
+            spent_cap,
+            day_spent_cap,
+            day_total_cap,
+            call_cap,
+            recipients,
+            tokens,
+            expiry,
+        }
+    }
+
+    value! {
         /// Complete rule input, computed and supplied by the wallet or server.
         #[derive(Clone, Debug, Eq, PartialEq)]
         pub struct AllowitEnv {
@@ -114,15 +119,12 @@ mod types {
             Expired = 9,
             /// Selected expense accounting has an unpriced liability.
             Unpriced = 10,
-            /// Negative cap, nonpositive amount or unknown rule name.
+            /// Negative cap or nonpositive amount.
             InvalidParameter = 11,
             /// Accounting is negative or belongs to another day.
             InvalidState = 12,
         }
     }
-
-    /// Rule-facing name of the protected accounting.
-    pub type State = AccountingHistory;
 }
 
 /// A rule's passing constraint, or its denial.
@@ -130,7 +132,7 @@ pub type Result<T = ()> = core::result::Result<T, Error>;
 
 /// Names used by authored policy.
 pub mod prelude {
-    pub use super::{Address, AllowitEnv, Error, Grant, Request, Result, State};
+    pub use super::{AccountingHistory, Address, AllowitEnv, Error, Grant, Request, Result};
 }
 
 /// Common preconditions of the accounting caps.
@@ -240,12 +242,12 @@ pub fn tokens(ctx: &AllowitEnv, allowed: &Option<Vec<Address>>) -> Result<Addres
 
 /// Require an unexpired grant and request, with the request expiring no later than the grant.
 ///
-/// Returns seconds left until `min(expiry, request.expires_at)`.
+/// Returns seconds left until `request.expires_at`, which the grant expiry bounds.
 pub fn expiry(ctx: &AllowitEnv, expiry: &Option<u64>) -> Result<u64> {
     let expiry = expiry.ok_or(Error::MissingGrant)?;
     let r = &ctx.request;
     if r.now < expiry && r.now < r.expires_at && r.expires_at <= expiry {
-        Ok(r.expires_at.min(expiry) - r.now)
+        Ok(r.expires_at - r.now)
     } else {
         Err(Error::Expired)
     }
@@ -253,51 +255,49 @@ pub fn expiry(ctx: &AllowitEnv, expiry: &Option<u64>) -> Result<u64> {
 
 /// Standard-contract preflight of one canonical prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`.
 /// Only this runner skips a rule whose Grant field is unset. It discards pass values.
-/// Unknown names are `InvalidParameter`.
-pub fn preflight(ctx: &AllowitEnv, rule: &str) -> Result {
+pub fn preflight(ctx: &AllowitEnv, rule: Rule) -> Result {
     let grant = &ctx.grant;
     match rule {
-        "transaction_cap" => {
+        Rule::transaction_cap => {
             if grant.transaction_cap.is_some() {
                 transaction_cap(ctx, &grant.transaction_cap)?;
             }
         }
-        "spent_cap" => {
+        Rule::spent_cap => {
             if grant.spent_cap.is_some() {
                 spent_cap(ctx, &grant.spent_cap)?;
             }
         }
-        "day_spent_cap" => {
+        Rule::day_spent_cap => {
             if grant.day_spent_cap.is_some() {
                 day_spent_cap(ctx, &grant.day_spent_cap)?;
             }
         }
-        "day_total_cap" => {
+        Rule::day_total_cap => {
             if grant.day_total_cap.is_some() {
                 day_total_cap(ctx, &grant.day_total_cap)?;
             }
         }
-        "call_cap" => {
+        Rule::call_cap => {
             if grant.call_cap.is_some() {
                 call_cap(ctx, &grant.call_cap)?;
             }
         }
-        "recipients" => {
+        Rule::recipients => {
             if grant.recipients.is_some() {
                 recipients(ctx, &grant.recipients)?;
             }
         }
-        "tokens" => {
+        Rule::tokens => {
             if grant.tokens.is_some() {
                 tokens(ctx, &grant.tokens)?;
             }
         }
-        "expiry" => {
+        Rule::expiry => {
             if grant.expiry.is_some() {
                 expiry(ctx, &grant.expiry)?;
             }
         }
-        _ => return Err(Error::InvalidParameter),
     }
     Ok(())
 }

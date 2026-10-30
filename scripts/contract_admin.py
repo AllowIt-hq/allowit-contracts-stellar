@@ -74,6 +74,17 @@ def pinned_wasm(path, expected_hash):
     return expected_hash
 
 
+# Custody State layout this tool encodes: typed Grant and Vec<Rule> prefix. Version 1 stored a Grant map.
+WALLET_CONTRACT_VERSION = 2
+
+
+def wallet_layout(state):
+    """Refuse an owner packet for another stored layout. Recovery does not depend on the layout."""
+    if state.get("contract_version") != WALLET_CONTRACT_VERSION:
+        raise ValueError("Wallet state is not layout version 2; recover its funds or redeploy it")
+    return state
+
+
 # Typed Grant fields, which are also the canonical rule names. Unset fields are null.
 GRANT_FIELDS = ("transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap", "call_cap", "recipients", "tokens", "expiry")
 CAPS = {"transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap"}
@@ -341,6 +352,7 @@ def main():
         if args.family == "wallet":
             values = public_json(args.arguments)
             if args.method == "deploy_policy":
+                wallet_layout(state)
                 policy = values["deployment"]
                 roles = {key: policy[key] for key in ("owner", "agent", "server")}
                 if len(set(roles.values())) != 3 or args.contract in roles.values():

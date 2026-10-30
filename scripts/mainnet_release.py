@@ -109,8 +109,10 @@ def smoke_grant(plan):
 
 
 def prefix_digest(kind, module, asset, rules):
-    """The contract's standard_prefix_digest: SHA-256 of canonical XDR of its binding tuple."""
-    checks = scval.to_vec([scval.to_vec([scval.to_symbol(rule), scval.to_symbol(rule)]) for rule in rules])
+    """The contract's standard_prefix_digest: SHA-256 of canonical XDR of its binding tuple.
+
+    The ordered rules are a Vec<Rule>; each unit enum variant encodes as a one-symbol vector."""
+    checks = scval.to_vec([scval.to_vec([scval.to_symbol(rule)]) for rule in rules])
     value = scval.to_vec([scval.to_symbol("allowit_std_prefix"), scval.to_symbol(kind), scval.to_bytes(bytes.fromhex(module)), scval.to_address(asset),
                           scval.to_bytes(hashlib.sha256(SCHEMA).digest()), scval.to_bytes(hashlib.sha256(DEPOSIT_SCHEMA).digest()), checks])
     return digest(value.to_xdr_bytes())
@@ -363,7 +365,7 @@ def wallet_state(plan, wallet, parent):
         raise ValueError("Wallet is paused")
     if binding["policy_instance"] != plan["policy_instance"] or binding["module_digest"] != plan["artifacts"]["wallet"]["sha256"]:
         raise ValueError("Wallet policy identity or executable differs from the plan")
-    if binding["source_digest"] != expected["source_digest"] or binding["engine_kind"] != WALLET_KIND or int(binding["contract_version"]) != 1:
+    if binding["source_digest"] != expected["source_digest"] or binding["engine_kind"] != WALLET_KIND or int(binding["contract_version"]) != ca.WALLET_CONTRACT_VERSION:
         raise ValueError("Installed compiled policy differs from the plan")
     if binding["entrypoint"] != "_execute" or binding["argument_schema_digest"] != digest(SCHEMA):
         raise ValueError("Wallet does not use the admitted transfer ABI")

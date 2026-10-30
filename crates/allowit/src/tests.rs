@@ -1,5 +1,34 @@
+extern crate std;
 use super::*;
-use soroban_sdk::{Env, String, testutils::Address as _, vec};
+use soroban_sdk::{
+    Env, IntoVal, String, Symbol, TryFromVal, Val, testutils::Address as _, vec, xdr::ToXdr,
+};
+
+/// Every canonical rule in Grant field order.
+const ALL: [Rule; 8] = [
+    Rule::transaction_cap,
+    Rule::spent_cap,
+    Rule::day_spent_cap,
+    Rule::day_total_cap,
+    Rule::call_cap,
+    Rule::recipients,
+    Rule::tokens,
+    Rule::expiry,
+];
+
+/// Fails to compile when a variant is added without extending `ALL`.
+fn position(rule: Rule) -> usize {
+    match rule {
+        Rule::transaction_cap => 0,
+        Rule::spent_cap => 1,
+        Rule::day_spent_cap => 2,
+        Rule::day_total_cap => 3,
+        Rule::call_cap => 4,
+        Rule::recipients => 5,
+        Rule::tokens => 6,
+        Rule::expiry => 7,
+    }
+}
 
 fn fixture(env: &Env) -> AllowitEnv {
     let asset = Address::generate(env);
@@ -15,7 +44,7 @@ fn fixture(env: &Env) -> AllowitEnv {
             tokens: Some(vec![env, asset.clone()]),
             expiry: Some(999_999),
         },
-        state: State {
+        state: AccountingHistory {
             calls: 1,
             spent: 45,
             day: 1,
@@ -50,8 +79,8 @@ fn rules_return_exact_passing_constraints() {
     );
     assert_eq!(tokens(&ctx, &g.tokens), Ok(ctx.request.asset.clone()));
     assert_eq!(expiry(&ctx, &g.expiry), Ok(400));
-    for name in RULES {
-        assert_eq!(preflight(&ctx, name), Ok(()));
+    for rule in ALL {
+        assert_eq!(preflight(&ctx, rule), Ok(()));
     }
     assert_eq!(ctx.grant.validate(), Ok(()));
 }
@@ -77,14 +106,17 @@ fn unset_grant_fields_deny_in_rules_and_skip_only_in_preflight() {
     ctx.state.calls = u64::MAX;
     assert_eq!(spent_cap(&ctx, &None), Err(Error::MissingGrant));
     assert_eq!(expiry(&ctx, &None), Err(Error::MissingGrant));
-    for name in RULES {
-        assert_eq!(preflight(&ctx, name), Ok(()));
+    for rule in ALL {
+        assert_eq!(preflight(&ctx, rule), Ok(()));
     }
     // A set field is checked by preflight exactly as by the rule.
     ctx.grant.spent_cap = Some(1000);
-    assert_eq!(preflight(&ctx, "spent_cap"), Err(Error::InvalidParameter));
+    assert_eq!(
+        preflight(&ctx, Rule::spent_cap),
+        Err(Error::InvalidParameter)
+    );
     ctx.grant.expiry = Some(u64::MAX);
-    assert_eq!(preflight(&ctx, "expiry"), Err(Error::Expired));
+    assert_eq!(preflight(&ctx, Rule::expiry), Err(Error::Expired));
 }
 
 #[test]
@@ -128,8 +160,8 @@ fn boundary_equality_passes_with_zero_headroom_and_one_more_denies() {
 fn accounting_caps_reject_invalid_inputs_unpriced_and_other_days() {
     let env = Env::default();
     let base = fixture(&env);
-    type Rule = fn(&AllowitEnv, &Option<i128>) -> Result<i128>;
-    let caps: [(Rule, bool); 3] = [
+    type Cap = fn(&AllowitEnv, &Option<i128>) -> Result<i128>;
+    let caps: [(Cap, bool); 3] = [
         (spent_cap, false),
         (day_spent_cap, true),
         (day_total_cap, true),
@@ -217,9 +249,15 @@ fn expiry_bounds_grant_and_request() {
 }
 
 #[test]
-fn removed_and_unknown_names_cannot_select_rules() {
+fn rules_encode_as_their_canonical_names_and_other_names_do_not_decode() {
     let env = Env::default();
-    let ctx = fixture(&env);
+    let symbol = |name: &str| -> Val { vec![&env, Symbol::new(&env, name)].into_val(&env) };
+    for (i, rule) in ALL.into_iter().enumerate() {
+        assert_eq!(position(rule), i);
+        let name = std::format!("{rule:?}");
+        assert_eq!(rule.to_xdr(&env), symbol(&name).to_xdr(&env));
+        assert_eq!(Rule::try_from_val(&env, &symbol(&name)).ok(), Some(rule));
+    }
     for name in [
         "set_cap_per_day",
         "cap_per_transaction",
@@ -238,8 +276,11 @@ fn removed_and_unknown_names_cannot_select_rules() {
         "Spent_cap",
         "",
     ] {
-        assert!(!RULES.contains(&name));
-        assert_eq!(preflight(&ctx, name), Err(Error::InvalidParameter));
+        // The host rejects an unknown variant symbol; inside a contract the invocation aborts.
+        let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Rule::try_from_val(&env, &symbol(name)).ok()
+        }));
+        assert!(matches!(decoded, Ok(None) | Err(_)));
     }
 }
 

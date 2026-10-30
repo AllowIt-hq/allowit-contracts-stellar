@@ -476,27 +476,19 @@ fn standard_prefix_digest_matches_independent_xdr_vector_and_binds_context() {
         &env,
         "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ",
     );
-    let rules = vec![
-        &env,
-        Symbol::new(&env, "spent_cap"),
-        Symbol::new(&env, "recipients"),
-    ];
+    let rules = vec![&env, Rule::spent_cap, Rule::recipients];
     let expected = BytesN::from_array(
         &env,
         &[
-            152, 233, 25, 0, 157, 157, 73, 184, 118, 168, 228, 141, 147, 251, 67, 32, 58, 162, 116,
-            189, 17, 83, 162, 152, 5, 132, 219, 76, 55, 163, 51, 159,
+            66, 101, 232, 202, 129, 105, 213, 21, 159, 38, 227, 129, 92, 65, 30, 68, 142, 108, 9,
+            16, 21, 190, 226, 11, 50, 204, 7, 142, 89, 244, 155, 255,
         ],
     );
     assert_eq!(
         standard_prefix_digest(&env, &kind, &module, &asset, &rules),
         expected
     );
-    let reversed = vec![
-        &env,
-        Symbol::new(&env, "recipients"),
-        Symbol::new(&env, "spent_cap"),
-    ];
+    let reversed = vec![&env, Rule::recipients, Rule::spent_cap];
     assert_ne!(
         standard_prefix_digest(&env, &kind, &module, &asset, &reversed),
         expected

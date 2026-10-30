@@ -1,13 +1,13 @@
 #![no_std]
 //! Owner-controlled custody mixins shared by fixed and bespoke policy wallets.
-use allowit::{AllowitEnv, Request};
+use allowit::{AllowitEnv, Request, Rule};
 use allowit_wallet_protocol::{
     ARGUMENT_SCHEMA_DESCRIPTOR, AccountingHistory, ExecutionRequest, ExpenseBounds, Grant,
     MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, PolicyBinding, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR,
     Sep41TransferArgs, Sep56DepositArgs, Sep56DepositEvent, Sep56DepositReceipt, TransferReceipt,
 };
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, Executable, String, Symbol, TryFromVal, Val, Vec,
+    Address, Bytes, BytesN, Env, Executable, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
     auth::{Context, ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contracterror, contracttype,
     crypto::Hash,
@@ -16,7 +16,8 @@ use soroban_sdk::{
 };
 mod persistent;
 const STATE_KEY: u32 = 0;
-pub const CONTRACT_VERSION: u32 = 1;
+/// Version 2: typed Grant and `Vec<Rule>` prefix. Version 1 stored an untyped Grant map.
+pub const CONTRACT_VERSION: u32 = 2;
 
 /// Initial owner-signed configuration. Asset and policy_instance stay fixed after creation.
 #[contracttype]
@@ -31,7 +32,7 @@ pub struct PolicyConfig {
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     /// Ordered owner-approved standard prefix. Simple and Custom use an empty list.
-    pub rules: Vec<Symbol>,
+    pub rules: Vec<Rule>,
     pub grant: Grant,
     pub x402_enabled: bool,
 }
@@ -46,7 +47,7 @@ pub struct PolicyDeployment {
     pub server: Address,
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
-    pub rules: Vec<Symbol>,
+    pub rules: Vec<Rule>,
     pub grant: Grant,
     pub x402_enabled: bool,
     pub wasm_hash: Option<BytesN<32>>,
@@ -64,7 +65,7 @@ pub struct State {
     pub policy_instance: BytesN<32>,
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
-    pub rules: Vec<Symbol>,
+    pub rules: Vec<Rule>,
     pub grant: Grant,
     pub x402_enabled: bool,
     /// Authenticated SAC label cached before any active-token authorization callback.
@@ -129,7 +130,7 @@ pub trait Policy {
         *digest == Self::argument_schema_digest(env)
     }
     /// Check the owner-approved standard prefix. Only Common admits a nonempty list.
-    fn validate(_env: &Env, rules: &Vec<Symbol>) -> Result<(), Error> {
+    fn validate(_env: &Env, rules: &Vec<Rule>) -> Result<(), Error> {
         if rules.is_empty() {
             Ok(())
         } else {
@@ -137,7 +138,7 @@ pub trait Policy {
         }
     }
     /// Evaluate the compiled checks on the kernel-built rule input. Pass values are discarded.
-    fn check(env: &Env, ctx: &AllowitEnv, rules: &Vec<Symbol>) -> Result<(), Error>;
+    fn check(env: &Env, ctx: &AllowitEnv, rules: &Vec<Rule>) -> Result<(), Error>;
 }
 
 /// Read initialized state and maintain its instance and code lifetime. Constructor initialization is explicit.
@@ -151,23 +152,55 @@ fn load(env: &Env, initial: Option<State>) -> Result<State, Error> {
         .get(&STATE_KEY)
         .ok_or(Error::InvalidState)?;
     let state = State::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
-    let fields = soroban_sdk::Map::<Symbol, Val>::try_from_val(env, &raw)
-        .map_err(|_| Error::InvalidState)?;
-    if state.contract_version != CONTRACT_VERSION || fields.len() != 15 {
+    // Struct decoding ignores extra keys and reads absent Option keys as None. Only the exact
+    // canonical encoding of this layout is accepted, including nested Grant and history.
+    if state.contract_version != CONTRACT_VERSION || state.clone().to_xdr(env) != raw.to_xdr(env) {
         return Err(Error::InvalidState);
     }
+    extend(env);
+    Ok(state)
+}
+fn extend(env: &Env) {
     let ttl = env.storage().max_ttl();
     env.deployer()
         .extend_ttl(env.current_contract_address(), ttl / 2, ttl);
-    Ok(state)
 }
 fn store(env: &Env, state: &State) {
     env.storage().instance().set(&STATE_KEY, state);
 }
-fn owner_state(env: &Env) -> Result<State, Error> {
-    let state = load(env, None)?;
-    state.owner.require_auth();
-    Ok(state)
+/// Owner entrypoints read only the stored fields they keep. A stored Grant or rule list that no
+/// longer decodes never blocks recovery, passthrough or its replacement by an owner packet.
+/// Callers require the returned owner's authorization.
+fn owner_fields(env: &Env) -> Result<(Map<Symbol, Val>, Address), Error> {
+    let raw: Val = env
+        .storage()
+        .instance()
+        .get(&STATE_KEY)
+        .ok_or(Error::InvalidState)?;
+    let fields = Map::<Symbol, Val>::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
+    let owner: Address = field(env, &fields, "owner")?;
+    let version: u32 = field(env, &fields, "contract_version")?;
+    // A later layout may change the meaning of kept fields. Version 1 differs only in Grant and rules.
+    if version == 0 || version > CONTRACT_VERSION {
+        return Err(Error::InvalidState);
+    }
+    extend(env);
+    Ok((fields, owner))
+}
+/// Decode one kept field. Only its exact canonical encoding is accepted.
+fn field<T: TryFromVal<Env, Val> + IntoVal<Env, Val> + Clone>(
+    env: &Env,
+    fields: &Map<Symbol, Val>,
+    name: &str,
+) -> Result<T, Error> {
+    let raw = fields
+        .get(Symbol::new(env, name))
+        .ok_or(Error::InvalidState)?;
+    let value = T::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
+    if value.clone().into_val(env).to_xdr(env) != raw.to_xdr(env) {
+        return Err(Error::InvalidState);
+    }
+    Ok(value)
 }
 fn public_key(env: &Env, address: &Address) -> Result<BytesN<32>, Error> {
     let encoded = address.to_xdr(env);
@@ -190,13 +223,8 @@ pub fn standard_prefix_digest(
     kind: &Symbol,
     module: &BytesN<32>,
     asset: &Address,
-    rules: &Vec<Symbol>,
+    rules: &Vec<Rule>,
 ) -> BytesN<32> {
-    use soroban_sdk::IntoVal;
-    let mut checks = Vec::<Val>::new(env);
-    for name in rules.iter() {
-        checks.push_back((name.clone(), name).into_val(env));
-    }
     env.crypto()
         .sha256(
             &(
@@ -206,7 +234,7 @@ pub fn standard_prefix_digest(
                 asset.clone(),
                 schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR),
                 schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR),
-                checks,
+                rules.clone(),
             )
                 .to_xdr(env),
         )
@@ -215,7 +243,7 @@ pub fn standard_prefix_digest(
 fn checked_prefix<P: Policy>(
     env: &Env,
     asset: &Address,
-    rules: &Vec<Symbol>,
+    rules: &Vec<Rule>,
 ) -> Result<BytesN<32>, Error> {
     let Some(Executable::Wasm(module)) = env.current_contract_address().executable() else {
         return Err(Error::InvalidState);
@@ -375,13 +403,18 @@ fn token_label(env: &Env, asset: &Address) -> String {
 }
 // A transfer to a classic issuer burns its asset. Derive the immutable SAC identity
 // from the cached symbol and candidate issuer without reentering the active SAC.
-fn issuer_destination(env: &Env, state: &State, to: &Address) -> Result<bool, Error> {
-    let len = state.token.len() as usize;
+fn issuer_destination(
+    env: &Env,
+    token: &String,
+    asset: &Address,
+    to: &Address,
+) -> Result<bool, Error> {
+    let len = token.len() as usize;
     if len == 0 || len > 48 {
         return Err(Error::InvalidState);
     }
     let mut encoded = [0u8; 48];
-    state.token.copy_into_slice(&mut encoded[..len]);
+    token.copy_into_slice(&mut encoded[..len]);
     let mut code = [0u8; 12];
     let mut cursor = 0;
     let mut size = 0;
@@ -416,11 +449,15 @@ fn issuer_destination(env: &Env, state: &State, to: &Address) -> Result<bool, Er
     let Ok(issuer) = public_key(env, to) else {
         return Ok(false);
     };
-    let mut asset = Bytes::from_array(env, &kind.to_be_bytes());
-    asset.append(&Bytes::from_slice(env, &code[..width]));
-    asset.append(&Bytes::from_array(env, &[0; 4]));
-    asset.append(&issuer.into());
-    Ok(env.deployer().with_stellar_asset(asset).deployed_address() == state.asset)
+    let mut preimage = Bytes::from_array(env, &kind.to_be_bytes());
+    preimage.append(&Bytes::from_slice(env, &code[..width]));
+    preimage.append(&Bytes::from_array(env, &[0; 4]));
+    preimage.append(&issuer.into());
+    Ok(env
+        .deployer()
+        .with_stellar_asset(preimage)
+        .deployed_address()
+        == *asset)
 }
 fn move_tokens(env: &Env, asset: &Address, to: &Address, amount: i128) -> Result<(), Error> {
     let client = token::Client::new(env, asset);
@@ -693,7 +730,9 @@ fn admit<P: Policy>(
     if args.amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if args.to == env.current_contract_address() || issuer_destination(env, &state, &args.to)? {
+    if args.to == env.current_contract_address()
+        || issuer_destination(env, &state.token, &state.asset, &args.to)?
+    {
         return Err(Error::InvalidRecipient);
     }
     validate_expense(env, &state, &execution, operation)?;
@@ -725,7 +764,11 @@ fn admit<P: Policy>(
 }
 
 pub fn construct<P: Policy>(env: &Env, config: PolicyConfig) -> Result<(), Error> {
-    config.owner.require_auth();
+    // Decoding ignores extra keys and reads absent Option keys as None. The owner signs the
+    // canonical encoding of the decoded packet, so a packet whose meaning differs fails auth.
+    config
+        .owner
+        .require_auth_for_args((config.clone(),).into_val(env));
     validate::<P>(env, &config)?;
     if config.asset.executable() != Some(Executable::StellarAsset) {
         return Err(Error::UnsupportedAsset);
@@ -819,21 +862,20 @@ pub fn execute<P: Policy>(
     Ok(receipt)
 }
 pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Result<(), Error> {
-    let mut state = owner_state(env)?;
-    if state
-        .deployment_version
-        .checked_add(1)
-        .ok_or(Error::Overflow)?
-        != deployment.deployment_version
-    {
+    let (fields, owner) = owner_fields(env)?;
+    // The current and any new owner sign the canonical encoding of the decoded packet.
+    let signed: Vec<Val> = (deployment.clone(),).into_val(env);
+    owner.require_auth_for_args(signed.clone());
+    let version: u64 = field(env, &fields, "deployment_version")?;
+    if version.checked_add(1).ok_or(Error::Overflow)? != deployment.deployment_version {
         return Err(Error::StaleRequest);
     }
     let config = PolicyConfig {
         owner: deployment.owner,
         agent: deployment.agent,
         server: deployment.server,
-        asset: state.asset.clone(),
-        policy_instance: state.policy_instance.clone(),
+        asset: field(env, &fields, "asset")?,
+        policy_instance: field(env, &fields, "policy_instance")?,
         source_digest: deployment.source_digest,
         rules: deployment.rules,
         grant: deployment.grant,
@@ -847,18 +889,30 @@ pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Resu
     } else {
         validate::<UpgradeConfig>(env, &config)?;
     }
-    if config.owner != state.owner {
-        config.owner.require_auth();
+    if config.owner != owner {
+        config.owner.require_auth_for_args(signed);
     }
-    state.owner = config.owner;
-    state.agent = config.agent;
-    state.server = config.server;
-    state.source_digest = config.source_digest;
-    state.rules = config.rules;
-    state.grant = config.grant;
-    state.x402_enabled = config.x402_enabled;
-    state.deployment_version = deployment.deployment_version;
-    store(env, &state);
+    // Kept fields carry over. The packet replaces the rest and writes the current layout.
+    store(
+        env,
+        &State {
+            history: field(env, &fields, "history")?,
+            contract_version: CONTRACT_VERSION,
+            owner: config.owner,
+            agent: config.agent,
+            server: config.server,
+            asset: config.asset,
+            policy_instance: config.policy_instance,
+            source_digest: config.source_digest,
+            rules: config.rules,
+            grant: config.grant,
+            x402_enabled: config.x402_enabled,
+            token: field(env, &fields, "token")?,
+            deployment_version: deployment.deployment_version,
+            nonce: field(env, &fields, "nonce")?,
+            paused: field(env, &fields, "paused")?,
+        },
+    );
     if let Some(hash) = deployment.wasm_hash {
         env.deployer()
             .update_current_contract(soroban_sdk::ContractExecutable::Wasm(hash));
@@ -868,15 +922,16 @@ pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Resu
 struct UpgradeConfig;
 impl Policy for UpgradeConfig {
     const KIND: &'static str = "upgrade";
-    fn validate(_env: &Env, _rules: &Vec<Symbol>) -> Result<(), Error> {
+    fn validate(_env: &Env, _rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(())
     }
-    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Symbol>) -> Result<(), Error> {
+    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
         Err(Error::PolicyDenied)
     }
 }
 pub fn set_pause(env: &Env, paused: bool, deployment_version: u64) -> Result<(), Error> {
-    let mut state = owner_state(env)?;
+    let mut state = load(env, None)?;
+    state.owner.require_auth();
     if state
         .deployment_version
         .checked_add(1)
@@ -891,14 +946,19 @@ pub fn set_pause(env: &Env, paused: bool, deployment_version: u64) -> Result<(),
     Ok(())
 }
 pub fn recover(env: &Env, recipient: Address, amount: i128) -> Result<(), Error> {
-    let state = owner_state(env)?;
+    let (fields, owner) = owner_fields(env)?;
+    owner.require_auth();
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if recipient == env.current_contract_address() || issuer_destination(env, &state, &recipient)? {
+    let asset: Address = field(env, &fields, "asset")?;
+    let token: String = field(env, &fields, "token")?;
+    if recipient == env.current_contract_address()
+        || issuer_destination(env, &token, &asset, &recipient)?
+    {
         return Err(Error::InvalidRecipient);
     }
-    move_tokens(env, &state.asset, &recipient, amount)
+    move_tokens(env, &asset, &recipient, amount)
 }
 /// Owner-signed passthrough. Native authorization binds target, arguments and every nested scope.
 pub fn invoke(
@@ -908,7 +968,7 @@ pub fn invoke(
     args: Vec<Val>,
     auth: Vec<InvokerContractAuthEntry>,
 ) -> Result<Val, Error> {
-    owner_state(env)?;
+    owner_fields(env)?.1.require_auth();
     env.authorize_as_current_contract(auth);
     Ok(env.invoke_contract(&contract, &function, args))
 }
@@ -940,17 +1000,12 @@ pub fn check_auth<P: Policy>(
         .map_err(|_| Error::InvalidInvocation)?;
     let amount = i128::try_from_val(env, &context.args.get(2).unwrap())
         .map_err(|_| Error::InvalidInvocation)?;
-    if authorization.execution.invocation.arguments.len() > MAX_ARGUMENT_BYTES {
-        return Err(Error::InvalidInvocation);
-    }
-    let args = Sep41TransferArgs::from_xdr(env, &authorization.execution.invocation.arguments)
-        .map_err(|_| Error::InvalidInvocation)?;
-    if from != env.current_contract_address()
-        || args.from != from
-        || args.token != context.contract
-        || args.to != to
-        || args.amount != amount
-    {
+    // The same canonical transfer-profile decoding as execute. A deposit profile rejects here.
+    let operation = decode_operation(env, &authorization.execution, &state)?;
+    let NativeOperation::Transfer(args) = &operation else {
+        return Err(Error::UnsupportedOperation);
+    };
+    if from != env.current_contract_address() || args.to != to || args.amount != amount {
         return Err(Error::InvalidInvocation);
     }
     let digest = env
@@ -974,7 +1029,6 @@ pub fn check_auth<P: Policy>(
         &digest.clone().into(),
         &authorization.server_signature,
     );
-    let operation = NativeOperation::Transfer(args);
     admit::<P>(env, authorization.execution, state, &operation)?;
     Ok(())
 }
@@ -988,7 +1042,7 @@ impl Policy for Simple {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
-    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Symbol>) -> Result<(), Error> {
+    fn check(_env: &Env, _ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -1001,27 +1055,18 @@ impl Policy for Common {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
-    fn validate(env: &Env, rules: &Vec<Symbol>) -> Result<(), Error> {
-        for rule in rules.iter() {
-            rule_name(env, &rule)?;
-        }
+    /// Any ordered list of typed rules. Unknown names fail argument decoding.
+    fn validate(_env: &Env, _rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(())
     }
     /// Run each prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;` in owner order.
     /// An unset Grant field skips its rule here only; the full offchain policy denies it.
-    fn check(env: &Env, ctx: &AllowitEnv, rules: &Vec<Symbol>) -> Result<(), Error> {
+    fn check(_env: &Env, ctx: &AllowitEnv, rules: &Vec<Rule>) -> Result<(), Error> {
         for rule in rules.iter() {
-            allowit::preflight(ctx, rule_name(env, &rule)?)?;
+            allowit::preflight(ctx, rule)?;
         }
         Ok(())
     }
-}
-/// Canonical rule name of an owner-selected prefix symbol. Other names reject.
-fn rule_name(env: &Env, rule: &Symbol) -> Result<&'static str, Error> {
-    allowit::RULES
-        .into_iter()
-        .find(|name| Symbol::new(env, name) == *rule)
-        .ok_or(Error::InvalidGrant)
 }
 /// Rule denials collapse to PolicyDenied. Invalid owner configuration and accounting stay distinct.
 impl From<allowit::Error> for Error {

@@ -75,6 +75,8 @@ class RealCliEncoding(unittest.TestCase):
                 args = tx.transaction.operations[0].host_function.invoke_contract.args
                 packet = {entry.key.sym.sc_symbol.decode(): entry.val for entry in args[0].map.sc_map}
                 self.assertEqual(packet["deployment_version"].u64.uint64, 1)
+                # Vec<Rule>: each unit enum variant encodes as a one-symbol vector.
+                self.assertEqual(packet["rules"], scval.to_vec([scval.to_vec([scval.to_symbol("transaction_cap")])]))
                 values = {entry.key.sym.sc_symbol.decode(): entry.val for entry in packet["grant"].map.sc_map}
                 self.assertEqual(list(values), sorted(ca.GRANT_FIELDS))
                 self.assertEqual(values["transaction_cap"], scval.to_int128(big))

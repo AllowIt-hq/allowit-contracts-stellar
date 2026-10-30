@@ -182,6 +182,11 @@ class ContractAdmin(unittest.TestCase):
                 ca.deployment(dict(deployment, rules=[removed]))
         with self.assertRaises(ValueError):
             ca.public_json('{"custom":1,"custom":2}')
+        # Owner packets encode the typed layout only; a version 1 Grant-map wallet is refused.
+        self.assertEqual(ca.wallet_layout({"contract_version": 2})["contract_version"], 2)
+        for state in ({"contract_version": 1}, {"contract_version": 3}, {}):
+            with self.assertRaisesRegex(ValueError, "layout"):
+                ca.wallet_layout(state)
 
     def test_assembly_preserves_intent_and_adds_resources(self):
         raw = TransactionBuilder(Account(KEYS[0], 42), wa.PASSPHRASE["testnet"], base_fee=100).append_upload_contract_wasm_op(b"test-wasm").set_timeout(0).build()
