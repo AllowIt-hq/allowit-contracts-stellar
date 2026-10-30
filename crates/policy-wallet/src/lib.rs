@@ -3,11 +3,12 @@
 use allowit_wallet_protocol::{
     ARGUMENT_SCHEMA_DESCRIPTOR, EngineRequest, EngineResult, EngineState, ExecutionRequest, Grant,
     MAX_ARGUMENT_BYTES, PolicyBinding, PolicyContext, PolicyEngine, PolicyFailure,
-    Sep41TransferArgs, Spent, TransferReceipt, named_values_valid,
+    SEP56_DEPOSIT_SCHEMA_DESCRIPTOR, Sep41TransferArgs, Sep56DepositArgs, Sep56DepositEvent,
+    Sep56DepositReceipt, Spent, TransferReceipt, named_values_valid,
 };
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, Executable, String, Symbol, TryFromVal, Val, Vec,
-    auth::{Context, InvokerContractAuthEntry},
+    auth::{Context, ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contracterror, contracttype,
     crypto::Hash,
     token,
@@ -108,6 +109,7 @@ pub enum Error {
 #[derive(Clone)]
 enum Key {
     Operation(BytesN<32>),
+    Deposit(BytesN<32>),
 }
 
 /// Compile-time policy mixin. No runtime fallback or system-controlled executable reference exists.
@@ -116,6 +118,24 @@ pub trait Policy {
     /// A bespoke implementation binds its compiled source. Fixed tiers use the owner's source digest.
     fn source_digest(_env: &Env) -> Option<BytesN<32>> {
         None
+    }
+    /// Default profile reported by policy_binding. Fixed tiers retain transfer as the default.
+    fn argument_schema_digest(env: &Env) -> BytesN<32> {
+        schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
+    }
+    /// Admit only the compiled profile unless an implementation explicitly selects multiple native adapters.
+    fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
+        *digest == Self::argument_schema_digest(env)
+    }
+    /// Evaluate the exact admitted operation. Existing fixed checks operate on its underlying debit.
+    fn check_operation(
+        env: &Env,
+        request: EngineRequest,
+        state: EngineState,
+        rules: &Vec<Symbol>,
+        _operation: &String,
+    ) -> Result<Spent, Error> {
+        Self::check(env, request, state, rules)
     }
     fn validate(env: &Env, rules: &Vec<Symbol>, grant: &Grant) -> Result<(), Error>;
     fn check(
@@ -194,7 +214,19 @@ fn validate<P: Policy>(env: &Env, config: &PolicyConfig) -> Result<(), Error> {
     }
     P::validate(env, &config.rules, &config.grant)
 }
-fn binding<P: Policy>(env: &Env, state: &State) -> Result<PolicyBinding, Error> {
+fn schema_digest(env: &Env, descriptor: &[u8]) -> BytesN<32> {
+    env.crypto()
+        .sha256(&Bytes::from_slice(env, descriptor))
+        .to_bytes()
+}
+fn binding_for<P: Policy>(
+    env: &Env,
+    state: &State,
+    digest: BytesN<32>,
+) -> Result<PolicyBinding, Error> {
+    if !P::admits_schema(env, &digest) {
+        return Err(Error::UnsupportedOperation);
+    }
     let Some(Executable::Wasm(module_digest)) = env.current_contract_address().executable() else {
         return Err(Error::InvalidState);
     };
@@ -207,13 +239,82 @@ fn binding<P: Policy>(env: &Env, state: &State) -> Result<PolicyBinding, Error> 
         policy_instance: state.policy_instance.clone(),
         module_digest,
         source_digest: state.source_digest.clone(),
-        argument_schema_digest: env
-            .crypto()
-            .sha256(&Bytes::from_slice(env, ARGUMENT_SCHEMA_DESCRIPTOR))
-            .to_bytes(),
+        argument_schema_digest: digest,
         entrypoint: Symbol::new(env, "_execute"),
     })
 }
+fn binding<P: Policy>(env: &Env, state: &State) -> Result<PolicyBinding, Error> {
+    binding_for::<P>(env, state, P::argument_schema_digest(env))
+}
+
+/// Private native adapter dispatch. No opaque method, target or authorization tree is accepted.
+enum NativeOperation {
+    Transfer(Sep41TransferArgs),
+    Deposit(Sep56DepositArgs),
+}
+impl NativeOperation {
+    fn transfer(&self, asset: &Address) -> Sep41TransferArgs {
+        match self {
+            Self::Transfer(args) => args.clone(),
+            Self::Deposit(args) => Sep41TransferArgs {
+                token: asset.clone(),
+                from: args.from.clone(),
+                to: args.vault.clone(),
+                amount: args.assets,
+            },
+        }
+    }
+    fn name(&self, env: &Env) -> String {
+        String::from_str(
+            env,
+            match self {
+                Self::Transfer(_) => "stellar::sep41_transfer",
+                Self::Deposit(_) => "stellar::sep56_deposit",
+            },
+        )
+    }
+}
+fn decode_operation(
+    env: &Env,
+    execution: &ExecutionRequest,
+    state: &State,
+) -> Result<NativeOperation, Error> {
+    let invocation = &execution.invocation;
+    if invocation.arguments.len() > MAX_ARGUMENT_BYTES {
+        return Err(Error::InvalidInvocation);
+    }
+    if invocation.argument_schema_digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR) {
+        let args = Sep41TransferArgs::from_xdr(env, &invocation.arguments)
+            .map_err(|_| Error::InvalidInvocation)?;
+        if args.clone().to_xdr(env) != invocation.arguments
+            || args.token != state.asset
+            || args.from != env.current_contract_address()
+        {
+            return Err(Error::InvalidInvocation);
+        }
+        return Ok(NativeOperation::Transfer(args));
+    }
+    if invocation.argument_schema_digest != schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR) {
+        return Err(Error::UnsupportedOperation);
+    }
+    let args = Sep56DepositArgs::from_xdr(env, &invocation.arguments)
+        .map_err(|_| Error::InvalidInvocation)?;
+    let wallet = env.current_contract_address();
+    if args.clone().to_xdr(env) != invocation.arguments
+        || args.from != wallet
+        || args.receiver != wallet
+        || args.operator != wallet
+        || args.vault == wallet
+        || args.vault == state.asset
+    {
+        return Err(Error::InvalidInvocation);
+    }
+    if args.assets <= 0 || args.min_shares <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+    Ok(NativeOperation::Deposit(args))
+}
+
 fn token_label(env: &Env, asset: &Address) -> String {
     let native = env
         .deployer()
@@ -292,12 +393,77 @@ fn move_tokens(env: &Env, asset: &Address, to: &Address, amount: i128) -> Result
     }
     Ok(())
 }
+fn deposit_tokens(env: &Env, asset: &Address, args: &Sep56DepositArgs) -> Result<i128, Error> {
+    use soroban_sdk::IntoVal;
+    let underlying: Address =
+        env.invoke_contract(&args.vault, &Symbol::new(env, "query_asset"), Vec::new(env));
+    if underlying != *asset {
+        return Err(Error::UnsupportedAsset);
+    }
+    let wallet = env.current_contract_address();
+    let asset_client = token::Client::new(env, asset);
+    let shares_client = token::Client::new(env, &args.vault);
+    let before_assets = asset_client.balance(&wallet);
+    let before_shares = shares_client.balance(&wallet);
+    if before_assets < args.assets {
+        return Err(Error::InsufficientFunds);
+    }
+    if before_shares < 0 {
+        return Err(Error::InvalidEffects);
+    }
+    // The direct vault call is authorized by this invoking contract. Only this exact deeper transfer is delegated.
+    env.authorize_as_current_contract(soroban_sdk::vec![
+        env,
+        InvokerContractAuthEntry::Contract(SubContractInvocation {
+            context: ContractContext {
+                contract: asset.clone(),
+                fn_name: Symbol::new(env, "transfer"),
+                args: (wallet.clone(), args.vault.clone(), args.assets).into_val(env),
+            },
+            sub_invocations: Vec::new(env),
+        })
+    ]);
+    let shares: i128 = env.invoke_contract(
+        &args.vault,
+        &Symbol::new(env, "deposit"),
+        (
+            args.assets,
+            args.receiver.clone(),
+            args.from.clone(),
+            args.operator.clone(),
+        )
+            .into_val(env),
+    );
+    let expected_assets = before_assets
+        .checked_sub(args.assets)
+        .ok_or(Error::Overflow)?;
+    let expected_shares = before_shares.checked_add(shares).ok_or(Error::Overflow)?;
+    if shares < args.min_shares
+        || shares <= 0
+        || asset_client.balance(&wallet) != expected_assets
+        || shares_client.balance(&wallet) != expected_shares
+    {
+        return Err(Error::InvalidEffects);
+    }
+    // The external vault cannot change the underlying identity during an accepted deposit.
+    let after_asset: Address =
+        env.invoke_contract(&args.vault, &Symbol::new(env, "query_asset"), Vec::new(env));
+    if after_asset != *asset {
+        return Err(Error::InvalidEffects);
+    }
+    Ok(shares)
+}
 fn admit<P: Policy>(
     env: &Env,
     execution: ExecutionRequest,
     mut state: State,
+    operation: &NativeOperation,
 ) -> Result<TransferReceipt, Error> {
-    let installed = binding::<P>(env, &state)?;
+    let installed = binding_for::<P>(
+        env,
+        &state,
+        execution.invocation.argument_schema_digest.clone(),
+    )?;
     let invocation = &execution.invocation;
     if execution.policy_instance != installed.policy_instance
         || execution.operation_id == BytesN::from_array(env, &[0; 32])
@@ -308,14 +474,8 @@ fn admit<P: Policy>(
     {
         return Err(Error::InvalidInvocation);
     }
-    let args = Sep41TransferArgs::from_xdr(env, &invocation.arguments)
-        .map_err(|_| Error::InvalidInvocation)?;
-    if args.clone().to_xdr(env) != invocation.arguments
-        || args.token != state.asset
-        || args.from != env.current_contract_address()
-    {
-        return Err(Error::InvalidInvocation);
-    }
+    let args = operation.transfer(&state.asset);
+    let operation_name = operation.name(env);
     let operation = Key::Operation(execution.operation_id.clone());
     if env.storage().persistent().has(&operation) {
         return Err(Error::Replay);
@@ -357,7 +517,7 @@ fn admit<P: Policy>(
     };
     let initial = storage.load().map_err(|_| Error::InvalidState)?;
     P::validate(env, &state.rules, &state.grant)?;
-    let final_spent = P::check(
+    let final_spent = P::check_operation(
         env,
         request,
         EngineState {
@@ -365,6 +525,7 @@ fn admit<P: Policy>(
             spent: initial.clone().unwrap_or_else(|| Spent::new(env)),
         },
         &state.rules,
+        &operation_name,
     )?;
     if !named_values_valid(env, &final_spent) {
         return Err(Error::InvalidState);
@@ -418,6 +579,21 @@ pub fn state(env: &Env) -> Result<State, Error> {
 pub fn policy_binding<P: Policy>(env: &Env) -> Result<PolicyBinding, Error> {
     binding::<P>(env, &load(env, None)?)
 }
+/// Return a native operation binding only when the installed policy admits that exact profile.
+pub fn policy_binding_for<P: Policy>(
+    env: &Env,
+    argument_schema_digest: BytesN<32>,
+) -> Result<PolicyBinding, Error> {
+    binding_for::<P>(env, &load(env, None)?, argument_schema_digest)
+}
+/// Read the atomically retained actual share credit for a successful deposit operation.
+pub fn deposit_receipt(
+    env: &Env,
+    operation_id: BytesN<32>,
+) -> Result<Option<Sep56DepositReceipt>, Error> {
+    load(env, None)?;
+    Ok(persistent::load(env, &Key::Deposit(operation_id), None))
+}
 pub fn policy_spent(env: &Env) -> Result<Option<Spent>, Error> {
     let state = load(env, None)?;
     NativePolicyStorage {
@@ -434,8 +610,40 @@ pub fn execute<P: Policy>(
     let state = load(env, None)?;
     state.agent.require_auth();
     state.server.require_auth();
-    let receipt = admit::<P>(env, execution, state)?;
-    move_tokens(env, &receipt.token, &receipt.to, receipt.amount)?;
+    let operation = decode_operation(env, &execution, &state)?;
+    let receipt = admit::<P>(env, execution, state, &operation)?;
+    match operation {
+        NativeOperation::Transfer(_) => {
+            move_tokens(env, &receipt.token, &receipt.to, receipt.amount)?
+        }
+        NativeOperation::Deposit(args) => {
+            let shares = deposit_tokens(env, &receipt.token, &args)?;
+            let deposited = Sep56DepositReceipt {
+                operation_id: receipt.operation_id.clone(),
+                vault: args.vault,
+                asset: receipt.token.clone(),
+                from: args.from,
+                receiver: args.receiver,
+                operator: args.operator,
+                assets: args.assets,
+                shares,
+                nonce: receipt.nonce,
+                deployment_version: receipt.deployment_version,
+            };
+            persistent::load(
+                env,
+                &Key::Deposit(receipt.operation_id.clone()),
+                Some(&deposited),
+            );
+            Sep56DepositEvent {
+                operation_id: receipt.operation_id.clone(),
+                vault: deposited.vault,
+                assets: deposited.assets,
+                shares: deposited.shares,
+            }
+            .publish(env);
+        }
+    }
     Ok(receipt)
 }
 pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Result<(), Error> {
@@ -599,7 +807,8 @@ pub fn check_auth<P: Policy>(
         &digest.clone().into(),
         &authorization.server_signature,
     );
-    admit::<P>(env, authorization.execution, state)?;
+    let operation = NativeOperation::Transfer(args);
+    admit::<P>(env, authorization.execution, state, &operation)?;
     Ok(())
 }
 
@@ -607,6 +816,10 @@ pub fn check_auth<P: Policy>(
 pub struct Simple;
 impl Policy for Simple {
     const KIND: &'static str = "simple_policy_engine";
+    fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
+        *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
+            || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
+    }
     fn validate(_env: &Env, rules: &Vec<Symbol>, _grant: &Grant) -> Result<(), Error> {
         if rules.is_empty() {
             Ok(())
@@ -627,6 +840,10 @@ impl Policy for Simple {
 pub struct Common;
 impl Policy for Common {
     const KIND: &'static str = "common_policy_engine";
+    fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
+        *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
+            || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
+    }
     fn validate(env: &Env, rules: &Vec<Symbol>, grant: &Grant) -> Result<(), Error> {
         for (i, rule) in rules.iter().enumerate() {
             if rules.iter().take(i).any(|prior| prior == rule) {
@@ -692,7 +909,14 @@ impl PolicyEngine for LocalPolicyHost {
     }
 }
 pub fn context(request: &EngineRequest) -> PolicyContext {
+    context_for_operation(
+        request,
+        &String::from_str(&request.wallet.env(), "stellar::sep41_transfer"),
+    )
+}
+pub fn context_for_operation(request: &EngineRequest, operation: &String) -> PolicyContext {
     PolicyContext {
+        operation: operation.clone(),
         asset: request.asset.clone(),
         recipient: request.recipient.clone(),
         token: request.token.clone(),
@@ -720,6 +944,18 @@ macro_rules! policy_wallet {
                 env: soroban_sdk::Env,
             ) -> Result<allowit_wallet_protocol::PolicyBinding, $crate::Error> {
                 $crate::policy_binding::<$policy>(&env)
+            }
+            pub fn policy_binding_for(
+                env: soroban_sdk::Env,
+                argument_schema_digest: soroban_sdk::BytesN<32>,
+            ) -> Result<allowit_wallet_protocol::PolicyBinding, $crate::Error> {
+                $crate::policy_binding_for::<$policy>(&env, argument_schema_digest)
+            }
+            pub fn deposit_receipt(
+                env: soroban_sdk::Env,
+                operation_id: soroban_sdk::BytesN<32>,
+            ) -> Result<Option<allowit_wallet_protocol::Sep56DepositReceipt>, $crate::Error> {
+                $crate::deposit_receipt(&env, operation_id)
             }
             pub fn policy_spent(
                 env: soroban_sdk::Env,
@@ -783,3 +1019,6 @@ macro_rules! policy_wallet {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod sep56_tests;

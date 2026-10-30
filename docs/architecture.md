@@ -1,6 +1,7 @@
 # Policy wallet engines
 
-Policy wallets hold one immutable native Stellar Asset Contract (SAC) asset. The owner chooses
+Policy wallets account for one immutable underlying Stellar Asset Contract (SAC) asset. Deposits
+keep the received vault shares in the same wallet. The owner chooses
 wallet code, agent, independent server signer and policy configuration. The server signer is not a
 shared checker contract or its parent administrator.
 
@@ -62,6 +63,36 @@ recipient credit must match the exact transfer. Delegated execution and recovery
 `policy_binding()` reports `engine_kind`, `contract_version`, logical identity, exact module hash,
 source digest, argument schema digest and private `_execute` selector. Its tier identifier does not
 replace verification of the executable hash. `policy_spent()` returns the full raw map.
+
+## SEP-56 deposits
+
+`execute` also accepts the exact deposit schema reported by `policy_binding_for(schema_digest)`.
+`Sep56DepositArgs` binds `vault`, positive underlying `assets`, positive `min_shares`, `from`,
+`receiver` and `operator`. All three wallet roles equal the custody wallet. The vault itself is the
+share token. `query_asset()` must return the immutable underlying SAC before and after execution.
+The native call is `deposit(assets, receiver, from, operator)`, returning minted share units.
+
+The normalized policy amount is the gross underlying debit, and its recipient is the vault address.
+An authored `recipient` rule can allow one or several vault destinations through the ordinary
+`recipients` Grant list. Without that rule, the list does not create a restriction. There is no
+separate required vault list or contract-code hash configuration.
+
+Custody authorizes one exact deeper SAC `transfer(wallet, vault, assets)`. It grants no allowance or
+arbitrary subtree. The actual underlying debit must equal `assets`. Share credit must equal the
+positive returned amount and meet `min_shares` in the share token's native scale. An extra debit,
+including one later refunded, lacks authorization. Denial or failure rolls back usage, nonce,
+receipts and native effects together.
+
+The unchanged `TransferReceipt` reports the underlying debit leg to the vault. The
+`deposit_receipt(operation_id)` getter returns its exact asset, parties, assets and actual shares.
+The wallet emits `sep56_deposit` with operation and vault topics and `assets`/`shares` data.
+These observations establish the executed exchange, not the external vault's value or solvency.
+
+Simple and Common admit both native schemas. Custom admits only its compiled argument schema.
+`PolicyContext.operation` is an internal native String with the qualified operation name.
+Existing onchain spending rules charge gross deposited assets. Server expense and temporary-loss
+accounting is separate. Redemption does not reset gross-debit limits. The owner can redeem shares
+through exact `invoke` without delegated signer approval.
 
 ## x402 and owner operations
 

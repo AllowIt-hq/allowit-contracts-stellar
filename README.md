@@ -2,7 +2,7 @@
 
 Three owner-controlled contract implementations share custody and administration mixins:
 
-- `SimplePolicyEngine` requires agent and server approval for delegated transfers. The server checks the authored policy offchain.
+- `SimplePolicyEngine` requires agent and server approval for delegated transfers and SEP-56 deposits. The server checks the authored policy offchain.
 - `CommonPolicyEngine` adds an explicit owner-selected list of canonical local policy checks.
 - `CustomPolicy` compiles bespoke local policy into its own contract and reuses the same wallet mixins.
 

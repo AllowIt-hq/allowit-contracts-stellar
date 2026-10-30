@@ -1,10 +1,13 @@
 #![no_std]
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, Map, String, Symbol, Val, Vec, contractclient, contracttype,
+    Address, Bytes, BytesN, Env, Map, String, Symbol, Val, Vec, contractclient, contractevent,
+    contracttype,
 };
 
 /// Native transfer-profile argument encoding, fixed independently of policy source.
 pub const ARGUMENT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)";
+/// Exact SEP-56 deposit encoding. The vault is also its SEP-41 share-token contract.
+pub const SEP56_DEPOSIT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep56_deposit.v1:ScValMap(assets:i128,from:Address,min_shares:i128,operator:Address,receiver:Address,vault:Address)";
 pub const MAX_ARGUMENT_BYTES: u32 = 1024;
 
 /// Owner-signed UTF-8 names mapped to exact native values. Values retain their representation.
@@ -174,6 +177,62 @@ pub struct Sep41TransferArgs {
     pub amount: i128,
 }
 
+/// Exact arguments of the admitted stellar::sep56_deposit operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sep56DepositArgs {
+    /// Vault and share-token contract selected by the request and constrained by authored policy.
+    pub vault: Address,
+    /// Positive underlying SAC units supplied. The immutable wallet asset fixes their scale.
+    pub assets: i128,
+    /// Share receiver. Delegated deposits require the current wallet address.
+    pub receiver: Address,
+    /// Underlying source. Delegated deposits require the current wallet address.
+    pub from: Address,
+    /// Deposit operator. Delegated deposits require the current wallet address.
+    pub operator: Address,
+    /// Positive minimum minted share units in the vault share token's native scale.
+    pub min_shares: i128,
+}
+
+/// Settled deposit effects, stored atomically with custody nonce and underlying transfer receipt.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sep56DepositReceipt {
+    /// Single-use logical operation identifier retained across re-preparation.
+    pub operation_id: BytesN<32>,
+    /// Admitted vault, also the share-token contract.
+    pub vault: Address,
+    /// Immutable underlying SAC address.
+    pub asset: Address,
+    /// Underlying source, equal to this wallet.
+    pub from: Address,
+    /// Share receiver, equal to this wallet.
+    pub receiver: Address,
+    /// Authorized operator, equal to this wallet.
+    pub operator: Address,
+    /// Exact observed underlying debit in native units.
+    pub assets: i128,
+    /// Actual share credit, equal to the vault's returned minted units.
+    pub shares: i128,
+    /// Consumed execution sequence, distinct from native authorization nonces.
+    pub nonce: u64,
+    /// Owner configuration sequence used for this deposit.
+    pub deployment_version: u64,
+}
+
+/// Confirmed underlying-to-share exchange. The complete receipt remains available by operation identity.
+#[contractevent(topics = ["sep56_deposit"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sep56DepositEvent {
+    #[topic]
+    pub operation_id: BytesN<32>,
+    #[topic]
+    pub vault: Address,
+    pub assets: i128,
+    pub shares: i128,
+}
+
 /// The native profile of the canonical signed module-selection record.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -184,7 +243,7 @@ pub struct PolicyInvocation {
     pub entrypoint: Symbol,
     /// SHA-256 of the admitted native argument schema. Unknown schemas reject.
     pub argument_schema_digest: BytesN<32>,
-    /// Canonical bounded XDR of the admitted transfer arguments; alternative encodings and extra data reject.
+    /// Canonical bounded XDR of the selected native operation; alternative encodings and extra data reject.
     pub arguments: Bytes,
 }
 
@@ -249,6 +308,8 @@ pub struct TransferReceipt {
 /// Amounts use the admitted SAC's exact native units.
 #[derive(Clone)]
 pub struct PolicyContext {
+    /// Kernel-selected canonical operation name. Callers cannot substitute an action label.
+    pub operation: String,
     /// Immutable installed SAC address authenticated by custody.
     pub asset: Address,
     /// Exact intended token destination, bound by custody to the native transfer.
@@ -257,7 +318,7 @@ pub struct PolicyContext {
     pub token: String,
     /// Authenticated SAC decimal scale, fixed at seven by this custody profile.
     pub decimals: u32,
-    /// Positive native i128 base units of the proposed transfer.
+    /// Positive native i128 base units of the proposed gross underlying debit.
     pub amount: i128,
     /// Authenticated ledger close time in Unix seconds.
     pub now: u64,

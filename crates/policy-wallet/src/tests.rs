@@ -12,21 +12,21 @@ mod native {
     crate::policy_wallet!(Harness, crate::Common);
 }
 use native::HarnessClient as Client;
-const SIMPLE: &[u8] =
+pub(super) const SIMPLE: &[u8] =
     include_bytes!("../../../target/wasm32v1-none/release/allowit_simple_policy_engine.wasm");
-const COMMON: &[u8] =
+pub(super) const COMMON: &[u8] =
     include_bytes!("../../../target/wasm32v1-none/release/allowit_common_policy_engine.wasm");
-const CUSTOM: &[u8] =
+pub(super) const CUSTOM: &[u8] =
     include_bytes!("../../../target/wasm32v1-none/release/allowit_custom_policy.wasm");
 
-struct Fixture {
-    env: Env,
-    wallet: Address,
-    owner: Address,
-    agent: Address,
-    server: Address,
-    asset: Address,
-    recipient: Address,
+pub(super) struct Fixture {
+    pub(super) env: Env,
+    pub(super) wallet: Address,
+    pub(super) owner: Address,
+    pub(super) agent: Address,
+    pub(super) server: Address,
+    pub(super) asset: Address,
+    pub(super) recipient: Address,
     akey: SigningKey,
     skey: SigningKey,
 }
@@ -36,7 +36,7 @@ fn address(env: &Env, key: &SigningKey) -> Address {
     Address::from_xdr(env, &bytes).unwrap()
 }
 impl Fixture {
-    fn new(wasm: &[u8], x402: bool) -> Self {
+    pub(super) fn new(wasm: &[u8], x402: bool) -> Self {
         let env = Env::new_with_config(soroban_sdk::testutils::EnvTestConfig {
             capture_snapshot_at_drop: false,
         });
@@ -125,10 +125,10 @@ impl Fixture {
             skey,
         }
     }
-    fn client(&self) -> Client<'_> {
+    pub(super) fn client(&self) -> Client<'_> {
         Client::new(&self.env, &self.wallet)
     }
-    fn execution(&self, amount: i128) -> ExecutionRequest {
+    pub(super) fn execution(&self, amount: i128) -> ExecutionRequest {
         let s = self.client().state();
         let b = self.client().policy_binding();
         let mut id = [0u8; 32];
@@ -153,7 +153,7 @@ impl Fixture {
             },
         }
     }
-    fn auth(&self, actors: &[&Address], method: &str, args: Vec<Val>) {
+    pub(super) fn auth(&self, actors: &[&Address], method: &str, args: Vec<Val>) {
         let invoke = MockAuthInvoke {
             contract: &self.wallet,
             fn_name: method,
@@ -179,7 +179,7 @@ impl Fixture {
         );
         self.client().execute(&e)
     }
-    fn used(&self, name: &str) -> i128 {
+    pub(super) fn used(&self, name: &str) -> i128 {
         let value = self
             .client()
             .policy_spent()
@@ -190,10 +190,10 @@ impl Fixture {
             .or_else(|_| u64::try_from_val(&self.env, &value).map(i128::from))
             .unwrap()
     }
-    fn balance(&self) -> i128 {
+    pub(super) fn balance(&self) -> i128 {
         token::Client::new(&self.env, &self.asset).balance(&self.wallet)
     }
-    fn deployment(&self) -> PolicyDeployment {
+    pub(super) fn deployment(&self) -> PolicyDeployment {
         let s = self.client().state();
         PolicyDeployment {
             deployment_version: s.deployment_version + 1,
