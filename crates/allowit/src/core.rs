@@ -1,4 +1,4 @@
-// Shared types and rules, included once per backend. `Address`, `String` and `Vec` come from the
+// Shared types and rules, included once per backend. `Address` and `Vec` come from the
 // including module. Field types keep those names so Soroban contract specs name native types.
 
 /// UTC day length in seconds.
@@ -10,7 +10,7 @@ pub use types::*;
 /// Rule variants keep the snake-case names of their functions and Grant fields.
 #[allow(non_camel_case_types)]
 mod types {
-    use super::{Address, String, Vec};
+    use super::{Address, Vec};
 
     value! {
         /// Owner-signed typed rule parameters. `None` is unset: its rule denies with `MissingGrant`.
@@ -59,11 +59,20 @@ mod types {
     }
 
     value! {
+        /// Kernel-selected native operation. Variants keep the canonical `stellar::<name>` names.
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum Operation {
+            sep41_transfer,
+            sep56_deposit,
+        }
+    }
+
+    value! {
         /// Authenticated request facts read by rules.
         #[derive(Clone, Debug, Eq, PartialEq)]
         pub struct Request {
-            /// Kernel-selected canonical operation name, such as `stellar::sep41_transfer`.
-            pub operation: String,
+            /// Kernel-selected native operation.
+            pub operation: Operation,
             /// Immutable underlying asset contract.
             pub asset: Address,
             /// Exact destination: the payment recipient or the deposit vault.
@@ -119,9 +128,9 @@ mod types {
             Expired = 9,
             /// Selected expense accounting has an unpriced liability.
             Unpriced = 10,
-            /// Negative cap or nonpositive amount.
+            /// Negative cap or nonpositive transaction amount.
             InvalidParameter = 11,
-            /// Accounting is negative or belongs to another day.
+            /// Read accounting is negative or belongs to another day.
             InvalidState = 12,
         }
     }
@@ -132,22 +141,29 @@ pub type Result<T = ()> = core::result::Result<T, Error>;
 
 /// Names used by authored policy.
 pub mod prelude {
-    pub use super::{AccountingHistory, Address, AllowitEnv, Error, Grant, Request, Result};
+    pub use super::{
+        AccountingHistory, Address, AllowitEnv, Error, Grant, Operation, Request, Result,
+    };
 }
 
-/// Common preconditions of the accounting caps.
-fn accounting(ctx: &AllowitEnv, cap: i128, unpriced: bool) -> Result {
-    let s = &ctx.state;
-    if ctx.request.amount <= 0 || cap < 0 {
+/// Check one accounting cap against only the facts it reads. `current` is false for daily
+/// values of another UTC day.
+fn accounting(cap: i128, used: i128, unpriced: bool, current: bool, exceeded: Error) -> Result<i128> {
+    if cap < 0 {
         return Err(Error::InvalidParameter);
     }
-    if s.day != ctx.request.now / DAY || s.spent < 0 || s.day_spent < 0 || s.day_total < 0 {
+    if used < 0 || !current {
         return Err(Error::InvalidState);
     }
     if unpriced {
         return Err(Error::Unpriced);
     }
-    Ok(())
+    left(cap, used, exceeded)
+}
+
+/// Daily values belong to the request's UTC day.
+fn today(ctx: &AllowitEnv) -> bool {
+    ctx.state.day == ctx.request.now / DAY
 }
 
 /// Remaining headroom of a nonnegative cap.
@@ -174,11 +190,10 @@ pub fn transaction_cap(ctx: &AllowitEnv, cap: &Option<i128>) -> Result<i128> {
 /// Bound cumulative irreversible expenses, including this operation.
 ///
 /// Returns `cap - state.spent`. Lifetime unpriced history is `Unpriced`.
-/// Accounting from another day is `InvalidState`.
 pub fn spent_cap(ctx: &AllowitEnv, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(Error::MissingGrant)?;
-    accounting(ctx, cap, ctx.state.unpriced)?;
-    left(cap, ctx.state.spent, Error::SpentCapExceeded)
+    let s = &ctx.state;
+    accounting(cap, s.spent, s.unpriced, true, Error::SpentCapExceeded)
 }
 
 /// Bound irreversible expenses on the request's UTC day, including this operation.
@@ -187,8 +202,9 @@ pub fn spent_cap(ctx: &AllowitEnv, cap: &Option<i128>) -> Result<i128> {
 /// `state.day` must equal `request.now / DAY`.
 pub fn day_spent_cap(ctx: &AllowitEnv, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(Error::MissingGrant)?;
-    accounting(ctx, cap, ctx.state.day_unpriced)?;
-    left(cap, ctx.state.day_spent, Error::DaySpentCapExceeded)
+    let s = &ctx.state;
+    let e = Error::DaySpentCapExceeded;
+    accounting(cap, s.day_spent, s.day_unpriced, today(ctx), e)
 }
 
 /// Bound gross amounts plus separate attributable gas on the request's UTC day.
@@ -198,8 +214,9 @@ pub fn day_spent_cap(ctx: &AllowitEnv, cap: &Option<i128>) -> Result<i128> {
 /// `state.day` must equal `request.now / DAY`.
 pub fn day_total_cap(ctx: &AllowitEnv, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(Error::MissingGrant)?;
-    accounting(ctx, cap, ctx.state.day_unpriced)?;
-    left(cap, ctx.state.day_total, Error::DayTotalCapExceeded)
+    let s = &ctx.state;
+    let e = Error::DayTotalCapExceeded;
+    accounting(cap, s.day_total, s.day_unpriced, today(ctx), e)
 }
 
 /// Bound successful operations, including this one and those made while this rule was skipped.

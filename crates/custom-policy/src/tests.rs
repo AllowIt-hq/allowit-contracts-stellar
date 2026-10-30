@@ -3,13 +3,21 @@
 extern crate std;
 use super::*;
 use allowit::DAY;
-use soroban_sdk::{Address, Bytes, String, testutils::Address as _};
+use soroban_sdk::{Address, Bytes, testutils::Address as _};
 use std::{format, string::String as Text, string::ToString, vec::Vec as List};
 
 /// The authored policy compiled against the offchain host backend.
 mod host_policy {
     use ::allowit::host as allowit;
     include!("../policy/policy.rs");
+}
+/// A policy that branches on the typed operation, compiled under both backends.
+mod branch_onchain {
+    include!("branch_policy.rs");
+}
+mod branch_host {
+    use ::allowit::host as allowit;
+    include!("branch_policy.rs");
 }
 
 /// Every canonical rule of one backend, in Grant field order.
@@ -28,14 +36,6 @@ macro_rules! rules {
         ]
     }};
 }
-/// Canonical rule names, which are also the Grant field names.
-fn names() -> List<Text> {
-    rules!(::allowit::soroban)
-        .iter()
-        .map(|rule| format!("{rule:?}"))
-        .collect()
-}
-
 /// Backend-neutral rule input. Addresses are indices into a shared address universe.
 #[derive(Clone)]
 struct Vector {
@@ -51,7 +51,7 @@ struct Vector {
     day_spent: i128,
     day_total: i128,
     day_unpriced: bool,
-    operation: &'static str,
+    deposit: bool,
     asset: usize,
     recipient: usize,
     amount: i128,
@@ -78,7 +78,7 @@ fn base() -> Vector {
         day_spent: 45,
         day_total: 43,
         day_unpriced: false,
-        operation: "stellar::sep41_transfer",
+        deposit: false,
         asset: ASSET,
         recipient: RECIPIENT,
         amount: 40,
@@ -91,18 +91,20 @@ fn base() -> Vector {
 #[derive(Debug, PartialEq)]
 struct Outcome {
     policy: Result<(), u32>,
+    branch: Result<(), u32>,
     rules: List<Result<Text, u32>>,
     preflight: List<Result<(), u32>>,
 }
 
 macro_rules! outcome {
-    ($lib:path, $policy:path, $ctx:expr, $index:expr) => {{
+    ($lib:path, $policy:path, $branch:path, $ctx:expr, $index:expr) => {{
         use $lib as lib;
         let ctx = $ctx;
         let g = &ctx.grant;
         let code = |e: lib::Error| e as u32;
         Outcome {
             policy: $policy(&ctx).map_err(code),
+            branch: $branch(&ctx).map_err(code),
             rules: std::vec![
                 lib::transaction_cap(&ctx, &g.transaction_cap)
                     .map(|v| v.to_string())
@@ -188,7 +190,11 @@ impl Universe {
                 day_unpriced: v.day_unpriced,
             },
             request: allowit::Request {
-                operation: String::from_str(&self.env, v.operation),
+                operation: if v.deposit {
+                    allowit::Operation::sep56_deposit
+                } else {
+                    allowit::Operation::sep41_transfer
+                },
                 asset: self.onchain[v.asset].clone(),
                 recipient: self.onchain[v.recipient].clone(),
                 amount: v.amount,
@@ -224,7 +230,11 @@ impl Universe {
                 day_unpriced: v.day_unpriced,
             },
             request: allowit::host::Request {
-                operation: v.operation.into(),
+                operation: if v.deposit {
+                    allowit::host::Operation::sep56_deposit
+                } else {
+                    allowit::host::Operation::sep41_transfer
+                },
                 asset: self.host[v.asset].clone(),
                 recipient: self.host[v.recipient].clone(),
                 amount: v.amount,
@@ -238,12 +248,14 @@ impl Universe {
         let onchain = outcome!(
             ::allowit::soroban,
             policy::execute,
+            branch_onchain::execute,
             self.onchain(v),
             |a: &Address| self.onchain.iter().position(|x| x == a).unwrap()
         );
         let host = outcome!(
             ::allowit::host,
             host_policy::execute,
+            branch_host::execute,
             self.host(v),
             |a: &Text| self.host.iter().position(|x| x == a).unwrap()
         );
@@ -287,11 +299,23 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
     checked += 1;
     // Deposits name the vault as recipient.
     let mut v = base();
-    v.operation = "stellar::sep56_deposit";
+    v.deposit = true;
     v.recipient = VAULT;
     let o = u.run(&v);
     assert_eq!(o.policy, Ok(()));
+    assert_eq!(o.branch, Ok(()));
     assert_eq!(o.rules[5], Ok("@2".to_string()));
+    checked += 1;
+    // Authored code beyond canonical calls branches on the typed operation on both backends.
+    let mut v = base();
+    v.caps[1] = None;
+    assert_eq!(u.run(&v).branch, Ok(()));
+    v.deposit = true;
+    assert_eq!(u.run(&v).branch, Err(E::MissingGrant as u32));
+    v.caps[1] = Some(44);
+    assert_eq!(u.run(&v).branch, Err(E::SpentCapExceeded as u32));
+    v.deposit = false;
+    assert_eq!(u.run(&v).branch, Ok(()));
     checked += 1;
     // One more unit than each cap denies with that rule's error.
     let mut v = base();
@@ -324,10 +348,12 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
     assert_eq!(o.rules[1], Ok("955".to_string()));
     assert_eq!(o.rules[2], Err(E::Unpriced as u32));
     assert_eq!(o.rules[3], Err(E::Unpriced as u32));
+    // Only the daily caps read the day.
     let mut v = base();
     v.day -= 1;
     let o = u.run(&v);
-    for i in 1..4 {
+    assert_eq!(o.rules[1], Ok("955".to_string()));
+    for i in 2..4 {
         assert_eq!(o.rules[i], Err(E::InvalidState as u32));
     }
     checked += 3;
@@ -367,41 +393,7 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
         assert_eq!(o.preflight, all_preflight_ok());
         checked += 1;
     }
-    assert_eq!(checked, 23);
-}
-
-/// Consecutive leading statements of the exact form `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`.
-fn standard_prefix(source: &str) -> List<&str> {
-    let signature = source.split_once("pub fn execute(").unwrap().1;
-    let body = signature.split_once('{').unwrap().1;
-    let mut prefix = List::new();
-    for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let Some(call) = line
-            .strip_prefix("allowit::")
-            .and_then(|l| l.strip_suffix(")?;"))
-        else {
-            break;
-        };
-        let Some((rule, field)) = call.split_once("(ctx, &ctx.grant.") else {
-            break;
-        };
-        if rule != field || !names().iter().any(|name| name == rule) {
-            break;
-        }
-        prefix.push(rule);
-    }
-    prefix
-}
-
-#[test]
-fn sample_standard_prefix_is_every_canonical_call_in_order() {
-    let source = include_str!("../policy/policy.rs");
-    assert_eq!(standard_prefix(source), names());
-    let custom = "use allowit::prelude::*;\npub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n    allowit::recipients(ctx, &ctx.grant.recipients)?;\n    allowit::spent_cap(ctx, &ctx.grant.day_spent_cap)?;\n    allowit::expiry(ctx, &ctx.grant.expiry)?;\n    Ok(())\n}\n";
-    // A mismatched Grant reference ends the prefix; later calls run offchain.
-    assert_eq!(standard_prefix(custom), std::vec!["recipients"]);
-    let explicit = custom.replace("allowit::Result {", "allowit::Result<()> {");
-    assert_eq!(standard_prefix(&explicit), std::vec!["recipients"]);
+    assert_eq!(checked, 24);
 }
 
 #[test]

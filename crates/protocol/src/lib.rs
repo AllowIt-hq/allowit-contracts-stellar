@@ -1,8 +1,5 @@
 #![no_std]
-use allowit::{AllowitEnv, Error};
-use soroban_sdk::{
-    Address, Bytes, BytesN, Env, Symbol, contractclient, contractevent, contracttype,
-};
+use soroban_sdk::{Address, Bytes, BytesN, Symbol, contractevent, contracttype};
 
 /// Typed owner Grant and the protected accounting that rules read.
 pub use allowit::{AccountingHistory, Grant};
@@ -90,7 +87,7 @@ pub struct Sep56DepositEvent {
 pub struct PolicyInvocation {
     /// Actual wallet Wasm SHA-256 identity. It differs from both release metadata and the authored-source digest.
     pub module_digest: BytesN<32>,
-    /// Private compiled policy entrypoint selector. Only the installed selector is admitted.
+    /// Authored policy entrypoint, `execute`. Only the installed selector is admitted.
     pub entrypoint: Symbol,
     /// SHA-256 of the admitted native argument schema. Unknown schemas reject.
     pub argument_schema_digest: BytesN<32>,
@@ -160,7 +157,7 @@ pub struct PolicyBinding {
     pub source_digest: BytesN<32>,
     /// SHA-256 of the admitted native argument schema. Unknown schemas reject.
     pub argument_schema_digest: BytesN<32>,
-    /// Private compiled policy entrypoint selector. Only the installed selector is admitted.
+    /// Authored policy entrypoint, `execute`. Only the installed selector is admitted.
     pub entrypoint: Symbol,
 }
 
@@ -181,26 +178,4 @@ pub struct TransferReceipt {
     pub nonce: u64,
     /// Owner configuration version used to authorize this transfer.
     pub deployment_version: u64,
-}
-
-/// Shared stateless checker. Each method runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)`.
-/// It returns the passing constraint or the rule error. It holds no custody or state.
-#[contractclient(name = "EngineClient")]
-pub trait EngineInterface {
-    /// Run canonical `transaction_cap`; returns the headroom left for this operation.
-    fn transaction_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
-    /// Run canonical `spent_cap`; returns the cumulative expense headroom.
-    fn spent_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
-    /// Run canonical `day_spent_cap`; returns the UTC-day expense headroom.
-    fn day_spent_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
-    /// Run canonical `day_total_cap`; returns the UTC-day gross headroom.
-    fn day_total_cap(env: Env, ctx: AllowitEnv) -> Result<i128, Error>;
-    /// Run canonical `call_cap`; returns the operations left.
-    fn call_cap(env: Env, ctx: AllowitEnv) -> Result<u64, Error>;
-    /// Run canonical `recipients`; returns the matched recipient.
-    fn recipients(env: Env, ctx: AllowitEnv) -> Result<Address, Error>;
-    /// Run canonical `tokens`; returns the matched asset.
-    fn tokens(env: Env, ctx: AllowitEnv) -> Result<Address, Error>;
-    /// Run canonical `expiry`; returns the seconds left.
-    fn expiry(env: Env, ctx: AllowitEnv) -> Result<u64, Error>;
 }

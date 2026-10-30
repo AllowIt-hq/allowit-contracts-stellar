@@ -229,6 +229,33 @@ impl Fixture {
             },
         }
     }
+    /// Execution for a module whose binding no longer resolves.
+    fn execution_unbound(&self, amount: i128, module: &BytesN<32>) -> ExecutionRequest {
+        let s = self.client().state();
+        let mut id = [0u8; 32];
+        id[24..].copy_from_slice(&(s.nonce + 1).to_be_bytes());
+        ExecutionRequest {
+            source_hash: BytesN::from_array(&self.env, &[9; 32]),
+            expense: None,
+            policy_instance: s.policy_instance,
+            operation_id: BytesN::from_array(&self.env, &id),
+            nonce: s.nonce,
+            deployment_version: s.deployment_version,
+            expires_at: self.env.ledger().timestamp() + 100,
+            invocation: PolicyInvocation {
+                module_digest: module.clone(),
+                entrypoint: Symbol::new(&self.env, "execute"),
+                argument_schema_digest: schema_digest(&self.env, ARGUMENT_SCHEMA_DESCRIPTOR),
+                arguments: Sep41TransferArgs {
+                    token: self.asset.clone(),
+                    from: self.wallet.clone(),
+                    to: self.recipient.clone(),
+                    amount,
+                }
+                .to_xdr(&self.env),
+            },
+        }
+    }
     pub(super) fn auth(&self, actors: &[&Address], method: &str, args: Vec<Val>) {
         let invoke = MockAuthInvoke {
             contract: &self.wallet,
@@ -402,7 +429,50 @@ fn common_rules_bound_transfers_and_commit_usage_once() {
 #[test]
 fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
     let f = Fixture::new(COMMON, false);
-    // Rules are typed: names outside the enum fail argument decoding.
+    // Soroban decodes vector elements when read. The packet binds a digest over the raw rules, so
+    // only the kernel's element decoding rejects them before they are stored.
+    let module = f.env.crypto().sha256(&Bytes::from_slice(&f.env, COMMON));
+    let kind = Symbol::new(&f.env, "common_policy_engine");
+    let packet = |rule: Val, grant: Option<(&str, Val)>| {
+        let rules: Val = vec![&f.env, rule].into_val(&f.env);
+        let lazy = Vec::<Rule>::try_from_val(&f.env, &rules).unwrap();
+        let digest = standard_prefix_digest(&f.env, &kind, &module.to_bytes(), &f.asset, &lazy);
+        let mut packet = f.packet(&f.deployment());
+        packet.set(Symbol::new(&f.env, "rules"), rules);
+        packet.set(
+            Symbol::new(&f.env, "source_digest"),
+            digest.into_val(&f.env),
+        );
+        if let Some((name, value)) = grant {
+            let raw = packet.get(Symbol::new(&f.env, "grant")).unwrap();
+            let mut fields = Map::<Symbol, Val>::try_from_val(&f.env, &raw).unwrap();
+            fields.set(Symbol::new(&f.env, name), value);
+            packet.set(Symbol::new(&f.env, "grant"), fields.into_val(&f.env));
+        }
+        packet
+    };
+    let deploy = |packet: Map<Symbol, Val>| {
+        let args: Vec<Val> = (packet,).into_val(&f.env);
+        f.auth(&[&f.owner], "deploy_policy", args.clone());
+        let deploy_policy = Symbol::new(&f.env, "deploy_policy");
+        let result = f
+            .env
+            .try_invoke_contract::<(), Error>(&f.wallet, &deploy_policy, args);
+        assert_eq!(f.client().state().deployment_version, 0);
+        result
+    };
+    // A malformed rule element or allowlist element is InvalidGrant.
+    let junk: Val = 5u32.into_val(&f.env);
+    let recipient: Val = vec![&f.env, Symbol::new(&f.env, "recipients")].into_val(&f.env);
+    let junk_list: Val = vec![&f.env, junk].into_val(&f.env);
+    for raw in [
+        packet(junk, None),
+        packet(recipient, Some(("recipients", junk_list))),
+        packet(recipient, Some(("tokens", junk_list))),
+    ] {
+        assert_eq!(deploy(raw), Err(Ok(Error::InvalidGrant)));
+    }
+    // A name outside the enum aborts in the host's symbol lookup.
     for name in [
         "unknown",
         "daily_cap",
@@ -417,14 +487,8 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
         "state_remove",
         "fail",
     ] {
-        let mut packet = f.packet(&f.deployment());
         let rule: Val = vec![&f.env, Symbol::new(&f.env, name)].into_val(&f.env);
-        packet.set(
-            Symbol::new(&f.env, "rules"),
-            vec![&f.env, rule].into_val(&f.env),
-        );
-        assert!(!f.deploy_raw(packet));
-        assert_eq!(f.client().state().deployment_version, 0);
+        assert!(deploy(packet(rule, None)).is_err());
     }
     for field in 0..4 {
         let mut p = f.deployment();
@@ -447,6 +511,9 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
     assert_eq!(f.client().state().grant, Grant::default());
     // Every selected rule is skipped by the standard preflight when its field is unset.
     assert_eq!(f.transfer(500).amount, 500);
+    // The same raw path stores a known rule.
+    assert!(f.deploy_raw(packet(recipient, None)));
+    assert_eq!(f.client().state().rules, vec![&f.env, Rule::recipients]);
 }
 #[test]
 fn custom_policy_denies_an_unset_grant_field_that_common_preflight_skips() {
@@ -966,6 +1033,23 @@ fn upgraded_legacy_layout_keeps_owner_recovery_and_accepts_a_typed_owner_packet(
         x402_enabled: false,
         wasm_hash: None,
     };
+    // Struct decoding would ignore an extra history key. Only canonical history carries over.
+    f.env.as_contract(&f.wallet, || {
+        let encoded: Val = legacy.clone().into_val(&f.env);
+        let mut raw = Map::<Symbol, Val>::try_from_val(&f.env, &encoded).unwrap();
+        let key = Symbol::new(&f.env, "history");
+        let mut history =
+            Map::<Symbol, Val>::try_from_val(&f.env, &raw.get(key.clone()).unwrap()).unwrap();
+        history.set(Symbol::new(&f.env, "per_transfer"), 5i128.into_val(&f.env));
+        raw.set(key, history.into_val(&f.env));
+        f.env.storage().instance().set(&STATE_KEY, &raw);
+    });
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+    assert_eq!(
+        f.client().try_deploy_policy(&p),
+        Err(Ok(Error::InvalidState))
+    );
+    install(&legacy);
     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
     f.client().deploy_policy(&p);
     let migrated = f.client().state();
@@ -1019,6 +1103,82 @@ impl Constructor {
             .with_current_contract(BytesN::from_array(&env, &[0; 32]))
             .deploy_contract(soroban_sdk::ContractExecutable::Wasm(wasm), (config,))
     }
+    /// Deploy with an exact raw packet, for edits the typed config cannot express.
+    pub fn deploy_raw(env: Env, wasm: BytesN<32>, config: Map<Symbol, Val>) -> Address {
+        env.deployer()
+            .with_current_contract(BytesN::from_array(&env, &[0; 32]))
+            .deploy_contract(soroban_sdk::ContractExecutable::Wasm(wasm), (config,))
+    }
+}
+#[test]
+fn constructor_owner_signs_the_canonical_packet_so_absent_or_extra_keys_reject() {
+    let f = Fixture::new(COMMON, false);
+    let s = f.client().state();
+    let config = PolicyConfig {
+        owner: s.owner,
+        agent: s.agent,
+        server: s.server,
+        asset: s.asset,
+        policy_instance: s.policy_instance,
+        source_digest: s.source_digest,
+        rules: s.rules,
+        grant: s.grant,
+        x402_enabled: false,
+    };
+    let wasm = f.env.deployer().upload_contract_wasm(COMMON);
+    let factory = f.env.register(Constructor, ());
+    let salt = BytesN::from_array(&f.env, &[0; 32]);
+    let wallet = f
+        .env
+        .deployer()
+        .with_address(factory.clone(), salt)
+        .deployed_address();
+    let key = |name: &str| Symbol::new(&f.env, name);
+    type Fields = Map<Symbol, Val>;
+    let raw = |edit: &dyn Fn(&mut Fields, &mut Fields)| {
+        let encoded: Val = config.clone().into_val(&f.env);
+        let mut packet = Map::<Symbol, Val>::try_from_val(&f.env, &encoded).unwrap();
+        let mut grant =
+            Map::<Symbol, Val>::try_from_val(&f.env, &packet.get(key("grant")).unwrap()).unwrap();
+        edit(&mut packet, &mut grant);
+        packet.set(key("grant"), grant.into_val(&f.env));
+        packet
+    };
+    // The owner authorizes exactly the raw packet sent.
+    let deploy = |packet: Map<Symbol, Val>| {
+        let args: Vec<Val> = (packet.clone(),).into_val(&f.env);
+        f.env.mock_auths(&[MockAuth {
+            address: &config.owner,
+            invoke: &MockAuthInvoke {
+                contract: &wallet,
+                fn_name: "__constructor",
+                args,
+                sub_invokes: &[],
+            },
+        }]);
+        ConstructorClient::new(&f.env, &factory)
+            .try_deploy_raw(&wasm, &packet)
+            .is_ok()
+    };
+    let legacy = |grant: &mut Map<Symbol, Val>| {
+        grant.set(key("per_transfer"), 5i128.into_val(&f.env));
+    };
+    for packet in [
+        // A legacy name beside an absent typed field would decode as an unset cap.
+        raw(&|_, grant| {
+            grant.remove(key("transaction_cap"));
+            legacy(grant);
+        }),
+        raw(&|_, grant| legacy(grant)),
+        raw(&|_, grant| {
+            grant.remove(key("expiry"));
+        }),
+        raw(&|packet, _| packet.set(key("per_transfer"), 5i128.into_val(&f.env))),
+    ] {
+        assert!(!deploy(packet));
+    }
+    assert!(deploy(raw(&|_, _| {})));
+    assert_eq!(Client::new(&f.env, &wallet).state().grant, config.grant);
 }
 #[test]
 fn ordinary_compiled_deployment_requires_owner_authorization() {
@@ -1246,6 +1406,92 @@ fn x402_binds_the_transfer_schema_and_its_canonical_arguments() {
             assert_eq!(f.balance(), 1_000);
         }
     }
+}
+
+#[test]
+fn x402_rejects_a_canonical_deposit_authorization_for_a_token_transfer() {
+    for wasm in [SIMPLE, COMMON] {
+        let f = Fixture::new(wasm, true);
+        let payload = BytesN::from_array(&f.env, &[8; 32]);
+        let (mut e, context) = x402_request(&f, &f.recipient, 10);
+        // A raw transfer to the vault would mint no shares and charge no principal.
+        e.invocation.argument_schema_digest =
+            schema_digest(&f.env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR);
+        e.invocation.arguments = Sep56DepositArgs {
+            vault: f.recipient.clone(),
+            assets: 10,
+            receiver: f.wallet.clone(),
+            from: f.wallet.clone(),
+            operator: f.wallet.clone(),
+            min_shares: 10,
+        }
+        .to_xdr(&f.env);
+        e.expense = Some(
+            ExpenseBounds {
+                asset: f.asset.clone(),
+                decimals: 7,
+                gas_units: 0,
+                conversion_units: 0,
+                spent_units: 0,
+                max_fee_stroops: 0,
+                observed_ledger: 1,
+                day: f.env.ledger().timestamp() / 86_400,
+            }
+            .to_xdr(&f.env),
+        );
+        assert_eq!(
+            f.env.try_invoke_contract_check_auth::<Error>(
+                &f.wallet,
+                &payload,
+                f.authorization(e, &payload).into_val(&f.env),
+                &vec![&f.env, context],
+            ),
+            Err(Ok(Error::UnsupportedOperation))
+        );
+        assert_eq!(f.client().state().nonce, 0);
+        assert_eq!(f.history(), AccountingHistory::default());
+    }
+}
+
+#[test]
+fn upgraded_standard_wallet_must_rebind_its_prefix_to_the_new_module() {
+    let f = Fixture::new(COMMON, false);
+    let mut bytes = Bytes::from_slice(&f.env, COMMON);
+    bytes.append(&Bytes::from_slice(&f.env, &[0, 2, 1, b'x']));
+    let hash = f.env.deployer().upload_contract_wasm(bytes);
+    // The upgrade packet keeps the digest bound to the old module.
+    let mut p = f.deployment();
+    p.wasm_hash = Some(hash.clone());
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&p);
+    assert_eq!(
+        f.client().try_policy_binding(),
+        Err(Ok(Error::InvalidState))
+    );
+    let e = f.execution_unbound(10, &hash);
+    f.auth(
+        &[&f.agent, &f.server],
+        "execute",
+        (e.clone(),).into_val(&f.env),
+    );
+    assert_eq!(f.client().try_execute(&e), Err(Ok(Error::InvalidState)));
+    assert_eq!(f.history(), AccountingHistory::default());
+    let mut fixed = f.deployment();
+    fixed.source_digest = standard_prefix_digest(
+        &f.env,
+        &Symbol::new(&f.env, "common_policy_engine"),
+        &hash,
+        &f.asset,
+        &fixed.rules,
+    );
+    f.auth(
+        &[&f.owner],
+        "deploy_policy",
+        (fixed.clone(),).into_val(&f.env),
+    );
+    f.client().deploy_policy(&fixed);
+    assert_eq!(f.client().policy_binding().module_digest, hash);
+    assert_eq!(f.transfer(10).amount, 10);
 }
 
 #[test]

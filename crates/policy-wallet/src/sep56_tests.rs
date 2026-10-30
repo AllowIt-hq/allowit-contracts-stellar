@@ -143,6 +143,9 @@ fn deposit_rejects_wrong_wallet_parties_nonpositive_bounds_and_noncanonical_byte
         e.invocation.arguments = args.to_xdr(&f.env);
         assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
     }
+    // The wallet asset is never its own vault.
+    let e = request(&f, &f.asset, 50, 50);
+    assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
     for (assets, shares) in [(0, 1), (-1, 1), (1, 0), (1, -1)] {
         assert_eq!(
             execute(&f, &request(&f, &vault, assets, shares)),
@@ -181,6 +184,23 @@ fn deposit_wrong_asset_under_mint_lied_credit_and_changed_asset_roll_back_everyt
     let spent = f.history();
     assert_eq!(execute(&f, &e), Err(Ok(Error::UnsupportedAsset)));
     assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
+}
+
+#[test]
+fn deposit_under_mint_within_the_valuation_bound_still_requires_min_shares() {
+    let f = Fixture::new(COMMON, false);
+    let vault = vault(&f, 1, None);
+    allow_recipient(&f, &vault);
+    // One unit of conversion cost admits the vault's valuation of 49 shares; min_shares does not.
+    let mut e = request(&f, &vault, 50, 50);
+    set_cost(&f, &mut e, 0, 1);
+    let before = f.client().state();
+    let spent = f.history();
+    assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
+    assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
+    let mut e = request(&f, &vault, 50, 49);
+    set_cost(&f, &mut e, 0, 1);
+    assert_eq!(execute(&f, &e).unwrap().unwrap().amount, 50);
 }
 
 #[test]
@@ -232,7 +252,7 @@ fn deposit_vault_upgrade_cannot_hide_inconsistent_effects_and_rolls_back_all_usa
 }
 
 #[test]
-fn rule_input_carries_qualified_operation_names_and_the_vault_as_recipient() {
+fn rule_input_carries_typed_operations_and_the_vault_as_recipient() {
     let f = Fixture::new(COMMON, false);
     let vault = vault(&f, 0, None);
     let state = f.client().state();
@@ -252,15 +272,12 @@ fn rule_input_carries_qualified_operation_names_and_the_vault_as_recipient() {
     let ctx = rule_input(
         &state,
         &history,
-        deposit.name(&f.env),
+        deposit.kind(),
         &deposit.transfer(&state.asset),
         86_410,
         86_500,
     );
-    assert_eq!(
-        ctx.request.operation,
-        String::from_str(&f.env, "stellar::sep56_deposit")
-    );
+    assert_eq!(ctx.request.operation, Operation::sep56_deposit);
     assert_eq!(ctx.request.recipient, vault);
     assert_eq!(ctx.request.asset, f.asset);
     assert_eq!(ctx.request.amount, 5);
@@ -272,10 +289,7 @@ fn rule_input_carries_qualified_operation_names_and_the_vault_as_recipient() {
         to: f.recipient.clone(),
         amount: 1,
     });
-    assert_eq!(
-        transfer.name(&f.env),
-        String::from_str(&f.env, "stellar::sep41_transfer")
-    );
+    assert_eq!(transfer.kind(), Operation::sep41_transfer);
 }
 
 #[test]

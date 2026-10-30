@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check the custom policy's argument-schema binding and report its source digest.
 
-The contract compiles policy/policy.rs verbatim. build.rs derives SOURCE_HASH from the same bytes."""
+The contract compiles policy/policy.rs verbatim as a module. build.rs derives SOURCE_HASH from the same
+bytes. The host portability test includes the file, which rejects inner attributes and doc comments."""
 import ast
 import hashlib
 import re
@@ -25,8 +26,10 @@ source = (ROOT / "crates/custom-policy/policy/policy.rs").read_bytes()
 contract = (ROOT / "crates/custom-policy/src/lib.rs").read_text()
 if binding(contract, "ARGUMENT_SCHEMA_HASH") != hashlib.sha256(SCHEMA).digest():
     raise SystemExit("Custom policy argument schema differs")
-if 'include!("../policy/policy.rs")' not in contract or "/source_hash.rs" not in contract:
+if '#[path = "../policy/policy.rs"]\nmod policy;' not in contract or "/source_hash.rs" not in contract:
     raise SystemExit("Custom policy must compile and hash its authored source verbatim")
+if re.search(rb"^\s*(//!|/\*!|#!\[)", source, re.M):
+    raise SystemExit("Policy source must not use inner attributes or inner doc comments")
 if SCHEMA.decode() not in (ROOT / "crates/protocol/src/lib.rs").read_text():
     raise SystemExit("Native argument schema differs from the custom policy binding")
 print("PASS custom policy source " + hashlib.sha256(source).hexdigest())

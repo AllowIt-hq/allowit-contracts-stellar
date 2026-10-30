@@ -30,7 +30,7 @@ fn context() -> AllowitEnv {
             ..Default::default()
         },
         request: Request {
-            operation: "stellar::sep41_transfer".into(),
+            operation: Operation::sep41_transfer,
             asset,
             recipient,
             amount: 10,

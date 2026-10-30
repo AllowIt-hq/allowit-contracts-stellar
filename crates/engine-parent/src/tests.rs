@@ -1,6 +1,6 @@
 use super::*;
-use allowit::{AccountingHistory, AllowitEnv, Grant, Request};
-use allowit_wallet_protocol::EngineClient;
+use allowit::{AccountingHistory, AllowitEnv, Grant, Operation, Request};
+use allowit_wallet_engine::EngineClient;
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
@@ -65,7 +65,7 @@ fn context(env: &Env) -> AllowitEnv {
             ..Default::default()
         },
         request: Request {
-            operation: String::from_str(env, "stellar::sep41_transfer"),
+            operation: Operation::sep41_transfer,
             asset: Address::generate(env),
             recipient: Address::generate(env),
             amount: 1,

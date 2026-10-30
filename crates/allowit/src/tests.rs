@@ -1,7 +1,7 @@
 extern crate std;
 use super::*;
 use soroban_sdk::{
-    Env, IntoVal, String, Symbol, TryFromVal, Val, testutils::Address as _, vec, xdr::ToXdr,
+    Env, IntoVal, Symbol, TryFromVal, Val, testutils::Address as _, vec, xdr::ToXdr,
 };
 
 /// Every canonical rule in Grant field order.
@@ -53,7 +53,7 @@ fn fixture(env: &Env) -> AllowitEnv {
             ..Default::default()
         },
         request: Request {
-            operation: String::from_str(env, "stellar::sep41_transfer"),
+            operation: Operation::sep41_transfer,
             asset,
             recipient,
             amount: 40,
@@ -111,10 +111,7 @@ fn unset_grant_fields_deny_in_rules_and_skip_only_in_preflight() {
     }
     // A set field is checked by preflight exactly as by the rule.
     ctx.grant.spent_cap = Some(1000);
-    assert_eq!(
-        preflight(&ctx, Rule::spent_cap),
-        Err(Error::InvalidParameter)
-    );
+    assert_eq!(preflight(&ctx, Rule::spent_cap), Err(Error::Unpriced));
     ctx.grant.expiry = Some(u64::MAX);
     assert_eq!(preflight(&ctx, Rule::expiry), Err(Error::Expired));
 }
@@ -157,42 +154,42 @@ fn boundary_equality_passes_with_zero_headroom_and_one_more_denies() {
 }
 
 #[test]
-fn accounting_caps_reject_invalid_inputs_unpriced_and_other_days() {
+fn accounting_caps_check_only_the_facts_they_read() {
     let env = Env::default();
     let base = fixture(&env);
     type Cap = fn(&AllowitEnv, &Option<i128>) -> Result<i128>;
-    let caps: [(Cap, bool); 3] = [
-        (spent_cap, false),
-        (day_spent_cap, true),
-        (day_total_cap, true),
+    let caps: [Cap; 3] = [spent_cap, day_spent_cap, day_total_cap];
+    let passing = [955, 955, 957];
+    let edits: [fn(&mut AllowitEnv); 7] = [
+        |c| c.request.amount = 0,
+        |c| c.state.day += 1,
+        |c| c.state.spent = -1,
+        |c| c.state.day_spent = -1,
+        |c| c.state.day_total = -1,
+        |c| c.state.unpriced = true,
+        |c| c.state.day_unpriced = true,
     ];
-    for (f, daily) in caps {
+    use Error::{InvalidState as S, Unpriced as U};
+    // Expected result per edit, for spent_cap, day_spent_cap and day_total_cap. `None` passes.
+    let expected: [[Option<Error>; 3]; 7] = [
+        [None, None, None],
+        [None, Some(S), Some(S)],
+        [Some(S), None, None],
+        [None, Some(S), None],
+        [None, None, Some(S)],
+        [Some(U), None, None],
+        [None, Some(U), Some(U)],
+    ];
+    for (edit, expected) in edits.iter().zip(expected) {
         let mut ctx = base.clone();
-        assert_eq!(f(&ctx, &Some(-1)), Err(Error::InvalidParameter));
-        ctx.request.amount = 0;
-        assert_eq!(f(&ctx, &Some(1000)), Err(Error::InvalidParameter));
-        let mut ctx = base.clone();
-        ctx.state.day += 1;
-        assert_eq!(f(&ctx, &Some(1000)), Err(Error::InvalidState));
-        let mut ctx = base.clone();
-        ctx.state.day_total = -1;
-        assert_eq!(f(&ctx, &Some(1000)), Err(Error::InvalidState));
-        let mut ctx = base.clone();
-        ctx.state.day_unpriced = true;
-        assert_eq!(
-            f(&ctx, &Some(1000)),
-            if daily { Err(Error::Unpriced) } else { Ok(955) }
-        );
-        let mut ctx = base.clone();
-        ctx.state.unpriced = true;
-        assert_eq!(
-            f(&ctx, &Some(1000)),
-            if daily {
-                Ok(f(&base, &Some(1000)).unwrap())
-            } else {
-                Err(Error::Unpriced)
-            }
-        );
+        edit(&mut ctx);
+        for i in 0..3 {
+            let result = caps[i](&ctx, &Some(1000));
+            assert_eq!(result, expected[i].map_or(Ok(passing[i]), Err));
+        }
+    }
+    for cap in caps {
+        assert_eq!(cap(&base, &Some(-1)), Err(Error::InvalidParameter));
     }
     let mut ctx = base.clone();
     assert_eq!(
@@ -204,6 +201,56 @@ fn accounting_caps_reject_invalid_inputs_unpriced_and_other_days() {
         transaction_cap(&ctx, &Some(100)),
         Err(Error::InvalidParameter)
     );
+}
+
+#[test]
+fn preflight_enforces_every_set_field_with_its_rule_error() {
+    let env = Env::default();
+    let other = Address::generate(&env);
+    for rule in ALL {
+        let mut ctx = fixture(&env);
+        let now = ctx.request.now;
+        let g = &mut ctx.grant;
+        let expected = match rule {
+            Rule::transaction_cap => {
+                g.transaction_cap = Some(39);
+                Error::TransactionCapExceeded
+            }
+            Rule::spent_cap => {
+                g.spent_cap = Some(44);
+                Error::SpentCapExceeded
+            }
+            Rule::day_spent_cap => {
+                g.day_spent_cap = Some(44);
+                Error::DaySpentCapExceeded
+            }
+            Rule::day_total_cap => {
+                g.day_total_cap = Some(42);
+                Error::DayTotalCapExceeded
+            }
+            Rule::call_cap => {
+                g.call_cap = Some(0);
+                Error::CallCapExceeded
+            }
+            Rule::recipients => {
+                g.recipients = Some(vec![&env, other.clone()]);
+                Error::RecipientNotAllowed
+            }
+            Rule::tokens => {
+                g.tokens = Some(vec![&env, other.clone()]);
+                Error::TokenNotAllowed
+            }
+            Rule::expiry => {
+                g.expiry = Some(now);
+                Error::Expired
+            }
+        };
+        assert_eq!(preflight(&ctx, rule), Err(expected));
+        // Only the edited rule denies.
+        for other in ALL.into_iter().filter(|r| *r != rule) {
+            assert_eq!(preflight(&ctx, other), Ok(()));
+        }
+    }
 }
 
 #[test]

@@ -4,10 +4,9 @@ use allowit::{AllowitEnv, Rule};
 use allowit_policy_wallet::{Error, Policy};
 use soroban_sdk::{BytesN, Env, Vec};
 
-/// Authored policy source, compiled unchanged. The offchain server compiles the same file.
-mod policy {
-    include!("../policy/policy.rs");
-}
+/// Authored policy source, compiled unchanged as a module. The offchain server compiles the same file.
+#[path = "../policy/policy.rs"]
+mod policy;
 
 /// SHA-256 of the exact `policy/policy.rs` bytes, computed by `build.rs`.
 pub const SOURCE_HASH: [u8; 32] = include!(concat!(env!("OUT_DIR"), "/source_hash.rs"));

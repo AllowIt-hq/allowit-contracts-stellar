@@ -16,5 +16,4 @@ soroban-sdk.workspace = true
 allowit = { path = "../allowit" }
 
 [dev-dependencies]
-allowit-wallet-protocol = { path = "../protocol" }
 soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -1,6 +1,6 @@
 #![no_std]
 //! Owner-controlled custody mixins shared by fixed and bespoke policy wallets.
-use allowit::{AllowitEnv, Request, Rule};
+use allowit::{AllowitEnv, Operation, Request, Rule};
 use allowit_wallet_protocol::{
     ARGUMENT_SCHEMA_DESCRIPTOR, AccountingHistory, ExecutionRequest, ExpenseBounds, Grant,
     MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, PolicyBinding, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR,
@@ -146,11 +146,7 @@ fn load(env: &Env, initial: Option<State>) -> Result<State, Error> {
     if let Some(state) = initial {
         store(env, &state);
     }
-    let raw: Val = env
-        .storage()
-        .instance()
-        .get(&STATE_KEY)
-        .ok_or(Error::InvalidState)?;
+    let raw = stored(env)?;
     let state = State::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
     // Struct decoding ignores extra keys and reads absent Option keys as None. Only the exact
     // canonical encoding of this layout is accepted, including nested Grant and history.
@@ -168,39 +164,50 @@ fn extend(env: &Env) {
 fn store(env: &Env, state: &State) {
     env.storage().instance().set(&STATE_KEY, state);
 }
-/// Owner entrypoints read only the stored fields they keep. A stored Grant or rule list that no
-/// longer decodes never blocks recovery, passthrough or its replacement by an owner packet.
-/// Callers require the returned owner's authorization.
-fn owner_fields(env: &Env) -> Result<(Map<Symbol, Val>, Address), Error> {
-    let raw: Val = env
-        .storage()
-        .instance()
-        .get(&STATE_KEY)
-        .ok_or(Error::InvalidState)?;
-    let fields = Map::<Symbol, Val>::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
-    let owner: Address = field(env, &fields, "owner")?;
-    let version: u32 = field(env, &fields, "contract_version")?;
-    // A later layout may change the meaning of kept fields. Version 1 differs only in Grant and rules.
-    if version == 0 || version > CONTRACT_VERSION {
+/// Stored fields that owner entrypoints keep. Struct decoding ignores the other State keys, so
+/// a stored Grant or rule list that no longer decodes never blocks recovery, passthrough or its
+/// replacement by an owner packet. Version 1 differs from version 2 only in Grant and rules.
+/// Protected history is read separately, only where it is carried over.
+#[contracttype]
+struct KeptState {
+    contract_version: u32,
+    owner: Address,
+    asset: Address,
+    policy_instance: BytesN<32>,
+    token: String,
+    deployment_version: u64,
+    nonce: u64,
+    paused: bool,
+}
+/// Read the kept fields. Callers require the owner's authorization.
+fn kept(env: &Env) -> Result<KeptState, Error> {
+    let kept = KeptState::try_from_val(env, &stored(env)?).map_err(|_| Error::InvalidState)?;
+    // A later layout may change the meaning of kept fields.
+    if kept.contract_version == 0 || kept.contract_version > CONTRACT_VERSION {
         return Err(Error::InvalidState);
     }
     extend(env);
-    Ok((fields, owner))
+    Ok(kept)
 }
-/// Decode one kept field. Only its exact canonical encoding is accepted.
-fn field<T: TryFromVal<Env, Val> + IntoVal<Env, Val> + Clone>(
-    env: &Env,
-    fields: &Map<Symbol, Val>,
-    name: &str,
-) -> Result<T, Error> {
+/// Protected history carried into a new State. Struct decoding ignores extra keys, so only its
+/// exact canonical encoding is accepted.
+fn kept_history(env: &Env) -> Result<AccountingHistory, Error> {
+    let fields =
+        Map::<Symbol, Val>::try_from_val(env, &stored(env)?).map_err(|_| Error::InvalidState)?;
     let raw = fields
-        .get(Symbol::new(env, name))
+        .get(Symbol::new(env, "history"))
         .ok_or(Error::InvalidState)?;
-    let value = T::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
-    if value.clone().into_val(env).to_xdr(env) != raw.to_xdr(env) {
+    let history = AccountingHistory::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
+    if history.clone().to_xdr(env) != raw.to_xdr(env) {
         return Err(Error::InvalidState);
     }
-    Ok(value)
+    Ok(history)
+}
+fn stored(env: &Env) -> Result<Val, Error> {
+    env.storage()
+        .instance()
+        .get(&STATE_KEY)
+        .ok_or(Error::InvalidState)
 }
 fn public_key(env: &Env, address: &Address) -> Result<BytesN<32>, Error> {
     let encoded = address.to_xdr(env);
@@ -272,6 +279,11 @@ fn validate<P: Policy>(env: &Env, config: &PolicyConfig) -> Result<(), Error> {
         return Err(Error::InvalidState);
     }
     config.grant.validate().map_err(|_| Error::InvalidGrant)?;
+    decoded(&config.rules)?;
+    let lists = [&config.grant.recipients, &config.grant.tokens];
+    for list in lists.into_iter().flatten() {
+        decoded(list)?;
+    }
     P::validate(env, &config.rules)?;
     if P::STANDARD_PREFIX
         && config.source_digest != checked_prefix::<P>(env, &config.asset, &config.rules)?
@@ -281,6 +293,14 @@ fn validate<P: Policy>(env: &Env, config: &PolicyConfig) -> Result<(), Error> {
     if config.x402_enabled {
         public_key(env, &config.agent)?;
         public_key(env, &config.server)?;
+    }
+    Ok(())
+}
+/// Soroban decodes vector elements when read. Owner configuration decodes each one before storing
+/// it, so an element that later fails to decode cannot be stored. An unknown Rule symbol aborts.
+fn decoded<T: IntoVal<Env, Val> + TryFromVal<Env, Val>>(list: &Vec<T>) -> Result<(), Error> {
+    for i in 0..list.len() {
+        list.try_get(i).map_err(|_| Error::InvalidGrant)?;
     }
     Ok(())
 }
@@ -315,7 +335,7 @@ fn binding_for<P: Policy>(
         module_digest,
         source_digest: state.source_digest.clone(),
         argument_schema_digest: digest,
-        entrypoint: Symbol::new(env, "_execute"),
+        entrypoint: Symbol::new(env, "execute"),
     })
 }
 fn binding<P: Policy>(env: &Env, state: &State) -> Result<PolicyBinding, Error> {
@@ -339,14 +359,11 @@ impl NativeOperation {
             },
         }
     }
-    fn name(&self, env: &Env) -> String {
-        String::from_str(
-            env,
-            match self {
-                Self::Transfer(_) => "stellar::sep41_transfer",
-                Self::Deposit(_) => "stellar::sep56_deposit",
-            },
-        )
+    fn kind(&self) -> Operation {
+        match self {
+            Self::Transfer(_) => Operation::sep41_transfer,
+            Self::Deposit(_) => Operation::sep56_deposit,
+        }
     }
 }
 fn decode_operation(
@@ -670,7 +687,7 @@ fn next_history(
 fn rule_input(
     state: &State,
     history: &AccountingHistory,
-    operation: String,
+    operation: Operation,
     args: &Sep41TransferArgs,
     now: u64,
     expires_at: u64,
@@ -712,7 +729,6 @@ fn admit<P: Policy>(
         return Err(Error::InvalidInvocation);
     }
     let args = operation.transfer(&state.asset);
-    let operation_name = operation.name(env);
     let replay_key = Key::Operation(execution.operation_id.clone());
     if env.storage().persistent().has(&replay_key) {
         return Err(Error::Replay);
@@ -742,7 +758,7 @@ fn admit<P: Policy>(
     let ctx = rule_input(
         &state,
         &history,
-        operation_name,
+        operation.kind(),
         &args,
         now,
         execution.expires_at,
@@ -862,20 +878,25 @@ pub fn execute<P: Policy>(
     Ok(receipt)
 }
 pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Result<(), Error> {
-    let (fields, owner) = owner_fields(env)?;
+    let kept = kept(env)?;
     // The current and any new owner sign the canonical encoding of the decoded packet.
     let signed: Vec<Val> = (deployment.clone(),).into_val(env);
-    owner.require_auth_for_args(signed.clone());
-    let version: u64 = field(env, &fields, "deployment_version")?;
-    if version.checked_add(1).ok_or(Error::Overflow)? != deployment.deployment_version {
+    kept.owner.require_auth_for_args(signed.clone());
+    if kept
+        .deployment_version
+        .checked_add(1)
+        .ok_or(Error::Overflow)?
+        != deployment.deployment_version
+    {
         return Err(Error::StaleRequest);
     }
+    let history = kept_history(env)?;
     let config = PolicyConfig {
         owner: deployment.owner,
         agent: deployment.agent,
         server: deployment.server,
-        asset: field(env, &fields, "asset")?,
-        policy_instance: field(env, &fields, "policy_instance")?,
+        asset: kept.asset,
+        policy_instance: kept.policy_instance,
         source_digest: deployment.source_digest,
         rules: deployment.rules,
         grant: deployment.grant,
@@ -889,14 +910,14 @@ pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Resu
     } else {
         validate::<UpgradeConfig>(env, &config)?;
     }
-    if config.owner != owner {
+    if config.owner != kept.owner {
         config.owner.require_auth_for_args(signed);
     }
     // Kept fields carry over. The packet replaces the rest and writes the current layout.
     store(
         env,
         &State {
-            history: field(env, &fields, "history")?,
+            history,
             contract_version: CONTRACT_VERSION,
             owner: config.owner,
             agent: config.agent,
@@ -907,10 +928,10 @@ pub fn deploy_policy<P: Policy>(env: &Env, deployment: PolicyDeployment) -> Resu
             rules: config.rules,
             grant: config.grant,
             x402_enabled: config.x402_enabled,
-            token: field(env, &fields, "token")?,
+            token: kept.token,
             deployment_version: deployment.deployment_version,
-            nonce: field(env, &fields, "nonce")?,
-            paused: field(env, &fields, "paused")?,
+            nonce: kept.nonce,
+            paused: kept.paused,
         },
     );
     if let Some(hash) = deployment.wasm_hash {
@@ -946,19 +967,17 @@ pub fn set_pause(env: &Env, paused: bool, deployment_version: u64) -> Result<(),
     Ok(())
 }
 pub fn recover(env: &Env, recipient: Address, amount: i128) -> Result<(), Error> {
-    let (fields, owner) = owner_fields(env)?;
-    owner.require_auth();
+    let kept = kept(env)?;
+    kept.owner.require_auth();
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    let asset: Address = field(env, &fields, "asset")?;
-    let token: String = field(env, &fields, "token")?;
     if recipient == env.current_contract_address()
-        || issuer_destination(env, &token, &asset, &recipient)?
+        || issuer_destination(env, &kept.token, &kept.asset, &recipient)?
     {
         return Err(Error::InvalidRecipient);
     }
-    move_tokens(env, &asset, &recipient, amount)
+    move_tokens(env, &kept.asset, &recipient, amount)
 }
 /// Owner-signed passthrough. Native authorization binds target, arguments and every nested scope.
 pub fn invoke(
@@ -968,7 +987,7 @@ pub fn invoke(
     args: Vec<Val>,
     auth: Vec<InvokerContractAuthEntry>,
 ) -> Result<Val, Error> {
-    owner_fields(env)?.1.require_auth();
+    kept(env)?.owner.require_auth();
     env.authorize_as_current_contract(auth);
     Ok(env.invoke_contract(&contract, &function, args))
 }
@@ -1055,7 +1074,7 @@ impl Policy for Common {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
-    /// Any ordered list of typed rules. Unknown names fail argument decoding.
+    /// Any ordered list of typed rules. The kernel decodes each element before storing it.
     fn validate(_env: &Env, _rules: &Vec<Rule>) -> Result<(), Error> {
         Ok(())
     }

@@ -1,6 +1,6 @@
 use super::*;
-use allowit::{AccountingHistory, Grant, Request};
-use soroban_sdk::{String, testutils::Address as _, vec};
+use allowit::{AccountingHistory, Grant, Operation, Request};
+use soroban_sdk::{testutils::Address as _, vec};
 fn fixture(env: &Env) -> AllowitEnv {
     let asset = Address::generate(env);
     let recipient = Address::generate(env);
@@ -23,7 +23,7 @@ fn fixture(env: &Env) -> AllowitEnv {
             ..Default::default()
         },
         request: Request {
-            operation: String::from_str(env, "stellar::sep41_transfer"),
+            operation: Operation::sep41_transfer,
             asset,
             recipient,
             amount: 40,
@@ -55,7 +55,7 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
         include_bytes!("../../../target/wasm32v1-none/release/allowit_wallet_engine.wasm");
     let env = Env::default();
     let id = env.register(WASM, ());
-    let client = allowit_wallet_protocol::EngineClient::new(&env, &id);
+    let client = EngineClient::new(&env, &id);
     let mut ctx = fixture(&env);
     assert_eq!(client.transaction_cap(&ctx), 60);
     assert_eq!(client.spent_cap(&ctx), 0);

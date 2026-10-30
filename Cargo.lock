@@ -54,7 +54,7 @@ name = "allowit-engine-parent"
 version = "0.1.0"
 dependencies = [
  "allowit",
- "allowit-wallet-protocol",
+ "allowit-wallet-engine",
  "soroban-sdk",
 ]
 
@@ -91,7 +91,6 @@ name = "allowit-wallet-engine"
 version = "0.1.0"
 dependencies = [
  "allowit",
- "allowit-wallet-protocol",
  "soroban-sdk",
 ]
 

@@ -13,11 +13,16 @@
 //!
 //! Rules are pure checks. Each returns its passing constraint or an `Error`. An unset Grant field
 //! is `MissingGrant`. The standard contract runs only the leading canonical calls, supplied by the
-//! owner as `rules`, through `preflight`, which skips unset fields. Matching `rules` to the source
-//! is part of the owner's offchain authorization.
+//! owner as `rules`, through `preflight`, which skips unset fields. `scripts/contract_admin.py`
+//! derives `rules` from the source.
+//!
+//! Portable authored code uses rule calls, typed scalar fields and enum comparisons such as
+//! `ctx.request.operation == Operation::sep56_deposit`. Backend list methods differ (for example
+//! `len` returns `u32` onchain and `usize` on the host), so authored code reads lists only through
+//! `recipients` and `tokens`.
 //!
 //! Types and rule logic are written once in `core.rs` and compiled per backend. Each backend binds
-//! `Address`, `String` and `Vec`. Feature `soroban` (default) uses host values and contract types.
+//! `Address` and `Vec`. Feature `soroban` (default) uses host values and contract types.
 //! Feature `std` uses heap strings and vectors. The selected backend backs the crate root, which
 //! authored policy names. The offchain server depends on
 //! `allowit = { default-features = false, features = ["std"] }` and must not unify `soroban`:
@@ -38,7 +43,7 @@ compile_error!(
 #[cfg(feature = "soroban")]
 pub mod soroban {
     pub use soroban_sdk::Address;
-    use soroban_sdk::{String, Vec};
+    use soroban_sdk::Vec;
     macro_rules! value {
         ($item:item) => {
             #[soroban_sdk::contracttype]
@@ -59,7 +64,7 @@ pub mod soroban {
 pub mod host {
     /// Exact Stellar account or contract identity as its StrKey text.
     pub type Address = alloc::string::String;
-    use alloc::{string::String, vec::Vec};
+    use alloc::vec::Vec;
     macro_rules! value {
         ($item:item) => {
             $item
