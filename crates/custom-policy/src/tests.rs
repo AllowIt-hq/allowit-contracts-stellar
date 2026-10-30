@@ -20,19 +20,19 @@ mod branch_host {
     include!("branch_policy.rs");
 }
 
-/// Every canonical rule of one backend, in Grant field order.
+/// Every canonical rule of one backend, in AllowitGrant field order.
 macro_rules! rules {
     ($lib:path) => {{
         use $lib as lib;
         [
-            lib::Rule::transaction_cap,
-            lib::Rule::spent_cap,
-            lib::Rule::day_spent_cap,
-            lib::Rule::day_total_cap,
-            lib::Rule::call_cap,
-            lib::Rule::recipients,
-            lib::Rule::tokens,
-            lib::Rule::expiry,
+            lib::AllowitRule::transaction_cap,
+            lib::AllowitRule::spent_cap,
+            lib::AllowitRule::day_spent_cap,
+            lib::AllowitRule::day_total_cap,
+            lib::AllowitRule::call_cap,
+            lib::AllowitRule::recipients,
+            lib::AllowitRule::tokens,
+            lib::AllowitRule::expiry,
         ]
     }};
 }
@@ -101,7 +101,7 @@ macro_rules! outcome {
         use $lib as lib;
         let ctx = $ctx;
         let g = &ctx.grant;
-        let code = |e: lib::Error| e as u32;
+        let code = |e: lib::AllowitError| e as u32;
         Outcome {
             policy: $policy(&ctx).map_err(code),
             branch: $branch(&ctx).map_err(code),
@@ -159,7 +159,7 @@ impl Universe {
         let host = onchain.iter().map(strkey).collect();
         Self { env, onchain, host }
     }
-    fn onchain(&self, v: &Vector) -> AllowitEnv {
+    fn onchain(&self, v: &Vector) -> AllowitContext {
         let list = |items: &Option<List<usize>>| {
             items.as_ref().map(|items| {
                 let mut out = soroban_sdk::Vec::new(&self.env);
@@ -169,8 +169,8 @@ impl Universe {
                 out
             })
         };
-        AllowitEnv {
-            grant: allowit::Grant {
+        AllowitContext {
+            grant: allowit::AllowitGrant {
                 transaction_cap: v.caps[0],
                 spent_cap: v.caps[1],
                 day_spent_cap: v.caps[2],
@@ -180,7 +180,7 @@ impl Universe {
                 tokens: list(&v.tokens),
                 expiry: v.expiry,
             },
-            state: allowit::AccountingHistory {
+            state: allowit::AllowitAccountingHistory {
                 calls: v.calls,
                 spent: v.spent,
                 unpriced: v.unpriced,
@@ -189,11 +189,11 @@ impl Universe {
                 day_total: v.day_total,
                 day_unpriced: v.day_unpriced,
             },
-            request: allowit::Request {
+            request: allowit::AllowitRequest {
                 operation: if v.deposit {
-                    allowit::Operation::sep56_deposit
+                    allowit::AllowitOperation::sep56_deposit
                 } else {
-                    allowit::Operation::sep41_transfer
+                    allowit::AllowitOperation::sep41_transfer
                 },
                 asset: self.onchain[v.asset].clone(),
                 recipient: self.onchain[v.recipient].clone(),
@@ -203,14 +203,14 @@ impl Universe {
             },
         }
     }
-    fn host(&self, v: &Vector) -> allowit::host::AllowitEnv {
+    fn host(&self, v: &Vector) -> allowit::host::AllowitContext {
         let list = |items: &Option<List<usize>>| {
             items
                 .as_ref()
                 .map(|items| items.iter().map(|i| self.host[*i].clone()).collect())
         };
-        allowit::host::AllowitEnv {
-            grant: allowit::host::Grant {
+        allowit::host::AllowitContext {
+            grant: allowit::host::AllowitGrant {
                 transaction_cap: v.caps[0],
                 spent_cap: v.caps[1],
                 day_spent_cap: v.caps[2],
@@ -220,7 +220,7 @@ impl Universe {
                 tokens: list(&v.tokens),
                 expiry: v.expiry,
             },
-            state: allowit::host::AccountingHistory {
+            state: allowit::host::AllowitAccountingHistory {
                 calls: v.calls,
                 spent: v.spent,
                 unpriced: v.unpriced,
@@ -229,11 +229,11 @@ impl Universe {
                 day_total: v.day_total,
                 day_unpriced: v.day_unpriced,
             },
-            request: allowit::host::Request {
+            request: allowit::host::AllowitRequest {
                 operation: if v.deposit {
-                    allowit::host::Operation::sep56_deposit
+                    allowit::host::AllowitOperation::sep56_deposit
                 } else {
-                    allowit::host::Operation::sep41_transfer
+                    allowit::host::AllowitOperation::sep41_transfer
                 },
                 asset: self.host[v.asset].clone(),
                 recipient: self.host[v.recipient].clone(),
@@ -270,7 +270,7 @@ fn ok(values: [&str; 8]) -> List<Result<Text, u32>> {
 fn all_preflight_ok() -> List<Result<(), u32>> {
     std::vec![Ok(()); 8]
 }
-use allowit::Error as E;
+use allowit::AllowitError as E;
 
 #[test]
 fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
@@ -377,7 +377,7 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
     v.caps[0] = Some(-1);
     assert_eq!(u.run(&v).policy, Err(E::InvalidParameter as u32));
     checked += 4;
-    // An unset Grant field denies in the policy and rule, and is skipped only by preflight.
+    // An unset AllowitGrant field denies in the policy and rule, and is skipped only by preflight.
     for field in 0..8 {
         let mut v = base();
         match field {

@@ -4,14 +4,14 @@
 #[path = "../crates/custom-policy/policy/policy.rs"]
 mod policy;
 use allowit::prelude::*;
-use allowit::{DAY, Error};
+use allowit::{DAY, AllowitError};
 
 const NOW: u64 = 3 * DAY + 10;
-fn context() -> AllowitEnv {
+fn context() -> AllowitContext {
     let recipient = "GRECIPIENT".to_string();
     let asset = "CASSET".to_string();
-    AllowitEnv {
-        grant: Grant {
+    AllowitContext {
+        grant: AllowitGrant {
             transaction_cap: Some(10),
             spent_cap: Some(30),
             day_spent_cap: Some(20),
@@ -21,7 +21,7 @@ fn context() -> AllowitEnv {
             tokens: Some(vec![asset.clone()]),
             expiry: Some(NOW + 100),
         },
-        state: AccountingHistory {
+        state: AllowitAccountingHistory {
             calls: 1,
             spent: 10,
             day: NOW / DAY,
@@ -29,8 +29,8 @@ fn context() -> AllowitEnv {
             day_total: 10,
             ..Default::default()
         },
-        request: Request {
-            operation: Operation::sep41_transfer,
+        request: AllowitRequest {
+            operation: AllowitOperation::sep41_transfer,
             asset,
             recipient,
             amount: 10,
@@ -58,24 +58,24 @@ fn approval_passes_with_exact_constraints() {
 fn approval_denies_unset_grant_fields() {
     let mut c = context();
     c.grant.tokens = None;
-    assert_eq!(policy::execute(&c), Err(Error::MissingGrant));
-    assert_eq!(allowit::preflight(&c, allowit::Rule::tokens), Ok(()));
+    assert_eq!(policy::execute(&c), Err(AllowitError::MissingGrant));
+    assert_eq!(allowit::preflight(&c, allowit::AllowitRule::tokens), Ok(()));
 }
 #[test]
 fn limits_boundary_denial_and_accounting() {
     let mut c = context();
     c.request.amount = 11;
-    assert_eq!(policy::execute(&c), Err(Error::TransactionCapExceeded));
+    assert_eq!(policy::execute(&c), Err(AllowitError::TransactionCapExceeded));
     let mut c = context();
     c.state.day_spent = 21;
-    assert_eq!(policy::execute(&c), Err(Error::DaySpentCapExceeded));
+    assert_eq!(policy::execute(&c), Err(AllowitError::DaySpentCapExceeded));
     let mut c = context();
     c.state.unpriced = true;
-    assert_eq!(policy::execute(&c), Err(Error::Unpriced));
+    assert_eq!(policy::execute(&c), Err(AllowitError::Unpriced));
     let mut c = context();
     c.state.day -= 1;
-    assert_eq!(policy::execute(&c), Err(Error::InvalidState));
+    assert_eq!(policy::execute(&c), Err(AllowitError::InvalidState));
     let mut c = context();
     c.state.calls = 3;
-    assert_eq!(policy::execute(&c), Err(Error::CallCapExceeded));
+    assert_eq!(policy::execute(&c), Err(AllowitError::CallCapExceeded));
 }

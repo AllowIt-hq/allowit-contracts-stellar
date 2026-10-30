@@ -12,7 +12,7 @@ const STATE_KEY: u32 = 0;
 /// Parent configuration stored under STATE_KEY in this contract's instance storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParentState {
+pub struct AllowitParentState {
     /// Current engine-administrator address, authorized through native account or contract rules.
     pub owner: Address,
     /// Engine-administrator configuration sequence. It changes on parent administration and is not engine_version release metadata.
@@ -24,7 +24,7 @@ pub struct ParentState {
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum Error {
+pub enum AllowitParentError {
     /// The supplied administration version differs from the stored version.
     StaleVersion = 1,
     /// The u64 administration version cannot advance.
@@ -41,7 +41,7 @@ fn tag(env: &Env) -> String {
     String::from_str(env, "engine")
 }
 /// Initialize constructor state or read it, then maintain the parent instance and code lifetime.
-fn load(env: &Env, initial: Option<ParentState>) -> ParentState {
+fn load(env: &Env, initial: Option<AllowitParentState>) -> AllowitParentState {
     if let Some(state) = initial {
         env.storage().instance().set(&STATE_KEY, &state);
     }
@@ -51,17 +51,20 @@ fn load(env: &Env, initial: Option<ParentState>) -> ParentState {
     env.storage().instance().get(&STATE_KEY).unwrap()
 }
 /// Commit state after load and authorization; no second lifetime update is needed.
-fn save(env: &Env, state: &ParentState) {
+fn save(env: &Env, state: &AllowitParentState) {
     env.storage().instance().set(&STATE_KEY, state);
 }
 /// Authenticate the current owner and advance one administration version without touching the engine.
-fn authorize(env: &Env, version: u64) -> Result<ParentState, Error> {
+fn authorize(env: &Env, version: u64) -> Result<AllowitParentState, AllowitParentError> {
     let mut state = load(env, None);
     state.owner.require_auth();
     if state.version != version {
-        return Err(Error::StaleVersion);
+        return Err(AllowitParentError::StaleVersion);
     }
-    state.version = state.version.checked_add(1).ok_or(Error::Overflow)?;
+    state.version = state
+        .version
+        .checked_add(1)
+        .ok_or(AllowitParentError::Overflow)?;
     Ok(state)
 }
 
@@ -104,7 +107,7 @@ impl EngineParent {
             );
         load(
             &env,
-            Some(ParentState {
+            Some(AllowitParentState {
                 owner,
                 version: 0,
                 engine,
@@ -119,7 +122,7 @@ impl EngineParent {
     ///
     /// # Returns
     /// Returns owner, engine address and administrative version. It renews parent lifetime without reading engine dependencies.
-    pub fn state(env: Env) -> ParentState {
+    pub fn state(env: Env) -> AllowitParentState {
         load(&env, None)
     }
 
@@ -143,7 +146,11 @@ impl EngineParent {
     ///
     /// # Returns
     /// Returns success after one version increment and reference update. The engine address and instance data stay unchanged.
-    pub fn upgrade_engine(env: Env, new_hash: BytesN<32>, version: u64) -> Result<(), Error> {
+    pub fn upgrade_engine(
+        env: Env,
+        new_hash: BytesN<32>,
+        version: u64,
+    ) -> Result<(), AllowitParentError> {
         let state = authorize(&env, version)?;
         // The host rejects hashes that do not identify uploaded Wasm.
         env.executable_refs().set(&tag(&env), &new_hash);
@@ -160,10 +167,10 @@ impl EngineParent {
     ///
     /// # Returns
     /// Returns success after the handoff and one version increment; wallet owner rights remain independent.
-    pub fn set_admin(env: Env, owner: Address, version: u64) -> Result<(), Error> {
+    pub fn set_admin(env: Env, owner: Address, version: u64) -> Result<(), AllowitParentError> {
         let mut state = authorize(&env, version)?;
         if owner == env.current_contract_address() || owner == state.engine {
-            return Err(Error::InvalidAdmin);
+            return Err(AllowitParentError::InvalidAdmin);
         }
         owner.require_auth();
         state.owner = owner;
@@ -180,7 +187,11 @@ impl EngineParent {
     ///
     /// # Returns
     /// Returns success after the invocation commits the new code and version. The selected executable must understand the retained state layout.
-    pub fn upgrade_parent(env: Env, new_hash: BytesN<32>, version: u64) -> Result<(), Error> {
+    pub fn upgrade_parent(
+        env: Env,
+        new_hash: BytesN<32>,
+        version: u64,
+    ) -> Result<(), AllowitParentError> {
         let state = authorize(&env, version)?;
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_hash));

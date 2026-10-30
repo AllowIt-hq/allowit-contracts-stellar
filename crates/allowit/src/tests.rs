@@ -4,37 +4,37 @@ use soroban_sdk::{
     Env, IntoVal, Symbol, TryFromVal, Val, testutils::Address as _, vec, xdr::ToXdr,
 };
 
-/// Every canonical rule in Grant field order.
-const ALL: [Rule; 8] = [
-    Rule::transaction_cap,
-    Rule::spent_cap,
-    Rule::day_spent_cap,
-    Rule::day_total_cap,
-    Rule::call_cap,
-    Rule::recipients,
-    Rule::tokens,
-    Rule::expiry,
+/// Every canonical rule in AllowitGrant field order.
+const ALL: [AllowitRule; 8] = [
+    AllowitRule::transaction_cap,
+    AllowitRule::spent_cap,
+    AllowitRule::day_spent_cap,
+    AllowitRule::day_total_cap,
+    AllowitRule::call_cap,
+    AllowitRule::recipients,
+    AllowitRule::tokens,
+    AllowitRule::expiry,
 ];
 
 /// Fails to compile when a variant is added without extending `ALL`.
-fn position(rule: Rule) -> usize {
+fn position(rule: AllowitRule) -> usize {
     match rule {
-        Rule::transaction_cap => 0,
-        Rule::spent_cap => 1,
-        Rule::day_spent_cap => 2,
-        Rule::day_total_cap => 3,
-        Rule::call_cap => 4,
-        Rule::recipients => 5,
-        Rule::tokens => 6,
-        Rule::expiry => 7,
+        AllowitRule::transaction_cap => 0,
+        AllowitRule::spent_cap => 1,
+        AllowitRule::day_spent_cap => 2,
+        AllowitRule::day_total_cap => 3,
+        AllowitRule::call_cap => 4,
+        AllowitRule::recipients => 5,
+        AllowitRule::tokens => 6,
+        AllowitRule::expiry => 7,
     }
 }
 
-fn fixture(env: &Env) -> AllowitEnv {
+fn fixture(env: &Env) -> AllowitContext {
     let asset = Address::generate(env);
     let recipient = Address::generate(env);
-    AllowitEnv {
-        grant: Grant {
+    AllowitContext {
+        grant: AllowitGrant {
             transaction_cap: Some(100),
             spent_cap: Some(1000),
             day_spent_cap: Some(500),
@@ -44,7 +44,7 @@ fn fixture(env: &Env) -> AllowitEnv {
             tokens: Some(vec![env, asset.clone()]),
             expiry: Some(999_999),
         },
-        state: AccountingHistory {
+        state: AllowitAccountingHistory {
             calls: 1,
             spent: 45,
             day: 1,
@@ -52,8 +52,8 @@ fn fixture(env: &Env) -> AllowitEnv {
             day_total: 43,
             ..Default::default()
         },
-        request: Request {
-            operation: Operation::sep41_transfer,
+        request: AllowitRequest {
+            operation: AllowitOperation::sep41_transfer,
             asset,
             recipient,
             amount: 40,
@@ -89,31 +89,40 @@ fn rules_return_exact_passing_constraints() {
 fn unset_grant_fields_deny_in_rules_and_skip_only_in_preflight() {
     let env = Env::default();
     let mut ctx = fixture(&env);
-    ctx.grant = Grant::default();
-    assert_eq!(transaction_cap(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(spent_cap(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(day_spent_cap(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(day_total_cap(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(call_cap(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(recipients(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(tokens(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(expiry(&ctx, &None), Err(Error::MissingGrant));
+    ctx.grant = AllowitGrant::default();
+    assert_eq!(
+        transaction_cap(&ctx, &None),
+        Err(AllowitError::MissingGrant)
+    );
+    assert_eq!(spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(day_spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(day_total_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(call_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(recipients(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(tokens(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(expiry(&ctx, &None), Err(AllowitError::MissingGrant));
     // MissingGrant precedes every request and state check.
     ctx.request.amount = 0;
     ctx.request.now = ctx.request.expires_at + 1;
     ctx.state.day = 0;
     ctx.state.unpriced = true;
     ctx.state.calls = u64::MAX;
-    assert_eq!(spent_cap(&ctx, &None), Err(Error::MissingGrant));
-    assert_eq!(expiry(&ctx, &None), Err(Error::MissingGrant));
+    assert_eq!(spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(expiry(&ctx, &None), Err(AllowitError::MissingGrant));
     for rule in ALL {
         assert_eq!(preflight(&ctx, rule), Ok(()));
     }
     // A set field is checked by preflight exactly as by the rule.
     ctx.grant.spent_cap = Some(1000);
-    assert_eq!(preflight(&ctx, Rule::spent_cap), Err(Error::Unpriced));
+    assert_eq!(
+        preflight(&ctx, AllowitRule::spent_cap),
+        Err(AllowitError::Unpriced)
+    );
     ctx.grant.expiry = Some(u64::MAX);
-    assert_eq!(preflight(&ctx, Rule::expiry), Err(Error::Expired));
+    assert_eq!(
+        preflight(&ctx, AllowitRule::expiry),
+        Err(AllowitError::Expired)
+    );
 }
 
 #[test]
@@ -132,39 +141,39 @@ fn boundary_equality_passes_with_zero_headroom_and_one_more_denies() {
     );
     assert_eq!(
         expiry(&ctx, &Some(ctx.request.now + 1)),
-        Err(Error::Expired)
+        Err(AllowitError::Expired)
     );
     assert_eq!(
         transaction_cap(&ctx, &Some(39)),
-        Err(Error::TransactionCapExceeded)
+        Err(AllowitError::TransactionCapExceeded)
     );
     assert_eq!(
         spent_cap(&ctx, &Some(s.spent - 1)),
-        Err(Error::SpentCapExceeded)
+        Err(AllowitError::SpentCapExceeded)
     );
     assert_eq!(
         day_spent_cap(&ctx, &Some(s.day_spent - 1)),
-        Err(Error::DaySpentCapExceeded)
+        Err(AllowitError::DaySpentCapExceeded)
     );
     assert_eq!(
         day_total_cap(&ctx, &Some(s.day_total - 1)),
-        Err(Error::DayTotalCapExceeded)
+        Err(AllowitError::DayTotalCapExceeded)
     );
     ctx.state.calls = 2;
-    assert_eq!(call_cap(&ctx, &Some(1)), Err(Error::CallCapExceeded));
+    assert_eq!(call_cap(&ctx, &Some(1)), Err(AllowitError::CallCapExceeded));
     // The protected count already includes this operation.
     ctx.state.calls = 0;
-    assert_eq!(call_cap(&ctx, &Some(0)), Err(Error::CallCapExceeded));
+    assert_eq!(call_cap(&ctx, &Some(0)), Err(AllowitError::CallCapExceeded));
 }
 
 #[test]
 fn accounting_caps_check_only_the_facts_they_read() {
     let env = Env::default();
     let base = fixture(&env);
-    type Cap = fn(&AllowitEnv, &Option<i128>) -> Result<i128>;
+    type Cap = fn(&AllowitContext, &Option<i128>) -> Result<i128>;
     let caps: [Cap; 3] = [spent_cap, day_spent_cap, day_total_cap];
     let passing = [955, 955, 957];
-    let edits: [fn(&mut AllowitEnv); 7] = [
+    let edits: [fn(&mut AllowitContext); 7] = [
         |c| c.request.amount = 0,
         |c| c.state.day += 1,
         |c| c.state.spent = -1,
@@ -173,9 +182,9 @@ fn accounting_caps_check_only_the_facts_they_read() {
         |c| c.state.unpriced = true,
         |c| c.state.day_unpriced = true,
     ];
-    use Error::{InvalidState as S, Unpriced as U};
+    use AllowitError::{InvalidState as S, Unpriced as U};
     // Expected result per edit, for spent_cap, day_spent_cap and day_total_cap. `None` passes.
-    let expected: [[Option<Error>; 3]; 7] = [
+    let expected: [[Option<AllowitError>; 3]; 7] = [
         [None, None, None],
         [None, Some(S), Some(S)],
         [Some(S), None, None],
@@ -193,17 +202,17 @@ fn accounting_caps_check_only_the_facts_they_read() {
         }
     }
     for cap in caps {
-        assert_eq!(cap(&base, &Some(-1)), Err(Error::InvalidParameter));
+        assert_eq!(cap(&base, &Some(-1)), Err(AllowitError::InvalidParameter));
     }
     let mut ctx = base.clone();
     assert_eq!(
         transaction_cap(&ctx, &Some(-1)),
-        Err(Error::InvalidParameter)
+        Err(AllowitError::InvalidParameter)
     );
     ctx.request.amount = 0;
     assert_eq!(
         transaction_cap(&ctx, &Some(100)),
-        Err(Error::InvalidParameter)
+        Err(AllowitError::InvalidParameter)
     );
 }
 
@@ -216,37 +225,37 @@ fn preflight_enforces_every_set_field_with_its_rule_error() {
         let now = ctx.request.now;
         let g = &mut ctx.grant;
         let expected = match rule {
-            Rule::transaction_cap => {
+            AllowitRule::transaction_cap => {
                 g.transaction_cap = Some(39);
-                Error::TransactionCapExceeded
+                AllowitError::TransactionCapExceeded
             }
-            Rule::spent_cap => {
+            AllowitRule::spent_cap => {
                 g.spent_cap = Some(44);
-                Error::SpentCapExceeded
+                AllowitError::SpentCapExceeded
             }
-            Rule::day_spent_cap => {
+            AllowitRule::day_spent_cap => {
                 g.day_spent_cap = Some(44);
-                Error::DaySpentCapExceeded
+                AllowitError::DaySpentCapExceeded
             }
-            Rule::day_total_cap => {
+            AllowitRule::day_total_cap => {
                 g.day_total_cap = Some(42);
-                Error::DayTotalCapExceeded
+                AllowitError::DayTotalCapExceeded
             }
-            Rule::call_cap => {
+            AllowitRule::call_cap => {
                 g.call_cap = Some(0);
-                Error::CallCapExceeded
+                AllowitError::CallCapExceeded
             }
-            Rule::recipients => {
+            AllowitRule::recipients => {
                 g.recipients = Some(vec![&env, other.clone()]);
-                Error::RecipientNotAllowed
+                AllowitError::RecipientNotAllowed
             }
-            Rule::tokens => {
+            AllowitRule::tokens => {
                 g.tokens = Some(vec![&env, other.clone()]);
-                Error::TokenNotAllowed
+                AllowitError::TokenNotAllowed
             }
-            Rule::expiry => {
+            AllowitRule::expiry => {
                 g.expiry = Some(now);
-                Error::Expired
+                AllowitError::Expired
             }
         };
         assert_eq!(preflight(&ctx, rule), Err(expected));
@@ -264,11 +273,11 @@ fn allowlists_match_exact_addresses_and_empty_lists_deny() {
     let other = Address::generate(&env);
     assert_eq!(
         recipients(&ctx, &Some(vec![&env])),
-        Err(Error::RecipientNotAllowed)
+        Err(AllowitError::RecipientNotAllowed)
     );
     assert_eq!(
         recipients(&ctx, &Some(vec![&env, other.clone()])),
-        Err(Error::RecipientNotAllowed)
+        Err(AllowitError::RecipientNotAllowed)
     );
     assert_eq!(
         recipients(
@@ -277,10 +286,13 @@ fn allowlists_match_exact_addresses_and_empty_lists_deny() {
         ),
         Ok(ctx.request.recipient.clone())
     );
-    assert_eq!(tokens(&ctx, &Some(vec![&env])), Err(Error::TokenNotAllowed));
+    assert_eq!(
+        tokens(&ctx, &Some(vec![&env])),
+        Err(AllowitError::TokenNotAllowed)
+    );
     assert_eq!(
         tokens(&ctx, &Some(vec![&env, ctx.request.recipient.clone()])),
-        Err(Error::TokenNotAllowed)
+        Err(AllowitError::TokenNotAllowed)
     );
 }
 
@@ -289,14 +301,14 @@ fn expiry_bounds_grant_and_request() {
     let env = Env::default();
     let mut ctx = fixture(&env);
     let now = ctx.request.now;
-    assert_eq!(expiry(&ctx, &Some(now)), Err(Error::Expired));
+    assert_eq!(expiry(&ctx, &Some(now)), Err(AllowitError::Expired));
     // A request cannot outlive the grant.
     assert_eq!(
         expiry(&ctx, &Some(ctx.request.expires_at - 1)),
-        Err(Error::Expired)
+        Err(AllowitError::Expired)
     );
     ctx.request.expires_at = now;
-    assert_eq!(expiry(&ctx, &Some(now + 10)), Err(Error::Expired));
+    assert_eq!(expiry(&ctx, &Some(now + 10)), Err(AllowitError::Expired));
 }
 
 #[test]
@@ -307,7 +319,10 @@ fn rules_encode_as_their_canonical_names_and_other_names_do_not_decode() {
         assert_eq!(position(rule), i);
         let name = std::format!("{rule:?}");
         assert_eq!(rule.to_xdr(&env), symbol(&name).to_xdr(&env));
-        assert_eq!(Rule::try_from_val(&env, &symbol(&name)).ok(), Some(rule));
+        assert_eq!(
+            AllowitRule::try_from_val(&env, &symbol(&name)).ok(),
+            Some(rule)
+        );
     }
     for name in [
         "set_cap_per_day",
@@ -329,7 +344,7 @@ fn rules_encode_as_their_canonical_names_and_other_names_do_not_decode() {
     ] {
         // The host rejects an unknown variant symbol; inside a contract the invocation aborts.
         let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Rule::try_from_val(&env, &symbol(name)).ok()
+            AllowitRule::try_from_val(&env, &symbol(name)).ok()
         }));
         assert!(matches!(decoded, Ok(None) | Err(_)));
     }
@@ -339,7 +354,7 @@ fn rules_encode_as_their_canonical_names_and_other_names_do_not_decode() {
 fn grant_validation_rejects_only_negative_caps() {
     let env = Env::default();
     let grant = fixture(&env).grant;
-    assert_eq!(Grant::default().validate(), Ok(()));
+    assert_eq!(AllowitGrant::default().validate(), Ok(()));
     for field in 0..4 {
         let mut bad = grant.clone();
         *[
@@ -348,7 +363,7 @@ fn grant_validation_rejects_only_negative_caps() {
             &mut bad.day_spent_cap,
             &mut bad.day_total_cap,
         ][field] = Some(-1);
-        assert_eq!(bad.validate(), Err(Error::InvalidParameter));
+        assert_eq!(bad.validate(), Err(AllowitError::InvalidParameter));
     }
     let mut zero = grant;
     zero.call_cap = Some(0);

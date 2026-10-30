@@ -75,7 +75,7 @@ def pinned_wasm(path, expected_hash):
     return expected_hash
 
 
-# Custody State layout this tool encodes: typed Grant and Vec<Rule> prefix. Version 1 stored a Grant map.
+# Custody AllowitState layout this tool encodes: typed Grant and Vec<AllowitRule> prefix. Version 1 stored a Grant map.
 WALLET_CONTRACT_VERSION = 2
 
 
@@ -177,7 +177,7 @@ def grant(value):
 TIERS = ("simple", "common", "custom")
 # One prefix statement after whitespace removal: `allowit::<rule>(ctx,&ctx.grant.<rule>)?`. rustfmt may add a comma.
 PREFIX_CALL = re.compile(r"allowit::([a-z_]+)\(ctx,&ctx\.grant\.([a-z_]+),?\)\?")
-EXECUTE = re.compile(r"\bpub\s+fn\s+execute\s*\(\s*ctx\s*:\s*&\s*AllowitEnv\s*\)\s*->\s*allowit\s*::\s*Result(?:\s*<\s*\(\s*\)\s*>)?\s*\{")
+EXECUTE = re.compile(r"\bpub\s+fn\s+execute\s*\(\s*ctx\s*:\s*&\s*AllowitContext\s*\)\s*->\s*allowit\s*::\s*Result(?:\s*<\s*\(\s*\)\s*>)?\s*\{")
 
 
 # Rust literals that can hide code from a plain scan: raw, byte, C and plain strings, then char
@@ -229,7 +229,7 @@ def standard_prefix(source):
     text = rust_code(source)
     found = list(EXECUTE.finditer(text))
     if len(found) != 1 or len(re.findall(r"\bexecute\b", text)) != 1:
-        raise ValueError("Policy source must define pub fn execute(ctx: &AllowitEnv) -> allowit::Result once")
+        raise ValueError("Policy source must define pub fn execute(ctx: &AllowitContext) -> allowit::Result once")
     rules = []
     for statement in text[found[0].end():].split(";"):
         call = PREFIX_CALL.fullmatch(re.sub(r"\s+", "", statement))

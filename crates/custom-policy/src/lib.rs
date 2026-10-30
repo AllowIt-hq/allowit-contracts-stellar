@@ -1,7 +1,7 @@
 #![no_std]
 //! Bespoke policy compiled verbatim from `policy/policy.rs` into the shared custody mixins.
-use allowit::{AllowitEnv, Rule};
-use allowit_policy_wallet::{Error, Policy};
+use allowit::{AllowitContext, AllowitRule};
+use allowit_policy_wallet::{AllowitPolicy, AllowitWalletError};
 use soroban_sdk::{BytesN, Env, Vec};
 
 /// Authored policy source, compiled unchanged as a module. The offchain server compiles the same file.
@@ -18,8 +18,8 @@ pub const ARGUMENT_SCHEMA_HASH: [u8; 32] = [
     126, 226, 36, 246, 86, 136, 223, 200, 250, 20, 126, 139,
 ];
 
-pub struct Custom;
-impl Policy for Custom {
+pub struct AllowitCustom;
+impl AllowitPolicy for AllowitCustom {
     const KIND: &'static str = "custom_policy";
     fn source_digest(env: &Env) -> Option<BytesN<32>> {
         Some(BytesN::from_array(env, &SOURCE_HASH))
@@ -27,12 +27,12 @@ impl Policy for Custom {
     fn argument_schema_digest(env: &Env) -> BytesN<32> {
         BytesN::from_array(env, &ARGUMENT_SCHEMA_HASH)
     }
-    /// Run the complete authored policy. An unset Grant field denies.
-    fn check(ctx: &AllowitEnv, _rules: &Vec<Rule>) -> Result<(), Error> {
+    /// Run the complete authored policy. An unset AllowitGrant field denies.
+    fn check(ctx: &AllowitContext, _rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         Ok(policy::execute(ctx)?)
     }
 }
-allowit_policy_wallet::policy_wallet!(CustomPolicy, Custom);
+allowit_policy_wallet::policy_wallet!(CustomPolicy, AllowitCustom);
 
 #[cfg(test)]
 mod tests;

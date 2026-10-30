@@ -10,7 +10,7 @@ Policy source is portable Rust against `crates/allowit`: `allowit::spent_cap(ctx
 The offchain server and CustomPolicy compile the file verbatim. The standard contract runs only its
 leading canonical calls, supplied by the owner as `rules`, and skips unset fields.
 `scripts/contract_admin.py` derives `rules` from the source. Rules are pure checks over
-`AllowitEnv` (typed Grant, protected history, request) and return their passing constraint or an
+`AllowitContext` (typed Grant, protected history, request) and return their passing constraint or an
 error. The server uses `allowit = { default-features = false, features = ["std"] }`.
 
 The owner controls wallet upgrades, configuration, pause, recovery and exact passthrough calls.

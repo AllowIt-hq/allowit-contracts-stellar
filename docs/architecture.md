@@ -5,6 +5,15 @@ independent server signer and Grant. SimplePolicyEngine relies on agent/server a
 CommonPolicyEngine is the standard implementation for an owner-approved initial preflight prefix.
 CustomPolicy compiles a complete authored policy into its contract. Shared checkers have no custody.
 
+## Public names
+
+Every public type that authored policy, SDK integrations or contract specs name carries the
+`Allowit` prefix: `AllowitContext`, `AllowitGrant`, `AllowitRule`, `AllowitError`,
+`AllowitExecutionRequest`, `AllowitPolicyDeployment`, `AllowitState` and the others. Namespaced
+items keep their short names, such as `allowit::Result` and `allowit::spent_cap`. A Soroban type
+name appears only in the contract spec. Encodings carry struct field names and enum variant
+symbols, so the prefix changes no signed bytes, digests or stored state.
+
 ## One portable policy source
 
 Policy source is ordinary synchronous Rust against `crates/allowit`. The offchain server and
@@ -12,7 +21,7 @@ CustomPolicy compile the file verbatim:
 
 ```rust
 use allowit::prelude::*;
-pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
+pub fn execute(ctx: &AllowitContext) -> allowit::Result {
     allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
     allowit::recipients(ctx, &ctx.grant.recipients)?;
@@ -37,20 +46,20 @@ both for tests only. The CustomPolicy tests compile its source under both backen
 identical pass values and errors on a shared vector set.
 
 Portable authored code beyond canonical calls uses typed scalar fields and enum comparisons, such
-as `ctx.request.operation == Operation::sep56_deposit`. Backend list methods differ (`len` returns
+as `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list methods differ (`len` returns
 `u32` onchain and `usize` on the host), so authored code reads lists only through `recipients` and
 `tokens`.
 
-`AllowitEnv` is the complete rule input. The wallet or server computes it:
+`AllowitContext` is the complete rule input. The wallet or server computes it:
 
 | Field | Content |
 | --- | --- |
-| `grant` | Typed owner `Grant`. Each field is an `Option`; `None` is unset |
-| `state` | Protected `AccountingHistory` proposed after this operation |
-| `request` | Typed `Operation`, immutable asset, recipient (deposit vault), amount, `now`, `expires_at` |
+| `grant` | Typed owner `AllowitGrant`. Each field is an `Option`; `None` is unset |
+| `state` | Protected `AllowitAccountingHistory` proposed after this operation |
+| `request` | Typed `AllowitOperation`, immutable asset, recipient (deposit vault), amount, `now`, `expires_at` |
 
 Rules are pure checks: `allowit::<rule>(ctx, &Option<V>) -> allowit::Result<T>`. Each returns only
-its passing constraint, or an `allowit::Error`. An unset field is `MissingGrant`. Policy code calls
+its passing constraint, or an `allowit::AllowitError`. An unset field is `MissingGrant`. Policy code calls
 rules unguarded, so an unset parameter denies. Future server-only functions use the same shape.
 
 | Rule and same-named Grant field | Native value | Pass value |
@@ -75,8 +84,8 @@ before rules run. Deployment rejects negative caps.
 The standard prefix is the consecutive leading top-level statements of exactly the form
 `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`: one canonical rule and its same-named Grant field.
 Any other statement ends it. Later statements run offchain or in CustomPolicy.
-The standard contract receives the exact owner-approved ordered prefix as `rules: Vec<Rule>`, never
-caller selectors. `Rule` is a typed enum whose variants are the canonical names. Soroban decodes
+The standard contract receives the exact owner-approved ordered prefix as `rules: Vec<AllowitRule>`, never
+caller selectors. `AllowitRule` is a typed enum whose variants are the canonical names. Soroban decodes
 vector elements when read, so owner configuration decodes every rule and allowlist element before
 storing it: an unknown name aborts and a malformed element is `InvalidGrant`. It runs each call through `allowit::preflight` as `if grant.<rule>.is_some() { allowit::<rule>(ctx, &grant.<rule>)?; }`
 and discards pass values. This preflight runner is the only place an unset field skips its rule.
@@ -87,7 +96,7 @@ Rule denials map to `PolicyDenied`. `MissingGrant` and `InvalidParameter` map to
 `InvalidState` maps to `InvalidState`. A failed call rolls back its events, so only the host
 evaluator and the shared engine return the specific rule error.
 
-Protected `State.history` records every delegated success independently of selected or unset rules.
+Protected `AllowitState.history` records every delegated success independently of selected or unset rules.
 With cost bounds it records conservative expenses and gas. Without them it records raw gross and
 calls plus an unpriced liability. Rollover clears only daily liability. No owner reconciliation or
 refund method silently clears this history. No mutable business usage map exists. The kernel's
@@ -98,7 +107,7 @@ backward clocks before rules run.
 
 Fixed standard `source_digest` is SHA-256 of canonical XDR containing the domain
 `allowit_std_prefix`, implementation kind, actual module hash, immutable SAC, transfer/deposit schema
-hashes and the ordered `Vec<Rule>`. Each unit variant encodes as a one-symbol vector of its rule
+hashes and the ordered `Vec<AllowitRule>`. Each unit variant encodes as a one-symbol vector of its rule
 name; its Grant reference is always the same-named field. It excludes Grant values and full source.
 The constructor and binding getter check it against the actual runtime module.
 
@@ -122,7 +131,7 @@ Owner packets bind their exact meaning. Struct decoding ignores extra keys and r
 the canonical re-encoding of the decoded packet. Bindings name the authored entrypoint `execute`. A packet with legacy, extra or absent keys fails
 authorization unless the owner signed that canonical form.
 
-`contract_version` 2 stores the typed Grant and `Vec<Rule>`. Version 1 stored an untyped Grant map
+`contract_version` 2 stores the typed Grant and `Vec<AllowitRule>`. Version 1 stored an untyped Grant map
 and symbol rules. Execution, `state()` and `set_pause` accept only the exact canonical encoding of
 version 2, including nested Grant and history. Owner `recover`, `invoke` and `deploy_policy` decode
 a typed struct of only the fields they keep, so an in-place upgrade from version 1 never locks
@@ -139,14 +148,14 @@ funds before any change across layouts. Every later layout bump needs the same r
 
 ## Shared engine
 
-The shared engine exposes each canonical rule as `<rule>(ctx: AllowitEnv) -> Result<T, Error>`.
+The shared engine exposes each canonical rule as `<rule>(ctx: AllowitContext) -> Result<T, AllowitError>`.
 Callers use its generated `EngineClient`.
 It runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)` and returns the same pass value or rule error.
 It holds no custody, Grant or history. No policy wallet, release tool or server in this repository
 calls it; offchain evaluation uses `allowit` directly. It remains the engine parent's administered
-checker for onchain callers that cannot bundle `allowit`. Its tests match `Rule` exhaustively, so a
+checker for onchain callers that cannot bundle `allowit`. Its tests match `AllowitRule` exhaustively, so a
 new rule fails to compile until the engine exposes it. The `test-deny` fixture aborts every rule
-with contract error `TEST_DENY` (1000), outside `allowit::Error`. `engine_version` 2 marks this ABI.
+with contract error `TEST_DENY` (1000), outside `allowit::AllowitError`. `engine_version` 2 marks this ABI.
 
 ## Expenses and native effects
 
@@ -155,7 +164,7 @@ Its conversion cost plus attributable gas counts toward spent limits. Daily tota
 plus separate gas; embedded conversion fees are not counted twice. Underlying units use seven
 decimals. Share units retain their independent native scale.
 
-`ExecutionRequest.expense` is optional bounded canonical XDR of `ExpenseBounds`: asset, decimals,
+`AllowitExecutionRequest.expense` is optional bounded canonical XDR of `AllowitExpenseBounds`: asset, decimals,
 gas units, conversion units, spent units, attributable fee ceiling, observation ledger and UTC day.
 Unknown fields, wrong types, noncanonical maps, extra data and oversized bytes reject.
 The server approves exact conservative economic ceilings. The kernel checks denomination, day,
@@ -178,7 +187,7 @@ Returned shares must match the observed balance credit and meet the minimum. Any
 ceiling also checks `preview_redeem(actual_shares)`. Foreign reads precede final balances.
 The immutable SAC balance read is last. A vault getter cannot mutate already-checked effects.
 
-`TransferReceipt` retains the underlying leg. `deposit_receipt(operation_id)` and `sep56_deposit`
+`AllowitTransferReceipt` retains the underlying leg. `deposit_receipt(operation_id)` and `sep56_deposit`
 record the observed share output. Vault code can misreport ownership, valuation or redeemability.
 The wrapper bounds SAC spending and interface observations; it cannot prove investment value.
 Owner `invoke` can redeem shares independently. The server reconciles actual settled redemptions.

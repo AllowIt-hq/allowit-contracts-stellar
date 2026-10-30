@@ -1,5 +1,5 @@
 use allowit::prelude::*;
-pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
+pub fn execute(ctx: &AllowitContext) -> allowit::Result {
     allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
     allowit::day_spent_cap(ctx, &ctx.grant.day_spent_cap)?;

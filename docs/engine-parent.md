@@ -6,7 +6,7 @@ It does not control wallet custody code, wallet owner operations, Grant, protect
 
 ## State and creation
 
-`ParentState` contains three native fields:
+`AllowitParentState` contains three native fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ calls roll back the state, version and executable changes together.
 
 The reference update changes the code used by subsequent engine calls. It does not replace the
 engine address or authorize wallet spending. Each new engine release must preserve the interface
-and state interpretation required by its callers. Engine release 2 takes `AllowitEnv` and returns
+and state interpretation required by its callers. Engine release 2 takes `AllowitContext` and returns
 each rule's pass value; wallets do not call it. A code hash identifies the exact executable.
 The parent administration version does not identify its release semantics.
 

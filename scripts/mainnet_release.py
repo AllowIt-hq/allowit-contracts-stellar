@@ -31,7 +31,7 @@ BUILD_SCRIPTS = ("build-contracts.sh", "check-policy-bindings.py")
 
 # The smoke policy is entirely one standard prefix of canonical calls. Its rules derive from the source.
 SMOKE_SOURCE = b"""use allowit::prelude::*;
-pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
+pub fn execute(ctx: &AllowitContext) -> allowit::Result {
     allowit::recipients(ctx, &ctx.grant.recipients)?;
     allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
     allowit::day_total_cap(ctx, &ctx.grant.day_total_cap)?;
@@ -120,7 +120,7 @@ def smoke_grant(plan):
 def prefix_digest(kind, module, asset, rules):
     """The contract's standard_prefix_digest: SHA-256 of canonical XDR of its binding tuple.
 
-    The ordered rules are a Vec<Rule>; each unit enum variant encodes as a one-symbol vector."""
+    The ordered rules are a Vec<AllowitRule>; each unit enum variant encodes as a one-symbol vector."""
     checks = scval.to_vec([scval.to_vec([scval.to_symbol(rule)]) for rule in rules])
     value = scval.to_vec([scval.to_symbol("allowit_std_prefix"), scval.to_symbol(kind), scval.to_bytes(bytes.fromhex(module)), scval.to_address(asset),
                           scval.to_bytes(hashlib.sha256(SCHEMA).digest()), scval.to_bytes(hashlib.sha256(DEPOSIT_SCHEMA).digest()), checks])
@@ -352,9 +352,9 @@ def read_contract(plan, contract, method):
 
 
 def rule_names(rules):
-    """Decoded Vec<Rule>. Each unit enum variant decodes as a one-symbol list."""
+    """Decoded Vec<AllowitRule>. Each unit enum variant decodes as a one-symbol list."""
     if not isinstance(rules, list) or any(not isinstance(rule, list) or len(rule) != 1 or not isinstance(rule[0], str) for rule in rules):
-        raise ValueError("Wallet rules are not a Vec<Rule>")
+        raise ValueError("Wallet rules are not a Vec<AllowitRule>")
     return [rule[0] for rule in rules]
 
 

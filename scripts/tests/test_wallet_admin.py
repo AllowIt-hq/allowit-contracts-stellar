@@ -17,7 +17,7 @@ from stellar_sdk import Keypair, TransactionEnvelope, Account, TransactionBuilde
 
 KEYS = [Keypair.from_raw_ed25519_seed(bytes([n]) * 32).public_key for n in range(1, 6)]
 ROOT = Path(__file__).resolve().parents[2]
-HEAD = "use allowit::prelude::*;\npub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n"
+HEAD = "use allowit::prelude::*;\npub fn execute(ctx: &AllowitContext) -> allowit::Result {\n"
 
 
 def source(body, head=HEAD):
@@ -428,7 +428,7 @@ class ContractAdmin(unittest.TestCase):
             ("    // limits\n" + call("call_cap") + "    /* then */ " + call("call_cap"), ["call_cap", "call_cap"]),
             # Any other statement ends the prefix.
             ("    let left = allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n" + call("expiry"), []),
-            (call("expiry") + "    if ctx.request.operation == Operation::sep56_deposit {\n" + call("spent_cap") + "    }\n", ["expiry"]),
+            (call("expiry") + "    if ctx.request.operation == AllowitOperation::sep56_deposit {\n" + call("spent_cap") + "    }\n", ["expiry"]),
             (call("expiry") + "    allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n" + call("tokens"), ["expiry"]),
         ]
         vectors += [(call(name) + call("expiry"), []) for name in
@@ -439,7 +439,7 @@ class ContractAdmin(unittest.TestCase):
         explicit = HEAD.replace("allowit::Result {", "allowit::Result<()> {")
         self.assertEqual(ca.standard_prefix(source(call("tokens"), explicit)), ["tokens"])
         # Calls in other functions are not part of execute.
-        helper = "fn helper(ctx: &AllowitEnv) -> allowit::Result {\n" + call("tokens") + "    Ok(())\n}\n"
+        helper = "fn helper(ctx: &AllowitContext) -> allowit::Result {\n" + call("tokens") + "    Ok(())\n}\n"
         self.assertEqual(ca.standard_prefix(helper + source(call("expiry"))), ["expiry"])
         for invalid in (helper, source("") + source("")):
             with self.assertRaisesRegex(ValueError, "execute"):
@@ -456,10 +456,10 @@ class ContractAdmin(unittest.TestCase):
         self.assertEqual(ca.standard_prefix(helper + raw + source(call("expiry") + "    let s = \"/*\";\n" + call("tokens"))), ["expiry"])
         self.assertEqual(ca.standard_prefix(helper + source("    // \" /*\n" + call("expiry"))), ["expiry"])
         # A header inside a literal is not code. With the real header in prelude form, none matches.
-        fake = 'const S: &str = "pub fn execute(ctx: &AllowitEnv) -> allowit::Result { ' + call("spent_cap").strip() + '";\n'
+        fake = 'const S: &str = "pub fn execute(ctx: &AllowitContext) -> allowit::Result { ' + call("spent_cap").strip() + '";\n'
         for invalid in (fake + source(call("recipients"), HEAD.replace("allowit::Result {", "Result {")),
                         fake.replace('"', "r#\"", 1).replace('";', '"#;') + source("", HEAD.replace("allowit::Result {", "Result {")),
-                        "/* pub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n" + call("spent_cap") + "*/\npub fn r#execute(ctx: &AllowitEnv) -> Result {\n    Ok(())\n}\n",
+                        "/* pub fn execute(ctx: &AllowitContext) -> allowit::Result {\n" + call("spent_cap") + "*/\npub fn r#execute(ctx: &AllowitContext) -> Result {\n    Ok(())\n}\n",
                         source(call("expiry")) + "pub use self::execute as r#execute;\n"):
             with self.subTest(source=invalid), self.assertRaisesRegex(ValueError, "execute"):
                 ca.standard_prefix(invalid)

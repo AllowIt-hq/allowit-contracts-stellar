@@ -1,8 +1,8 @@
 #![no_std]
 use soroban_sdk::{Address, Bytes, BytesN, Symbol, contractevent, contracttype};
 
-/// Typed owner Grant and the protected accounting that rules read.
-pub use allowit::{AccountingHistory, Grant};
+/// Typed owner AllowitGrant and the protected accounting that rules read.
+pub use allowit::{AllowitAccountingHistory, AllowitGrant};
 
 /// Native transfer-profile argument encoding, fixed independently of policy source.
 pub const ARGUMENT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)";
@@ -14,7 +14,7 @@ pub const MAX_EXPENSE_BYTES: u32 = 1024;
 /// Exact arguments of the admitted stellar::sep41_transfer operation.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Sep41TransferArgs {
+pub struct AllowitSep41TransferArgs {
     /// Exact installed SAC address, distinct from the human-readable asset label.
     pub token: Address,
     /// Exact token source address; delegated spending requires the current wallet address.
@@ -28,7 +28,7 @@ pub struct Sep41TransferArgs {
 /// Exact arguments of the admitted stellar::sep56_deposit operation.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Sep56DepositArgs {
+pub struct AllowitSep56DepositArgs {
     /// Vault and share-token contract selected by the request and constrained by authored policy.
     pub vault: Address,
     /// Positive underlying SAC units supplied. The immutable wallet asset fixes their scale.
@@ -46,7 +46,7 @@ pub struct Sep56DepositArgs {
 /// Settled deposit effects, stored atomically with custody nonce and underlying transfer receipt.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Sep56DepositReceipt {
+pub struct AllowitSep56DepositReceipt {
     /// Single-use logical operation identifier retained across re-preparation.
     pub operation_id: BytesN<32>,
     /// Admitted vault, also the share-token contract.
@@ -72,7 +72,7 @@ pub struct Sep56DepositReceipt {
 /// Confirmed underlying-to-share exchange. The complete receipt remains available by operation identity.
 #[contractevent(topics = ["sep56_deposit"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Sep56DepositEvent {
+pub struct AllowitSep56DepositEvent {
     #[topic]
     pub operation_id: BytesN<32>,
     #[topic]
@@ -84,7 +84,7 @@ pub struct Sep56DepositEvent {
 /// The native profile of the canonical signed module-selection record.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PolicyInvocation {
+pub struct AllowitPolicyInvocation {
     /// Actual wallet Wasm SHA-256 identity. It differs from both release metadata and the authored-source digest.
     pub module_digest: BytesN<32>,
     /// Authored policy entrypoint, `execute`. Only the installed selector is admitted.
@@ -99,7 +99,7 @@ pub struct PolicyInvocation {
 /// These are not a proof of final gas or external vault valuation. Amounts use the immutable underlying asset.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExpenseBounds {
+pub struct AllowitExpenseBounds {
     /// Immutable underlying SAC denomination, distinct from the share token.
     pub asset: Address,
     /// Exact underlying scale. This native custody profile requires seven.
@@ -122,7 +122,7 @@ pub struct ExpenseBounds {
 /// The monotonic execution nonce and deployment version come from authenticated custody state.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExecutionRequest {
+pub struct AllowitExecutionRequest {
     /// Stable nonzero logical policy identifier. Upgrades and configuration changes preserve this identity.
     pub policy_instance: BytesN<32>,
     /// Exact full offchain source identity covered by agent/server authorization. Std binds its prefix separately.
@@ -136,14 +136,14 @@ pub struct ExecutionRequest {
     /// Exclusive Unix timestamp expiry in ledger seconds. Authored policy may add a stricter bound.
     pub expires_at: u64,
     /// Installed module selection and exact canonical arguments, bound before compiled policy execution.
-    pub invocation: PolicyInvocation,
-    /// Optional canonical XDR of ExpenseBounds, bounded by MAX_EXPENSE_BYTES. New cost rules require Some.
+    pub invocation: AllowitPolicyInvocation,
+    /// Optional canonical XDR of AllowitExpenseBounds, bounded by MAX_EXPENSE_BYTES. New cost rules require Some.
     pub expense: Option<Bytes>,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PolicyBinding {
+pub struct AllowitPolicyBinding {
     /// Exact installed wallet tier, independently bound by its executable hash.
     pub engine_kind: Symbol,
     /// Compiled kernel release metadata. Exact executable identity remains module_digest.
@@ -163,7 +163,7 @@ pub struct PolicyBinding {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransferReceipt {
+pub struct AllowitTransferReceipt {
     /// Nonzero logical operation identifier consumed once with successful effects; replacement preparations retain it.
     pub operation_id: BytesN<32>,
     /// Exact installed SAC address, distinct from the human-readable asset label.

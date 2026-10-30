@@ -1,5 +1,7 @@
 use super::*;
-use allowit::{AccountingHistory, AllowitEnv, Grant, Operation, Request};
+use allowit::{
+    AllowitAccountingHistory, AllowitContext, AllowitGrant, AllowitOperation, AllowitRequest,
+};
 use allowit_wallet_engine::EngineClient;
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
@@ -54,18 +56,18 @@ impl Fixture {
         }]);
     }
 }
-fn context(env: &Env) -> AllowitEnv {
-    AllowitEnv {
-        grant: Grant {
+fn context(env: &Env) -> AllowitContext {
+    AllowitContext {
+        grant: AllowitGrant {
             transaction_cap: Some(10),
             ..Default::default()
         },
-        state: AccountingHistory {
+        state: AllowitAccountingHistory {
             calls: 1,
             ..Default::default()
         },
-        request: Request {
-            operation: Operation::sep41_transfer,
+        request: AllowitRequest {
+            operation: AllowitOperation::sep41_transfer,
             asset: Address::generate(env),
             recipient: Address::generate(env),
             amount: 1,
@@ -110,7 +112,7 @@ fn wrong_or_absent_admin_cannot_upgrade_and_stale_version_does_not_commit() {
     );
     assert_eq!(
         c.try_upgrade_engine(&f.engine_hash, &1),
-        Err(Ok(Error::StaleVersion))
+        Err(Ok(AllowitParentError::StaleVersion))
     );
     assert_eq!(c.state(), before);
     f.auth(
@@ -246,7 +248,7 @@ fn engine_cannot_become_its_own_upgrade_admin() {
     );
     assert_eq!(
         f.client().try_set_admin(&engine, &0),
-        Err(Ok(Error::InvalidAdmin))
+        Err(Ok(AllowitParentError::InvalidAdmin))
     );
     assert_eq!(f.client().state().version, 0);
 }
@@ -255,7 +257,7 @@ fn engine_cannot_become_its_own_upgrade_admin() {
 fn version_overflow_rejects_without_switching_engine() {
     let f = Fixture::new(false);
     f.env.as_contract(&f.parent, || {
-        let mut state: ParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
+        let mut state: AllowitParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
         state.version = u64::MAX;
         f.env.storage().instance().set(&STATE_KEY, &state);
     });
@@ -267,7 +269,7 @@ fn version_overflow_rejects_without_switching_engine() {
     );
     assert_eq!(
         f.client().try_upgrade_engine(&f.engine_hash, &u64::MAX),
-        Err(Ok(Error::Overflow))
+        Err(Ok(AllowitParentError::Overflow))
     );
     assert_eq!(f.client().state(), before);
 }
@@ -349,7 +351,7 @@ fn parent_administration_does_not_load_an_unavailable_engine() {
     let f = Fixture::new(false);
     let missing = Address::generate(&f.env);
     f.env.as_contract(&f.parent, || {
-        let mut state: ParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
+        let mut state: AllowitParentState = f.env.storage().instance().get(&STATE_KEY).unwrap();
         state.engine = missing.clone();
         f.env.storage().instance().set(&STATE_KEY, &state);
     });

@@ -4,20 +4,20 @@
 //!
 //! ```ignore
 //! use allowit::prelude::*;
-//! pub fn execute(ctx: &AllowitEnv) -> allowit::Result {
+//! pub fn execute(ctx: &AllowitContext) -> allowit::Result {
 //!     allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
 //!     allowit::recipients(ctx, &ctx.grant.recipients)?;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! Rules are pure checks. Each returns its passing constraint or an `Error`. An unset Grant field
+//! Rules are pure checks. Each returns its passing constraint or an `AllowitError`. An unset AllowitGrant field
 //! is `MissingGrant`. The standard contract runs only the leading canonical calls, supplied by the
 //! owner as `rules`, through `preflight`, which skips unset fields. `scripts/contract_admin.py`
 //! derives `rules` from the source.
 //!
 //! Portable authored code uses rule calls, typed scalar fields and enum comparisons such as
-//! `ctx.request.operation == Operation::sep56_deposit`. Backend list methods differ (for example
+//! `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list methods differ (for example
 //! `len` returns `u32` onchain and `usize` on the host), so authored code reads lists only through
 //! `recipients` and `tokens`.
 //!
@@ -39,7 +39,7 @@ compile_error!(
     "Features `soroban` and `std` select different crate-root types; use `default-features = false`"
 );
 
-/// Onchain backend. Owner-signed Grant and every rule input are Soroban contract types.
+/// Onchain backend. Owner-signed AllowitGrant and every rule input are Soroban contract types.
 #[cfg(feature = "soroban")]
 pub mod soroban {
     pub use soroban_sdk::Address;

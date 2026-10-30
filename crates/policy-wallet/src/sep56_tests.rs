@@ -23,10 +23,15 @@ fn allow_recipient(f: &Fixture, vault: &Address) {
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
 }
-fn request(f: &Fixture, vault: &Address, assets: i128, min_shares: i128) -> ExecutionRequest {
+fn request(
+    f: &Fixture,
+    vault: &Address,
+    assets: i128,
+    min_shares: i128,
+) -> AllowitExecutionRequest {
     let mut e = f.execution(assets);
     e.expense = Some(
-        ExpenseBounds {
+        AllowitExpenseBounds {
             asset: f.asset.clone(),
             decimals: 7,
             gas_units: 0,
@@ -39,7 +44,7 @@ fn request(f: &Fixture, vault: &Address, assets: i128, min_shares: i128) -> Exec
         .to_xdr(&f.env),
     );
     e.invocation.argument_schema_digest = schema_digest(&f.env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR);
-    e.invocation.arguments = Sep56DepositArgs {
+    e.invocation.arguments = AllowitSep56DepositArgs {
         vault: vault.clone(),
         assets,
         min_shares,
@@ -52,10 +57,10 @@ fn request(f: &Fixture, vault: &Address, assets: i128, min_shares: i128) -> Exec
 }
 fn execute(
     f: &Fixture,
-    e: &ExecutionRequest,
+    e: &AllowitExecutionRequest,
 ) -> Result<
-    Result<TransferReceipt, soroban_sdk::ConversionError>,
-    Result<Error, soroban_sdk::InvokeError>,
+    Result<AllowitTransferReceipt, soroban_sdk::ConversionError>,
+    Result<AllowitWalletError, soroban_sdk::InvokeError>,
 > {
     f.auth(
         &[&f.agent, &f.server],
@@ -68,8 +73,8 @@ fn assert_unchanged(
     f: &Fixture,
     vault: &Address,
     op: &BytesN<32>,
-    before: &State,
-    history: &AccountingHistory,
+    before: &AllowitState,
+    history: &AllowitAccountingHistory,
 ) {
     assert_eq!(f.balance(), 1000);
     assert_eq!(VaultClient::new(&f.env, vault).balance(&f.wallet), 0);
@@ -108,7 +113,7 @@ fn deposit_compiled_simple_and_common_wallets_bind_and_retain_actual_effects() {
         assert_eq!(f.history().day_spent, 0);
         assert_eq!(f.history().day_total, 50);
         assert_eq!(f.history().calls, 1);
-        assert_eq!(execute(&f, &e), Err(Ok(Error::Replay)));
+        assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::Replay)));
         assert_eq!(f.balance(), 950);
         assert_eq!(f.client().deposit_receipt(&e.operation_id), Some(deposited));
     }
@@ -119,7 +124,7 @@ fn deposit_vault_target_is_controlled_only_by_authored_recipient_rule() {
     let f = Fixture::new(COMMON, false);
     let vault = vault(&f, 0, None);
     let e = request(&f, &vault, 50, 50);
-    assert_eq!(execute(&f, &e), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::PolicyDenied)));
     assert_eq!(f.balance(), 1000);
     assert_eq!(f.client().state().nonce, 0);
     allow_recipient(&f, &vault);
@@ -134,22 +139,28 @@ fn deposit_rejects_wrong_wallet_parties_nonpositive_bounds_and_noncanonical_byte
     allow_recipient(&f, &vault);
     for field in ["from", "receiver", "operator"] {
         let mut e = request(&f, &vault, 50, 50);
-        let mut args = Sep56DepositArgs::from_xdr(&f.env, &e.invocation.arguments).unwrap();
+        let mut args = AllowitSep56DepositArgs::from_xdr(&f.env, &e.invocation.arguments).unwrap();
         match field {
             "from" => args.from = f.recipient.clone(),
             "receiver" => args.receiver = f.recipient.clone(),
             _ => args.operator = f.recipient.clone(),
         }
         e.invocation.arguments = args.to_xdr(&f.env);
-        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+        assert_eq!(
+            execute(&f, &e),
+            Err(Ok(AllowitWalletError::InvalidInvocation))
+        );
     }
     // The wallet asset is never its own vault.
     let e = request(&f, &f.asset, 50, 50);
-    assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+    assert_eq!(
+        execute(&f, &e),
+        Err(Ok(AllowitWalletError::InvalidInvocation))
+    );
     for (assets, shares) in [(0, 1), (-1, 1), (1, 0), (1, -1)] {
         assert_eq!(
             execute(&f, &request(&f, &vault, assets, shares)),
-            Err(Ok(Error::InvalidAmount))
+            Err(Ok(AllowitWalletError::InvalidAmount))
         );
     }
     let mut e = request(&f, &vault, 50, 50);
@@ -169,7 +180,7 @@ fn deposit_wrong_asset_under_mint_lied_credit_and_changed_asset_roll_back_everyt
         let e = request(&f, &vault, 50, 50);
         let before = f.client().state();
         let spent = f.history();
-        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
+        assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::InvalidEffects)));
         assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
     }
     let f = Fixture::new(COMMON, false);
@@ -182,7 +193,10 @@ fn deposit_wrong_asset_under_mint_lied_credit_and_changed_asset_roll_back_everyt
     let e = request(&f, &vault, 50, 50);
     let before = f.client().state();
     let spent = f.history();
-    assert_eq!(execute(&f, &e), Err(Ok(Error::UnsupportedAsset)));
+    assert_eq!(
+        execute(&f, &e),
+        Err(Ok(AllowitWalletError::UnsupportedAsset))
+    );
     assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
 }
 
@@ -196,7 +210,7 @@ fn deposit_under_mint_within_the_valuation_bound_still_requires_min_shares() {
     set_cost(&f, &mut e, 0, 1);
     let before = f.client().state();
     let spent = f.history();
-    assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
+    assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::InvalidEffects)));
     assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
     let mut e = request(&f, &vault, 50, 49);
     set_cost(&f, &mut e, 0, 1);
@@ -223,11 +237,14 @@ fn deposit_cannot_inherit_transfer_only_custom_source_schema() {
     let vault = vault(&f, 0, None);
     allow_recipient(&f, &vault);
     let e = request(&f, &vault, 50, 50);
-    assert_eq!(execute(&f, &e), Err(Ok(Error::UnsupportedOperation)));
+    assert_eq!(
+        execute(&f, &e),
+        Err(Ok(AllowitWalletError::UnsupportedOperation))
+    );
     assert_eq!(
         f.client()
             .try_policy_binding_for(&e.invocation.argument_schema_digest),
-        Err(Ok(Error::UnsupportedOperation))
+        Err(Ok(AllowitWalletError::UnsupportedOperation))
     );
     assert_eq!(f.balance(), 1000);
 }
@@ -256,7 +273,7 @@ fn rule_input_carries_typed_operations_and_the_vault_as_recipient() {
     let f = Fixture::new(COMMON, false);
     let vault = vault(&f, 0, None);
     let state = f.client().state();
-    let deposit = NativeOperation::Deposit(Sep56DepositArgs {
+    let deposit = NativeOperation::Deposit(AllowitSep56DepositArgs {
         vault: vault.clone(),
         assets: 5,
         receiver: f.wallet.clone(),
@@ -264,7 +281,7 @@ fn rule_input_carries_typed_operations_and_the_vault_as_recipient() {
         operator: f.wallet.clone(),
         min_shares: 5,
     });
-    let history = AccountingHistory {
+    let history = AllowitAccountingHistory {
         calls: 1,
         day: 1,
         ..Default::default()
@@ -277,19 +294,19 @@ fn rule_input_carries_typed_operations_and_the_vault_as_recipient() {
         86_410,
         86_500,
     );
-    assert_eq!(ctx.request.operation, Operation::sep56_deposit);
+    assert_eq!(ctx.request.operation, AllowitOperation::sep56_deposit);
     assert_eq!(ctx.request.recipient, vault);
     assert_eq!(ctx.request.asset, f.asset);
     assert_eq!(ctx.request.amount, 5);
     assert_eq!(ctx.state, history);
     assert_eq!(ctx.grant, state.grant);
-    let transfer = NativeOperation::Transfer(Sep41TransferArgs {
+    let transfer = NativeOperation::Transfer(AllowitSep41TransferArgs {
         token: f.asset.clone(),
         from: f.wallet.clone(),
         to: f.recipient.clone(),
         amount: 1,
     });
-    assert_eq!(transfer.kind(), Operation::sep41_transfer);
+    assert_eq!(transfer.kind(), AllowitOperation::sep41_transfer);
 }
 
 #[test]
@@ -306,7 +323,7 @@ fn ordinary_recipient_allowlist_admits_multiple_vaults_and_denies_other_targets(
         assert!(execute(&f, &request(&f, target, 40, 40)).is_ok());
     }
     let e = request(&f, &denied, 40, 40);
-    assert_eq!(execute(&f, &e), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::PolicyDenied)));
     assert_eq!(f.balance(), 920);
     assert_eq!(f.client().state().nonce, 2);
     assert_eq!(f.history().day_total, 80);
@@ -322,23 +339,23 @@ fn deposit_untrusted_metadata_getter_cannot_mutate_final_share_or_asset_effects(
         let e = request(&f, &vault, 50, 50);
         let before = f.client().state();
         let spent = f.history();
-        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
+        assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::InvalidEffects)));
         assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
     }
 }
 
-fn set_cost(f: &Fixture, e: &mut ExecutionRequest, gas: i128, conversion: i128) {
+fn set_cost(f: &Fixture, e: &mut AllowitExecutionRequest, gas: i128, conversion: i128) {
     let depositing = e.invocation.argument_schema_digest
         == schema_digest(&f.env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR);
     let principal = if depositing {
         conversion
     } else {
-        Sep41TransferArgs::from_xdr(&f.env, &e.invocation.arguments)
+        AllowitSep41TransferArgs::from_xdr(&f.env, &e.invocation.arguments)
             .unwrap()
             .amount
     };
     e.expense = Some(
-        ExpenseBounds {
+        AllowitExpenseBounds {
             asset: f.asset.clone(),
             decimals: 7,
             gas_units: gas,
@@ -393,7 +410,7 @@ fn expense_and_gross_cap_denials_and_valuation_bound_roll_back_atomic_effects() 
         set_cost(&f, &mut e, 3, 2);
         let before = f.client().state();
         let spent = f.history();
-        assert_eq!(execute(&f, &e), Err(Ok(Error::PolicyDenied)));
+        assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::PolicyDenied)));
         assert_unchanged(&f, &v, &e.operation_id, &before, &spent);
     }
     for (behavior, conversion) in [(11, 1), (12, 0)] {
@@ -404,7 +421,7 @@ fn expense_and_gross_cap_denials_and_valuation_bound_roll_back_atomic_effects() 
         set_cost(&f, &mut e, 3, conversion);
         let before = f.client().state();
         let spent = f.history();
-        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
+        assert_eq!(execute(&f, &e), Err(Ok(AllowitWalletError::InvalidEffects)));
         assert_unchanged(&f, &v, &e.operation_id, &before, &spent);
     }
 }
@@ -414,7 +431,7 @@ fn economic_class_denomination_gas_and_observation_facts_cannot_be_forged() {
     for mutation in 0..7 {
         let mut e = f.execution(50);
         set_cost(&f, &mut e, 3, 0);
-        let mut c = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+        let mut c = AllowitExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
         match mutation {
             0 => {
                 c.conversion_units = 1;
@@ -428,7 +445,10 @@ fn economic_class_denomination_gas_and_observation_facts_cannot_be_forged() {
             _ => c.asset = f.recipient.clone(),
         }
         e.expense = Some(c.to_xdr(&f.env));
-        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+        assert_eq!(
+            execute(&f, &e),
+            Err(Ok(AllowitWalletError::InvalidInvocation))
+        );
         assert_eq!(f.balance(), 1000);
         assert_eq!(f.client().state().nonce, 0);
     }
@@ -476,7 +496,10 @@ fn expense_bytes_require_exact_canonical_known_fields_and_bounded_length() {
         assert_eq!(f.client().state().nonce, 0);
     }
     e.expense = Some(Bytes::from_slice(&f.env, &[0u8; 1025]));
-    assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+    assert_eq!(
+        execute(&f, &e),
+        Err(Ok(AllowitWalletError::InvalidInvocation))
+    );
     e.expense = Some(original);
     assert!(execute(&f, &e).is_ok());
 }
@@ -490,7 +513,7 @@ fn standard_prefix_digest_matches_independent_xdr_vector_and_binds_context() {
         &env,
         "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ",
     );
-    let rules = vec![&env, Rule::spent_cap, Rule::recipients];
+    let rules = vec![&env, AllowitRule::spent_cap, AllowitRule::recipients];
     let expected = BytesN::from_array(
         &env,
         &[
@@ -502,7 +525,7 @@ fn standard_prefix_digest_matches_independent_xdr_vector_and_binds_context() {
         standard_prefix_digest(&env, &kind, &module, &asset, &rules),
         expected
     );
-    let reversed = vec![&env, Rule::recipients, Rule::spent_cap];
+    let reversed = vec![&env, AllowitRule::recipients, AllowitRule::spent_cap];
     assert_ne!(
         standard_prefix_digest(&env, &kind, &module, &asset, &reversed),
         expected
@@ -537,7 +560,10 @@ fn owner_grant_update_preserves_prefix_code_usage_and_revokes_old_revision() {
     assert_eq!(f.wallet.executable(), code);
     assert_eq!(f.client().state().source_digest, original.source_digest);
     assert_eq!(f.client().state().nonce, original.nonce);
-    assert_eq!(execute(&f, &inflight), Err(Ok(Error::StaleRequest)));
+    assert_eq!(
+        execute(&f, &inflight),
+        Err(Ok(AllowitWalletError::StaleRequest))
+    );
     f.transfer(20);
     // Protected history counts every success, including those while a cap was unset.
     assert_eq!(f.history().spent, 70);
@@ -550,7 +576,10 @@ fn owner_grant_update_preserves_prefix_code_usage_and_revokes_old_revision() {
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
     let next = f.execution(6);
-    assert_eq!(execute(&f, &next), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(
+        execute(&f, &next),
+        Err(Ok(AllowitWalletError::PolicyDenied))
+    );
     assert_eq!(f.balance(), 930);
     assert_eq!(f.history().spent, 70);
     assert_eq!(f.client().state().nonce, 2);
@@ -580,7 +609,10 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
     d.grant.spent_cap = Some(1000);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
-    assert_eq!(execute(&f, &f.execution(1)), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(
+        execute(&f, &f.execution(1)),
+        Err(Ok(AllowitWalletError::PolicyDenied))
+    );
     assert_eq!(f.client().state().history, history);
     let mut d = f.deployment();
     d.grant.spent_cap = None;
@@ -588,7 +620,10 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
     d.grant.day_total_cap = Some(1000);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
-    assert_eq!(execute(&f, &f.execution(1)), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(
+        execute(&f, &f.execution(1)),
+        Err(Ok(AllowitWalletError::PolicyDenied))
+    );
     f.env.ledger().with_mut(|l| l.timestamp += 86_400);
     execute(&f, &f.execution(1)).unwrap().unwrap();
     let history = f.client().state().history;
@@ -610,7 +645,10 @@ fn reenabled_call_cap_counts_operations_while_disabled() {
     d.grant.call_cap = Some(2);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
-    assert_eq!(execute(&f, &f.execution(1)), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(
+        execute(&f, &f.execution(1)),
+        Err(Ok(AllowitWalletError::PolicyDenied))
+    );
     assert_eq!(f.client().state().history.calls, 2);
 }
 
@@ -621,7 +659,7 @@ fn issued_asset_normalized_gas_is_signed_and_keeps_native_amount_checks() {
     allow_recipient(&f, &v);
     let mut e = request(&f, &v, 50, 50);
     set_cost(&f, &mut e, 3, 2);
-    let mut cost = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+    let mut cost = AllowitExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
     cost.max_fee_stroops = 100;
     e.expense = Some(cost.to_xdr(&f.env));
     assert!(execute(&f, &e).is_ok());
@@ -632,7 +670,7 @@ fn issued_asset_normalized_gas_is_signed_and_keeps_native_amount_checks() {
         let f = Fixture::new(COMMON, false);
         let mut e = f.execution(50);
         set_cost(&f, &mut e, 3, 0);
-        let mut cost = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+        let mut cost = AllowitExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
         cost.max_fee_stroops = 100;
         match mutation {
             0 => cost.asset = f.recipient.clone(),
@@ -642,7 +680,10 @@ fn issued_asset_normalized_gas_is_signed_and_keeps_native_amount_checks() {
             _ => cost.max_fee_stroops = 0,
         };
         e.expense = Some(cost.to_xdr(&f.env));
-        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+        assert_eq!(
+            execute(&f, &e),
+            Err(Ok(AllowitWalletError::InvalidInvocation))
+        );
         assert_eq!(f.balance(), 1000);
         assert_eq!(f.client().state().nonce, 0);
     }
@@ -650,7 +691,7 @@ fn issued_asset_normalized_gas_is_signed_and_keeps_native_amount_checks() {
         let f = Fixture::new(COMMON, false);
         let mut e = f.execution(50);
         set_cost(&f, &mut e, 3, 0);
-        let mut cost = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+        let mut cost = AllowitExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
         cost.max_fee_stroops = 100;
         e.expense = Some(cost.to_xdr(&f.env));
         f.auth(
