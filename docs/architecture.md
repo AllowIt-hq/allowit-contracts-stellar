@@ -286,7 +286,10 @@ calls it; offchain evaluation uses `allowit` directly. It remains the engine par
 checker for onchain callers that cannot bundle `allowit`. Its tests match `AllowitRule` exhaustively, so a
 new rule fails to compile until the engine exposes it. The `test-deny` fixture aborts every rule
 with contract error `TEST_DENY` (1000), outside `allowit::AllowitError`. `engine_version` 3 marks this ABI.
-Release 2 took `ctx: AllowitContext` as one argument.
+It replaces the shipped release 1 ABI, whose methods take `(request: EngineRequest, state:
+EngineState)`. Release 2 was never released. An `upgrade_engine` from a deployed release 1 engine
+to release 3 breaks every onchain caller of the release 1 methods, so migrate or retire those
+callers first.
 
 ## Expenses and native effects
 

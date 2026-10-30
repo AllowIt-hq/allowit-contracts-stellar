@@ -10,7 +10,8 @@ use soroban_sdk::{Address, Env, contract, contractimpl, panic_with_error};
 #[contract]
 pub struct AllowitEngine;
 /// Engine executable release, independent of parent administration. Version 3 takes the context
-/// fields `grant`, `state` and `request` as separate arguments.
+/// fields `grant`, `state` and `request` as separate arguments. It replaces the release 1 ABI,
+/// `(request: EngineRequest, state: EngineState)`; release 2 was never released.
 const ENGINE_VERSION: u32 = 3;
 /// Contract error code of the test fixture veto. It is outside `allowit::AllowitError`.
 pub const TEST_DENY: u32 = 1000;
