@@ -418,10 +418,6 @@ fn economic_class_denomination_gas_and_observation_facts_cannot_be_forged() {
         assert_eq!(f.balance(), 1000);
         assert_eq!(f.client().state().nonce, 0);
     }
-    let f = Fixture::new(COMMON, false);
-    let mut e = f.execution(50);
-    set_cost(&f, &mut e, 3, 0);
-    assert_eq!(execute(&f, &e), Err(Ok(Error::UnsupportedAsset))); // No implicit USDC/XLM gas conversion.
 }
 #[test]
 fn expense_bytes_require_exact_canonical_known_fields_and_bounded_length() {
@@ -622,4 +618,54 @@ fn reenabled_call_cap_counts_operations_while_disabled() {
     f.client().deploy_policy(&d);
     assert_eq!(execute(&f, &f.execution(1)), Err(Ok(Error::PolicyDenied)));
     assert_eq!(f.client().state().history.calls, 2);
+}
+
+#[test]
+fn issued_asset_normalized_gas_is_signed_and_keeps_native_amount_checks() {
+    let f = Fixture::new(COMMON, false);
+    let v = vault(&f, 11, None);
+    allow_recipient(&f, &v);
+    let mut e = request(&f, &v, 50, 50);
+    set_cost(&f, &mut e, 3, 2);
+    let mut cost = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+    cost.max_fee_stroops = 100;
+    e.expense = Some(cost.to_xdr(&f.env));
+    assert!(execute(&f, &e).is_ok());
+    assert_eq!(f.used("spent"), 5);
+    assert_eq!(f.used("day_total"), 53);
+    assert_eq!(f.balance(), 950);
+    for mutation in 0..5 {
+        let f = Fixture::new(COMMON, false);
+        let mut e = f.execution(50);
+        set_cost(&f, &mut e, 3, 0);
+        let mut cost = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+        cost.max_fee_stroops = 100;
+        match mutation {
+            0 => cost.asset = f.recipient.clone(),
+            1 => cost.decimals = 6,
+            2 => cost.gas_units = -1,
+            3 => cost.gas_units = 0,
+            _ => cost.max_fee_stroops = 0,
+        };
+        e.expense = Some(cost.to_xdr(&f.env));
+        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+        assert_eq!(f.balance(), 1000);
+        assert_eq!(f.client().state().nonce, 0);
+    }
+    for missing_server in [false, true] {
+        let f = Fixture::new(COMMON, false);
+        let mut e = f.execution(50);
+        set_cost(&f, &mut e, 3, 0);
+        let mut cost = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+        cost.max_fee_stroops = 100;
+        e.expense = Some(cost.to_xdr(&f.env));
+        f.auth(
+            &[if missing_server { &f.agent } else { &f.server }],
+            "execute",
+            (e.clone(),).into_val(&f.env),
+        );
+        assert!(f.client().try_execute(&e).is_err());
+        assert_eq!(f.balance(), 1000);
+        assert_eq!(f.client().state().nonce, 0);
+    }
 }

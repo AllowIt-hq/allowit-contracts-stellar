@@ -239,3 +239,40 @@ fn selected_cap_boundaries_and_authored_map_cannot_rewrite_protected_history() {
     assert!(checked.approval);
     assert_eq!(amount(&env, &checked.spent, "spent"), 5);
 }
+
+#[test]
+fn normalized_positive_gas_keeps_asset_scale_and_xlm_identity_checks() {
+    let env = Env::default();
+    let (mut request, state) = fixture(&env);
+    let mut e = cost(&env, &request);
+    e.max_fee_stroops = 100;
+    request.expense = Some(e.clone().to_xdr(&env));
+    assert!(
+        spent_cap(env.clone(), request.clone(), state.clone())
+            .unwrap()
+            .approval
+    );
+    for zero_fee in [false, true] {
+        let mut invalid = e.clone();
+        if zero_fee {
+            invalid.max_fee_stroops = 0
+        } else {
+            invalid.gas_units = 0
+        };
+        request.expense = Some(invalid.to_xdr(&env));
+        assert_eq!(
+            spent_cap(env.clone(), request.clone(), state.clone()),
+            Err(Error::InvalidParameter)
+        );
+    }
+    request.asset = env
+        .deployer()
+        .with_stellar_asset(Bytes::from_array(&env, &[0; 4]))
+        .deployed_address();
+    e.asset = request.asset.clone();
+    request.expense = Some(e.to_xdr(&env));
+    assert_eq!(
+        spent_cap(env.clone(), request, state),
+        Err(Error::InvalidParameter)
+    );
+}

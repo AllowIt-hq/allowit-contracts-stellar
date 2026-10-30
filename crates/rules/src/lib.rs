@@ -146,13 +146,19 @@ fn expenses(env: &Env, request: &EngineRequest) -> Result<allowit_wallet_protoco
     if value.clone().to_xdr(env) != *raw {
         return Err(Error::InvalidParameter);
     }
+    let native_asset = env
+        .deployer()
+        .with_stellar_asset(soroban_sdk::Bytes::from_array(env, &[0; 4]))
+        .deployed_address();
     if value.asset != request.asset
         || value.decimals != request.decimals
         || value.decimals != 7
         || value.gas_units < 0
         || value.conversion_units < 0
         || value.spent_units < 0
-        || value.gas_units != i128::from(value.max_fee_stroops)
+        || (value.max_fee_stroops == 0 && value.gas_units != 0)
+        || (value.max_fee_stroops > 0 && value.gas_units <= 0)
+        || (request.asset == native_asset && value.gas_units != i128::from(value.max_fee_stroops))
         || value.day != request.now / DAY
         || value.observed_ledger == 0
         || value.spent_units

@@ -493,11 +493,12 @@ fn validate_expense(
         .deployer()
         .with_stellar_asset(Bytes::from_array(env, &[0; 4]))
         .deployed_address();
-    // There is no admitted cross-asset gas oracle. Only exact XLM/stroop identity conversion is supported.
-    if expense.max_fee_stroops > 0 && state.asset != native_asset {
-        return Err(Error::UnsupportedAsset);
-    }
-    if expense.gas_units != i128::from(expense.max_fee_stroops) {
+    // Both authenticated actors attest normalized gas for non-XLM accounting assets.
+    // The kernel cannot verify a cross-asset price. XLM remains exact stroop identity.
+    if (expense.max_fee_stroops == 0 && expense.gas_units != 0)
+        || (expense.max_fee_stroops > 0 && expense.gas_units <= 0)
+        || (state.asset == native_asset && expense.gas_units != i128::from(expense.max_fee_stroops))
+    {
         return Err(Error::InvalidInvocation);
     }
     let principal = match operation {
