@@ -41,8 +41,8 @@ The source account signs initial setup under its existing master authority. Late
 
 [Engine parent](engine-parent.md) defines parent state, executable references, version ordering and recovery.
 
-Run `scripts/build-contracts.sh` before contract tests or deployment preparation. It reproduces all
-policy modules, builds the test fixtures, then restores the default deployable artifacts. Select the
+Run `scripts/build-contracts.sh` before contract tests or deployment preparation. It checks policy
+bindings, builds the test fixtures, then rebuilds the default deployable artifacts. Select the
 reviewed source and placement manifest when preparing a policy executable.
 
 Use `contract_admin.py upload --source "$OWNER" --wasm PATH` separately for the engine, parent and
@@ -84,8 +84,11 @@ admin source and three `--member` values.
 
 A deployment argument contains exactly `deployment_version`, `owner`, `agent`, `server`,
 `source_digest`, `rules`, `grant`, `x402_enabled`, and `wasm_hash`. The target version is current plus
-one. Use null for unchanged code. Deployment preserves pause and protected history. A changed owner must
-also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
+one. Use null for unchanged code. A non-null `wasm_hash` also requires `--wasm PATH` with that hash;
+the tool refuses Wasm without `allowit_custody_layout` metadata equal to 2. Code for another custody
+layout cannot read the stored State, so such a change, including a rollback to a version 1 release,
+locks custody permanently. Recover funds before any change across layouts. Deployment preserves
+pause and protected history. A changed owner must also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
 False disables x402 without changing direct two-role execution authorization. Classic signer rotation and `shutdown-wallet` do not revoke raw-key x402 delegation. The contract wallet owner must disable x402, pause, or replace the agent/server address through `deploy_policy`.
 
 Owner passthrough uses `invoke(contract, function, args, auth)`. Prepare this exact call with the
@@ -113,8 +116,9 @@ deployment and recovery do not depend on shared engine availability.
 Wallets with layout `contract_version` 1 store the retired Map Grant and cannot execute under the
 typed release. Owner `recover`, `invoke` and `deploy_policy` still work after an in-place upgrade,
 because they read only the fields they keep. Repair an upgraded wallet with one complete typed
-`deploy_policy` packet, or drain it with `recover` and redeploy. `contract_admin.py` builds owner
-packets only for layout 2; read the version 1 state with that release's tooling.
+`deploy_policy` packet, or drain it with `recover` and redeploy. `contract_admin.py` builds
+`deploy_policy` packets only for layout 2; read the version 1 state with that release's tooling.
+`recover` does not read `state()`, so the tool also drains an upgraded version 1 wallet.
 
 Normal operations do not migrate state. An incompatible change uses this explicit maintenance
 sequence: pause, deploy and run a migration contract, deploy the new contract using the migrated

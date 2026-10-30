@@ -7,6 +7,7 @@ import time
 import json
 import os
 import re
+import struct
 import subprocess
 from pathlib import Path
 from stellar_sdk import Address, Network, xdr, StrKey, TransactionEnvelope, InvokeHostFunction, Preconditions, TimeBounds
@@ -68,7 +69,7 @@ def code_hash(value):
 def pinned_wasm(path, expected_hash):
     expected_hash = code_hash(expected_hash).lower()
     if not path:
-        raise ValueError("Constructor deployment requires --wasm and its pinned --wasm-hash")
+        raise ValueError("Code deployment requires --wasm and its pinned --wasm-hash")
     if hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected_hash:
         raise ValueError("Local Wasm does not match the pinned deployment hash")
     return expected_hash
@@ -76,6 +77,68 @@ def pinned_wasm(path, expected_hash):
 
 # Custody State layout this tool encodes: typed Grant and Vec<Rule> prefix. Version 1 stored a Grant map.
 WALLET_CONTRACT_VERSION = 2
+
+
+CUSTODY_LAYOUT_KEY = b"allowit_custody_layout"
+
+
+def leb128(data, pos):
+    value = shift = 0
+    while True:
+        byte = data[pos]
+        value |= (byte & 0x7F) << shift
+        shift += 7
+        pos += 1
+        if byte < 0x80:
+            return value, pos
+
+
+def custody_layout(wasm):
+    """Return the custody layout a policy wallet Wasm declares in its `contractmetav0` section,
+    or None. The version 1 release declares none."""
+    if wasm[:8] != b"\0asm\x01\0\0\0":
+        raise ValueError("Expected a Wasm module")
+    found, pos = [], 8
+    try:
+        while pos < len(wasm):
+            size, start = leb128(wasm, pos + 1)
+            end = start + size
+            if end > len(wasm):
+                raise IndexError
+            if wasm[pos] == 0:
+                length, name = leb128(wasm, start)
+                if wasm[name:name + length] == b"contractmetav0":
+                    # A stream of XDR ScMetaEntry: kind 0, then key and value strings.
+                    meta, at = wasm[name + length:end], 0
+                    while at < len(meta):
+                        if struct.unpack_from(">I", meta, at)[0] != 0:
+                            raise ValueError("Unsupported Wasm metadata entry")
+                        at += 4
+                        fields = []
+                        for _ in range(2):
+                            count = struct.unpack_from(">I", meta, at)[0]
+                            fields.append(meta[at + 4:at + 4 + count])
+                            at += 4 + (count + 3) // 4 * 4
+                        if at > len(meta):
+                            raise IndexError
+                        if fields[0] == CUSTODY_LAYOUT_KEY:
+                            found.append(fields[1])
+            pos = end
+    except (IndexError, struct.error):
+        raise ValueError("Malformed Wasm module") from None
+    if len(found) > 1 or found and not re.fullmatch(rb"[1-9][0-9]{0,8}", found[0]):
+        raise ValueError("Wasm custody layout metadata is invalid")
+    return int(found[0]) if found else None
+
+
+def wallet_code(wasm_hash, path):
+    """Refuse a wallet code change to Wasm with another custody layout. That code, including a
+    rollback to the version 1 release, cannot read the stored State and locks custody for good."""
+    if wasm_hash is None:
+        return
+    pinned_wasm(path, wasm_hash)
+    if custody_layout(Path(path).read_bytes()) != WALLET_CONTRACT_VERSION:
+        raise ValueError("New wallet code must declare custody layout 2; recover funds before any layout change")
 
 
 def wallet_layout(state):
@@ -117,12 +180,55 @@ PREFIX_CALL = re.compile(r"allowit::([a-z_]+)\(ctx,&ctx\.grant\.([a-z_]+),?\)\?"
 EXECUTE = re.compile(r"\bpub\s+fn\s+execute\s*\(\s*ctx\s*:\s*&\s*AllowitEnv\s*\)\s*->\s*allowit\s*::\s*Result(?:\s*<\s*\(\s*\)\s*>)?\s*\{")
 
 
+# Rust literals that can hide code from a plain scan: raw, byte, C and plain strings, then char
+# literals. A quote that starts no char literal is a lifetime or label.
+RAW_STRING = re.compile(r'(?<![A-Za-z0-9_])[bc]?r(#*)"')
+STRING = re.compile(r'(?<![A-Za-z0-9_])[bc]?"(?:\\[\s\S]|[^"\\])*"')
+CHAR = re.compile(r"(?<![A-Za-z0-9_])b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,8}\}|[^\n])|[^\\'\n])'")
+
+
+def rust_code(source):
+    """Return source with comments blanked and literals replaced by `0`, so only code remains.
+    Block comments nest as in Rust. An unterminated comment or literal is rejected."""
+    out, i, n = [], 0, len(source)
+    while i < n:
+        if source.startswith("//", i):
+            end = source.find("\n", i)
+            i = n if end < 0 else end
+            out.append(" ")
+        elif source.startswith("/*", i):
+            depth, i = 1, i + 2
+            while depth:
+                if i >= n:
+                    raise ValueError("Policy source has an unterminated block comment")
+                step = source[i:i + 2]
+                depth += (step == "/*") - (step == "*/")
+                i += 2 if step in ("/*", "*/") else 1
+            out.append(" ")
+        elif raw := RAW_STRING.match(source, i):
+            end = source.find('"' + raw[1], raw.end())
+            if end < 0:
+                raise ValueError("Policy source has an unterminated raw string")
+            i = end + 1 + len(raw[1])
+            out.append(" 0 ")
+        elif literal := STRING.match(source, i) or CHAR.match(source, i):
+            i = literal.end()
+            out.append(" 0 ")
+        elif source[i] == '"' or source.startswith(('b"', 'c"'), i):
+            raise ValueError("Policy source has an unterminated string")
+        else:
+            out.append(source[i])
+            i += 1
+    return "".join(out)
+
+
 def standard_prefix(source):
     """Return the standard prefix of authored policy source: the consecutive leading statements of
-    `execute` of the exact form `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`. Any other statement ends it."""
-    text = re.sub(r"/\*[\s\S]*?\*/|//[^\n]*", "", source)
+    `execute` of the exact form `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`. Any other statement ends it.
+    Comments and literals are removed with Rust lexing first, so they cannot add or hide calls."""
+    text = rust_code(source)
     found = list(EXECUTE.finditer(text))
-    if len(found) != 1:
+    if len(found) != 1 or len(re.findall(r"\bexecute\b", text)) != 1:
         raise ValueError("Policy source must define pub fn execute(ctx: &AllowitEnv) -> allowit::Result once")
     rules = []
     for statement in text[found[0].end():].split(";"):
@@ -358,6 +464,7 @@ def command(args):
     values = checked_args(args.method, public_json(args.arguments), args.family)
     if args.method == "deploy_policy":
         policy_rules(values["deployment"], getattr(args, "tier", None), getattr(args, "policy_source", None))
+        wallet_code(values["deployment"]["wasm_hash"], getattr(args, "wasm", None))
     return ["contract", "invoke", "--id", args.contract, "--build-only"] + base + ["--", args.method] + serialize(values)
 
 
@@ -385,7 +492,8 @@ def main():
     if args.action == "deploy-wallet" or args.action == "admin" and args.family == "wallet":
         owner_only(fetch(args.network, args.source))
 
-    if args.action == "admin":
+    # Recover needs no state(): the contract checks its kept owner, under any layout it can read.
+    if args.action == "admin" and not (args.family == "wallet" and args.method == "recover"):
         state_args = ["contract", "invoke", "--id", args.contract, "--network", args.network,
                       "--source-account", args.source, "--send=no", "--", "state"]
         state = json.loads(cli_run(state_args))
@@ -406,7 +514,7 @@ def main():
         if args.family == "parent":
             if values["version"] != state["version"]:
                 raise ValueError("Expected version does not match current state")
-        elif args.method != "recover":
+        else:
             target = values["deployment"]["deployment_version"] if args.method == "deploy_policy" else values["deployment_version"]
             if target != state["deployment_version"] + 1:
                 raise ValueError("Policy deployment must use the next version")

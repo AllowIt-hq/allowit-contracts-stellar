@@ -24,6 +24,27 @@ def source(body, head=HEAD):
     return head + body + "    Ok(())\n}\n"
 
 
+def leb128(value):
+    out = bytearray()
+    while True:
+        byte, value = value & 0x7F, value >> 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def meta_wasm(*entries):
+    """Minimal Wasm module with one `contractmetav0` section of XDR ScMetaEntry V0 entries."""
+    meta = b""
+    for key, value in entries:
+        meta += bytes(4)
+        for field in (key, value):
+            meta += len(field).to_bytes(4, "big") + field + bytes(-len(field) % 4)
+    name = b"contractmetav0"
+    body = leb128(len(name)) + name + meta
+    return b"\0asm\x01\0\0\0" + b"\0" + leb128(len(body)) + body
+
+
 def state():
     return {"account_id": KEYS[0], "sequence": "42", "signers": [
         {"key": KEYS[0], "weight": 1, "type": "ed25519_public_key"}],
@@ -424,6 +445,28 @@ class ContractAdmin(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "execute"):
                 ca.standard_prefix(invalid)
 
+    def test_standard_prefix_lexes_comments_and_literals_like_rust(self):
+        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        # Block comments nest: the whole span is a comment, so recipients runs first.
+        nested = "    /* outer /* inner */ allowit::spent_cap(ctx, &ctx.grant.spent_cap)?; */\n" + call("recipients")
+        self.assertEqual(ca.standard_prefix(source(nested)), ["recipients"])
+        # Literals cannot add, hide or end calls; a quote char and lifetimes are not strings.
+        helper = "fn quote<'a>(x: &'a str) -> char { let _ = x; '\"' }\nconst C: char = '\\'';\n"
+        raw = 'const R: &str = r#"*/ /* "quoted" "#;\nconst B: &[u8] = b"//";\n'
+        self.assertEqual(ca.standard_prefix(helper + raw + source(call("expiry") + "    let s = \"/*\";\n" + call("tokens"))), ["expiry"])
+        self.assertEqual(ca.standard_prefix(helper + source("    // \" /*\n" + call("expiry"))), ["expiry"])
+        # A header inside a literal is not code. With the real header in prelude form, none matches.
+        fake = 'const S: &str = "pub fn execute(ctx: &AllowitEnv) -> allowit::Result { ' + call("spent_cap").strip() + '";\n'
+        for invalid in (fake + source(call("recipients"), HEAD.replace("allowit::Result {", "Result {")),
+                        fake.replace('"', "r#\"", 1).replace('";', '"#;') + source("", HEAD.replace("allowit::Result {", "Result {")),
+                        "/* pub fn execute(ctx: &AllowitEnv) -> allowit::Result {\n" + call("spent_cap") + "*/\npub fn r#execute(ctx: &AllowitEnv) -> Result {\n    Ok(())\n}\n",
+                        source(call("expiry")) + "pub use self::execute as r#execute;\n"):
+            with self.subTest(source=invalid), self.assertRaisesRegex(ValueError, "execute"):
+                ca.standard_prefix(invalid)
+        for unterminated in ("/* /* */", 'const S: &str = "', 'const R: &str = r#"x"'):
+            with self.subTest(source=unterminated), self.assertRaisesRegex(ValueError, "unterminated"):
+                ca.standard_prefix(source(call("expiry")) + unterminated)
+
     def test_owner_packets_bind_rules_derived_from_the_policy_source(self):
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
@@ -452,6 +495,80 @@ class ContractAdmin(unittest.TestCase):
             deployment["rules"] = ["recipients", "expiry"]
             args.arguments = json.dumps({"deployment": deployment})
             self.assertIn("deploy_policy", ca.command(args))
+
+    def test_wallet_code_changes_require_custody_layout_2(self):
+        self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"2"))), 2)
+        # The version 1 release declares only SDK metadata.
+        self.assertIsNone(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"))))
+        self.assertIsNone(ca.custody_layout(b"\0asm\x01\0\0\0"))
+        for invalid in (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"2"), (ca.CUSTODY_LAYOUT_KEY, b"2")),
+                        meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"02")), meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"x")),
+                        meta_wasm((b"rsver", b"1"))[:-2], b"not-wasm"):
+            with self.subTest(wasm=invalid), self.assertRaises(ValueError):
+                ca.custody_layout(invalid)
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(source("    allowit::expiry(ctx, &ctx.grant.expiry)?;\n"))
+            deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
+                          "rules": ["expiry"], "grant": {}, "x402_enabled": False, "wasm_hash": None}
+            args = SimpleNamespace(action="admin", network="testnet", allow_mainnet=False, source=KEYS[0], family="wallet",
+                                   contract=StrKey.encode_contract(bytes([2]) * 32), method="deploy_policy", tier="common",
+                                   policy_source=str(policy), wasm=None)
+
+            def prepare(wasm_bytes, wasm_hash=None):
+                path = Path(directory) / "wallet.wasm"
+                path.write_bytes(wasm_bytes)
+                deployment["wasm_hash"] = wasm_hash or hashlib.sha256(wasm_bytes).hexdigest()
+                args.wasm, args.arguments = str(path), json.dumps({"deployment": deployment})
+                return ca.command(args)
+
+            self.assertIn("deploy_policy", prepare(meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"2"))))
+            # The old Map-Grant release, a future layout and an unpinned file reject.
+            for wasm_bytes, wasm_hash in ((meta_wasm((b"rsver", b"1.98.0")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"1")), None),
+                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"3")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"2")), "11" * 32)):
+                with self.subTest(wasm=wasm_bytes), self.assertRaises(ValueError):
+                    prepare(wasm_bytes, wasm_hash)
+            args.wasm = None
+            with self.assertRaisesRegex(ValueError, "--wasm"):
+                ca.command(args)
+            # Unchanged code needs no Wasm.
+            deployment["wasm_hash"] = None
+            args.arguments = json.dumps({"deployment": deployment})
+            self.assertIn("deploy_policy", ca.command(args))
+
+    @unittest.skipUnless((ROOT / "target/wasm32v1-none/release/allowit_common_policy_engine.wasm").exists(), "contracts not built")
+    def test_built_wallet_wasm_declares_custody_layout_2(self):
+        for name in ("simple_policy_engine", "common_policy_engine", "custom_policy"):
+            wasm = (ROOT / "target/wasm32v1-none/release" / ("allowit_" + name + ".wasm")).read_bytes()
+            self.assertEqual(ca.custody_layout(wasm), ca.WALLET_CONTRACT_VERSION)
+        self.assertIsNone(ca.custody_layout((ROOT / "target/wasm32v1-none/release/allowit_wallet_engine.wasm").read_bytes()))
+
+    def test_recover_prepares_without_reading_state(self):
+        contract = StrKey.encode_contract(bytes([2]) * 32)
+        calls = []
+
+        def cli(args, input_data=None):
+            calls.append(args)
+            if args[-1] == "state":
+                # A version 1 State under version 2 code: state() fails with InvalidState.
+                raise subprocess.CalledProcessError(1, args, stderr="Error(Contract, #1)")
+            return "raw-xdr"
+
+        argv = ["contract_admin.py", "admin", "--source", KEYS[0], "--contract", contract, "--method", "recover",
+                "--arguments", json.dumps({"recipient": KEYS[1], "amount": 5})]
+        with patch.object(sys, "argv", argv), patch.object(ca, "fetch", return_value=state()), \
+                patch.object(ca, "cli_run", side_effect=cli), patch.object(ca, "prepare_xdr", return_value="assembled") as prepared, \
+                patch.object(sys, "stdout", new_callable=StringIO) as output:
+            ca.main()
+        self.assertEqual(output.getvalue().strip(), "assembled")
+        self.assertEqual([call[-1] for call in calls], ["5"])
+        self.assertEqual(prepared.call_args.kwargs["candidate"], None)
+        # Other owner methods still check the current state and fail closed.
+        argv[argv.index("recover")] = "set_pause"
+        argv[-1] = json.dumps({"paused": True, "deployment_version": 1})
+        with patch.object(sys, "argv", argv), patch.object(ca, "fetch", return_value=state()), \
+                patch.object(ca, "cli_run", side_effect=cli), self.assertRaises(subprocess.CalledProcessError):
+            ca.main()
 
     def test_secrets_and_hashes_reject(self):
         with self.assertRaises((ValueError, argparse.ArgumentTypeError)):
