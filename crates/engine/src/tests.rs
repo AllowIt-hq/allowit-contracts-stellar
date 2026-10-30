@@ -145,4 +145,20 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
         client.try_spent_cap(&ctx.grant, &ctx.state, &ctx.request),
         Err(Ok(AllowitError::MissingGrant))
     );
+    // A failed rule reads and writes no more ledger entries than a passing one, so a failure at
+    // apply time that simulation did not see stays within the simulated footprint.
+    let passing = fixture(&env);
+    assert_eq!(
+        client.try_expiry(&passing.grant, &passing.state, &passing.request),
+        Ok(Ok(900))
+    );
+    let pass = env.cost_estimate().resources();
+    assert_eq!(
+        client.try_day_total_cap(&ctx.grant, &ctx.state, &ctx.request),
+        Err(Ok(AllowitError::DayTotalCapExceeded))
+    );
+    let fail = env.cost_estimate().resources();
+    assert_eq!(fail.write_entries, 0);
+    assert_eq!(fail.memory_read_entries, pass.memory_read_entries);
+    assert_eq!(fail.disk_read_entries, pass.disk_read_entries);
 }

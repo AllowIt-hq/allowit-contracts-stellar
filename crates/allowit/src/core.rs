@@ -1,5 +1,5 @@
 // Shared types and rules, included once per backend. `Address`, `AllowitEnv` and `Vec` come from
-// the including module, with `record` and `recorded`. Field types keep those names so Soroban
+// the including module, with `record` and `swap`. Field types keep those names so Soroban
 // contract specs name native types.
 
 /// UTC day length in seconds.
@@ -387,12 +387,15 @@ pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
 }
 
 /// Run a complete authored policy, as `AllowitCustomPolicy` and the host evaluator do. A failed
-/// rule ends the run with a denial: when any rule failed, `run` returns the first rule error even
-/// if the policy caught it and returned `Ok`. `run` never clears the record, so a policy cannot
-/// clear it by calling `run` itself.
+/// rule ends the run with a denial: when any rule failed during `execute`, `run` returns the first
+/// such rule error even if the policy caught it and returned `Ok`. A nested `run` keeps the outer
+/// record, so a policy cannot clear a failure by calling `run` itself.
 pub fn run(ctx: &AllowitContext, execute: fn(&AllowitContext) -> Result) -> Result {
+    let outer = swap(&ctx.env, None);
     let result = execute(ctx);
-    match recorded(&ctx.env) {
+    let failure = swap(&ctx.env, None);
+    swap(&ctx.env, outer.or(failure));
+    match failure {
         Some(error) => Err(error),
         None => result,
     }

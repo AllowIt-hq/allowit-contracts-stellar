@@ -6,16 +6,10 @@ use super::*;
 use allowit::{
     AllowitAccountingHistory, AllowitError, AllowitGrant, AllowitOperation, AllowitRequest,
 };
-use soroban_sdk::{Address, Bytes, contract, contractimpl, testutils::Address as _, vec};
-
-/// Contract scope for rule calls. A failed rule records its error in temporary storage.
-#[contract]
-struct Scope;
-#[contractimpl]
-impl Scope {}
+use soroban_sdk::{Address, Bytes, testutils::Address as _, vec};
 
 #[test]
-fn custom_runner_denies_a_failed_rule_that_the_policy_did_not_return() {
+fn custom_runner_maps_the_policy_result_and_reads_only_its_own_rule_failures() {
     let env = Env::default();
     let recipient = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -48,22 +42,20 @@ fn custom_runner_denies_a_failed_rule_that_the_policy_did_not_return() {
         },
     };
     let rules = Vec::new(&env);
-    env.as_contract(&env.register(Scope, ()), || {
-        assert_eq!(AllowitCustom::check(&ctx, &rules), Ok(()));
-        // A rule failure that policy code caught earlier in the same invocation.
-        let mut other = ctx.clone();
-        other.grant.spent_cap = Some(9);
-        assert!(allowit::spent_cap(&other, &other.grant.spent_cap).is_err());
-        assert_eq!(policy::execute(&ctx), Ok(()));
-        assert_eq!(
-            AllowitCustom::check(&ctx, &rules),
-            Err(AllowitWalletError::PolicyDenied)
-        );
-        assert_eq!(
-            allowit::run(&ctx, policy::execute),
-            Err(AllowitError::SpentCapExceeded)
-        );
-    });
+    assert_eq!(AllowitCustom::check(&ctx, &rules), Ok(()));
+    let mut denied = ctx.clone();
+    denied.grant.spent_cap = Some(9);
+    assert_eq!(
+        AllowitCustom::check(&denied, &rules),
+        Err(AllowitWalletError::PolicyDenied)
+    );
+    assert_eq!(
+        allowit::run(&denied, policy::execute),
+        Err(AllowitError::SpentCapExceeded)
+    );
+    // A rule failure outside the policy run, earlier in the same invocation, does not deny it.
+    assert!(allowit::spent_cap(&denied, &denied.grant.spent_cap).is_err());
+    assert_eq!(AllowitCustom::check(&ctx, &rules), Ok(()));
 }
 
 #[test]

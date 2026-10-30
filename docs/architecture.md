@@ -45,8 +45,8 @@ The function doc comment keeps the owner's original policy prompt. Each inline c
 prompt clause that the next call implements.
 
 `AllowitCustomPolicy` and the offchain server run the function through `allowit::run`. A failed
-rule ends the run with a denial: every rule records its error in `ctx.env`, and `run` returns the
-first recorded rule error even if the policy caught the error and returned `Ok`. The standard
+rule ends the run with a denial: every rule records its error, and `run` returns the first rule
+error recorded during the policy call even if the policy caught the error and returned `Ok`. The standard
 contract runs only its leading canonical calls, supplied by the owner as `rules`, and
 skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes
 Rust comments, including nested block comments, and literals first, so they cannot add or hide calls.
@@ -136,16 +136,23 @@ Rules are checks: `allowit::<rule>(ctx, &Option<V>) -> allowit::Result<T>`. Each
 its passing constraint, or an `allowit::AllowitError`. An unset field is `MissingGrant`. Policy code calls
 rules unguarded, so an unset parameter denies. Future server-only functions use the same shape.
 
-A failed rule also records its first error in `ctx.env`, and `allowit::run` denies with that error
-after the policy returns, so policy code cannot turn a rule failure into a pass with `match`,
-`if let` or `let _`. `run` never clears the record. Context clones share it. Onchain, the record is
-the temporary-storage entry `rule_fail` of the running contract. The denial rolls the write back
-with the rest of the invocation, and the custom contract reads the key after every run, so its
-footprint includes that key. On the host, `AllowitEnv` holds the record; create one with
-`AllowitEnv::new()` for every evaluation. Authored code can read `ctx.env` but must not call its
-methods, because the two environments have none in common. `AllowitEnv` does not implement
-`Default`, so `c.env = Default::default()` compiles only onchain, where every `Env` reaches the same
-contract storage, and the std-only compile rejects it.
+A failed rule also records its first error for the running evaluation, and `allowit::run`
+denies with the first error recorded during the policy call after the policy returns. Policy code
+therefore cannot turn a rule failure into a pass with `match`, `if let` or `let _`. A nested `run`
+keeps the outer record, and context clones share it. A failure recorded before `run` starts, for
+example by an earlier `run` in the same invocation, does not deny it.
+
+On the host, `AllowitEnv` in `ctx.env` holds the record; create one with `AllowitEnv::new()` for
+every evaluation. `AllowitEnv` does not implement `Default`, so `c.env = Default::default()`
+compiles only onchain, and the std-only compile rejects it. Onchain, the record is a private
+static in the memory of the running contract instance. Soroban runs every contract invocation in
+a new VM instance, so the record starts empty and ends with the invocation. Native tests keep it
+in a thread-local. The record is not ledger state: a failed rule reads and writes no storage entry,
+and the standard preflight, the custom runner and the shared engine add nothing to the transaction
+footprint for it. If state changes between simulation and apply and a rule then fails, the call
+returns its typed error (`PolicyDenied`, `InvalidGrant` or the engine's `AllowitError`), not a
+footprint trap. Authored code can name the `ctx.env` field but cannot call its methods, because the
+two environments have none in common.
 
 | Rule and same-named Grant field | Native value | Pass value |
 | --- | --- | --- |

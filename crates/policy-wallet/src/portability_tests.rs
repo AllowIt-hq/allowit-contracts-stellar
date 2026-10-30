@@ -16,7 +16,6 @@ use super::*;
 use allowit::AllowitError;
 use allowit_wallet_protocol::AllowitPolicyInvocation;
 use soroban_sdk::{
-    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
 };
@@ -39,12 +38,6 @@ mod vectors {
     include!("../../../scripts/policy-vectors.rs");
 }
 use vectors::{Outcome, Vector};
-
-/// Contract scope for direct rule calls. A failed rule records its error in temporary storage.
-#[contract]
-struct Scope;
-#[contractimpl]
-impl Scope {}
 
 /// Every canonical rule in Grant field order.
 const RULES: [AllowitRule; 8] = [
@@ -183,37 +176,31 @@ fn context(env: &Env, universe: &[Address], v: &Vector) -> AllowitContext {
         },
     }
 }
-/// Soroban backend outcome. Each policy run has its own contract scope, so it reads only its own
-/// rule failures.
+/// Soroban backend outcome. Each policy run reads only its own rule failures.
 fn soroban_outcome(env: &Env, universe: &[Address], v: &Vector) -> Outcome {
     let c = context(env, universe, v);
     let g = &c.grant;
     let code = |e: AllowitError| e as u32;
     let index = |a: Address| format!("@{}", universe.iter().position(|x| *x == a).unwrap());
-    let run = |execute: fn(&AllowitContext) -> allowit::Result| {
-        env.as_contract(&env.register(Scope, ()), || allowit::run(&c, execute))
-            .map_err(code)
-    };
-    let (rules, preflight) = env.as_contract(&env.register(Scope, ()), || {
-        let rules: List<Result<Text, u32>> = [
-            allowit::transaction_cap(&c, &g.transaction_cap).map(|v| v.to_string()),
-            allowit::spent_cap(&c, &g.spent_cap).map(|v| v.to_string()),
-            allowit::day_spent_cap(&c, &g.day_spent_cap).map(|v| v.to_string()),
-            allowit::day_total_cap(&c, &g.day_total_cap).map(|v| v.to_string()),
-            allowit::call_cap(&c, &g.call_cap).map(|v| v.to_string()),
-            allowit::recipients(&c, &g.recipients).map(index),
-            allowit::tokens(&c, &g.tokens).map(index),
-            allowit::expiry(&c, &g.expiry).map(|v| v.to_string()),
-        ]
+    let run =
+        |execute: fn(&AllowitContext) -> allowit::Result| allowit::run(&c, execute).map_err(code);
+    let rules: List<Result<Text, u32>> = [
+        allowit::transaction_cap(&c, &g.transaction_cap).map(|v| v.to_string()),
+        allowit::spent_cap(&c, &g.spent_cap).map(|v| v.to_string()),
+        allowit::day_spent_cap(&c, &g.day_spent_cap).map(|v| v.to_string()),
+        allowit::day_total_cap(&c, &g.day_total_cap).map(|v| v.to_string()),
+        allowit::call_cap(&c, &g.call_cap).map(|v| v.to_string()),
+        allowit::recipients(&c, &g.recipients).map(index),
+        allowit::tokens(&c, &g.tokens).map(index),
+        allowit::expiry(&c, &g.expiry).map(|v| v.to_string()),
+    ]
+    .into_iter()
+    .map(|r| r.map_err(code))
+    .collect();
+    let preflight = RULES
         .into_iter()
-        .map(|r| r.map_err(code))
+        .map(|rule| allowit::preflight(&c, rule).map_err(code))
         .collect();
-        let preflight = RULES
-            .into_iter()
-            .map(|rule| allowit::preflight(&c, rule).map_err(code))
-            .collect();
-        (rules, preflight)
-    });
     Outcome {
         policy: run(sample::execute),
         branch: run(branch::execute),

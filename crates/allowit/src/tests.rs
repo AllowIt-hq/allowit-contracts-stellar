@@ -5,7 +5,7 @@ use soroban_sdk::{
     xdr::ToXdr,
 };
 
-/// Contract scope for rule calls. A failed rule records its error in contract temporary storage.
+/// Contract scope that checks a failed rule writes no contract storage.
 #[contract]
 struct Scope;
 #[contractimpl]
@@ -74,270 +74,249 @@ fn fixture(env: &Env) -> AllowitContext {
 #[test]
 fn rules_return_exact_passing_constraints() {
     let env = Env::default();
-    let id = env.register(Scope, ());
-    env.as_contract(&id, || {
-        let ctx = fixture(&env);
-        let g = &ctx.grant;
-        assert_eq!(transaction_cap(&ctx, &g.transaction_cap), Ok(60));
-        assert_eq!(spent_cap(&ctx, &g.spent_cap), Ok(955));
-        assert_eq!(day_spent_cap(&ctx, &g.day_spent_cap), Ok(455));
-        assert_eq!(day_total_cap(&ctx, &g.day_total_cap), Ok(557));
-        assert_eq!(call_cap(&ctx, &g.call_cap), Ok(2));
-        assert_eq!(
-            recipients(&ctx, &g.recipients),
-            Ok(ctx.request.recipient.clone())
-        );
-        assert_eq!(tokens(&ctx, &g.tokens), Ok(ctx.request.asset.clone()));
-        assert_eq!(expiry(&ctx, &g.expiry), Ok(999_999 - DAY - 100));
-        for rule in ALL {
-            assert_eq!(preflight(&ctx, rule), Ok(()));
-        }
-        assert_eq!(ctx.grant.validate(), Ok(()));
-    });
+    let ctx = fixture(&env);
+    let g = &ctx.grant;
+    assert_eq!(transaction_cap(&ctx, &g.transaction_cap), Ok(60));
+    assert_eq!(spent_cap(&ctx, &g.spent_cap), Ok(955));
+    assert_eq!(day_spent_cap(&ctx, &g.day_spent_cap), Ok(455));
+    assert_eq!(day_total_cap(&ctx, &g.day_total_cap), Ok(557));
+    assert_eq!(call_cap(&ctx, &g.call_cap), Ok(2));
+    assert_eq!(
+        recipients(&ctx, &g.recipients),
+        Ok(ctx.request.recipient.clone())
+    );
+    assert_eq!(tokens(&ctx, &g.tokens), Ok(ctx.request.asset.clone()));
+    assert_eq!(expiry(&ctx, &g.expiry), Ok(999_999 - DAY - 100));
+    for rule in ALL {
+        assert_eq!(preflight(&ctx, rule), Ok(()));
+    }
+    assert_eq!(ctx.grant.validate(), Ok(()));
 }
 
 #[test]
 fn unset_grant_fields_deny_in_rules_and_skip_only_in_preflight() {
     let env = Env::default();
-    let id = env.register(Scope, ());
-    env.as_contract(&id, || {
-        let mut ctx = fixture(&env);
-        ctx.grant = AllowitGrant::default();
-        assert_eq!(
-            transaction_cap(&ctx, &None),
-            Err(AllowitError::MissingGrant)
-        );
-        assert_eq!(spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
-        assert_eq!(day_spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
-        assert_eq!(day_total_cap(&ctx, &None), Err(AllowitError::MissingGrant));
-        assert_eq!(call_cap(&ctx, &None), Err(AllowitError::MissingGrant));
-        assert_eq!(recipients(&ctx, &None), Err(AllowitError::MissingGrant));
-        assert_eq!(tokens(&ctx, &None), Err(AllowitError::MissingGrant));
-        assert_eq!(expiry(&ctx, &None), Err(AllowitError::MissingGrant));
-        // MissingGrant precedes every request and state check.
-        ctx.request.amount = 0;
-        ctx.request.now = ctx.request.expires_at + 1;
-        ctx.state.day = 0;
-        ctx.state.unpriced = true;
-        ctx.state.calls = u64::MAX;
-        assert_eq!(spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
-        assert_eq!(expiry(&ctx, &None), Err(AllowitError::MissingGrant));
-        for rule in ALL {
-            assert_eq!(preflight(&ctx, rule), Ok(()));
-        }
-        // A set field is checked by preflight exactly as by the rule.
-        ctx.grant.spent_cap = Some(1000);
-        assert_eq!(
-            preflight(&ctx, AllowitRule::spent_cap),
-            Err(AllowitError::Unpriced)
-        );
-        ctx.grant.expiry = Some(u64::MAX);
-        assert_eq!(
-            preflight(&ctx, AllowitRule::expiry),
-            Err(AllowitError::Expired)
-        );
-    });
+    let mut ctx = fixture(&env);
+    ctx.grant = AllowitGrant::default();
+    assert_eq!(
+        transaction_cap(&ctx, &None),
+        Err(AllowitError::MissingGrant)
+    );
+    assert_eq!(spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(day_spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(day_total_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(call_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(recipients(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(tokens(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(expiry(&ctx, &None), Err(AllowitError::MissingGrant));
+    // MissingGrant precedes every request and state check.
+    ctx.request.amount = 0;
+    ctx.request.now = ctx.request.expires_at + 1;
+    ctx.state.day = 0;
+    ctx.state.unpriced = true;
+    ctx.state.calls = u64::MAX;
+    assert_eq!(spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
+    assert_eq!(expiry(&ctx, &None), Err(AllowitError::MissingGrant));
+    for rule in ALL {
+        assert_eq!(preflight(&ctx, rule), Ok(()));
+    }
+    // A set field is checked by preflight exactly as by the rule.
+    ctx.grant.spent_cap = Some(1000);
+    assert_eq!(
+        preflight(&ctx, AllowitRule::spent_cap),
+        Err(AllowitError::Unpriced)
+    );
+    ctx.grant.expiry = Some(u64::MAX);
+    assert_eq!(
+        preflight(&ctx, AllowitRule::expiry),
+        Err(AllowitError::Expired)
+    );
 }
 
 #[test]
 fn boundary_equality_passes_with_zero_headroom_and_one_more_denies() {
     let env = Env::default();
-    let id = env.register(Scope, ());
-    env.as_contract(&id, || {
-        let mut ctx = fixture(&env);
-        let s = ctx.state.clone();
-        assert_eq!(transaction_cap(&ctx, &Some(40)), Ok(0));
-        assert_eq!(spent_cap(&ctx, &Some(s.spent)), Ok(0));
-        assert_eq!(day_spent_cap(&ctx, &Some(s.day_spent)), Ok(0));
-        assert_eq!(day_total_cap(&ctx, &Some(s.day_total)), Ok(0));
-        assert_eq!(call_cap(&ctx, &Some(1)), Ok(0));
-        assert_eq!(
-            expiry(&ctx, &Some(ctx.request.expires_at)),
-            Ok(ctx.request.expires_at - ctx.request.now)
-        );
-        assert_eq!(
-            expiry(&ctx, &Some(ctx.request.now + 1)),
-            Err(AllowitError::Expired)
-        );
-        assert_eq!(
-            transaction_cap(&ctx, &Some(39)),
-            Err(AllowitError::TransactionCapExceeded)
-        );
-        assert_eq!(
-            spent_cap(&ctx, &Some(s.spent - 1)),
-            Err(AllowitError::SpentCapExceeded)
-        );
-        assert_eq!(
-            day_spent_cap(&ctx, &Some(s.day_spent - 1)),
-            Err(AllowitError::DaySpentCapExceeded)
-        );
-        assert_eq!(
-            day_total_cap(&ctx, &Some(s.day_total - 1)),
-            Err(AllowitError::DayTotalCapExceeded)
-        );
-        ctx.state.calls = 2;
-        assert_eq!(call_cap(&ctx, &Some(1)), Err(AllowitError::CallCapExceeded));
-        // The protected count already includes this operation.
-        ctx.state.calls = 0;
-        assert_eq!(call_cap(&ctx, &Some(0)), Err(AllowitError::CallCapExceeded));
-    });
+    let mut ctx = fixture(&env);
+    let s = ctx.state.clone();
+    assert_eq!(transaction_cap(&ctx, &Some(40)), Ok(0));
+    assert_eq!(spent_cap(&ctx, &Some(s.spent)), Ok(0));
+    assert_eq!(day_spent_cap(&ctx, &Some(s.day_spent)), Ok(0));
+    assert_eq!(day_total_cap(&ctx, &Some(s.day_total)), Ok(0));
+    assert_eq!(call_cap(&ctx, &Some(1)), Ok(0));
+    assert_eq!(
+        expiry(&ctx, &Some(ctx.request.expires_at)),
+        Ok(ctx.request.expires_at - ctx.request.now)
+    );
+    assert_eq!(
+        expiry(&ctx, &Some(ctx.request.now + 1)),
+        Err(AllowitError::Expired)
+    );
+    assert_eq!(
+        transaction_cap(&ctx, &Some(39)),
+        Err(AllowitError::TransactionCapExceeded)
+    );
+    assert_eq!(
+        spent_cap(&ctx, &Some(s.spent - 1)),
+        Err(AllowitError::SpentCapExceeded)
+    );
+    assert_eq!(
+        day_spent_cap(&ctx, &Some(s.day_spent - 1)),
+        Err(AllowitError::DaySpentCapExceeded)
+    );
+    assert_eq!(
+        day_total_cap(&ctx, &Some(s.day_total - 1)),
+        Err(AllowitError::DayTotalCapExceeded)
+    );
+    ctx.state.calls = 2;
+    assert_eq!(call_cap(&ctx, &Some(1)), Err(AllowitError::CallCapExceeded));
+    // The protected count already includes this operation.
+    ctx.state.calls = 0;
+    assert_eq!(call_cap(&ctx, &Some(0)), Err(AllowitError::CallCapExceeded));
 }
 
 #[test]
 fn accounting_caps_check_only_the_facts_they_read() {
     let env = Env::default();
-    let id = env.register(Scope, ());
-    env.as_contract(&id, || {
-        let base = fixture(&env);
-        type Cap = fn(&AllowitContext, &Option<i128>) -> Result<i128>;
-        let caps: [Cap; 3] = [spent_cap, day_spent_cap, day_total_cap];
-        let passing = [955, 955, 957];
-        let edits: [fn(&mut AllowitContext); 7] = [
-            |c| c.request.amount = 0,
-            |c| c.state.day += 1,
-            |c| c.state.spent = -1,
-            |c| c.state.day_spent = -1,
-            |c| c.state.day_total = -1,
-            |c| c.state.unpriced = true,
-            |c| c.state.day_unpriced = true,
-        ];
-        use AllowitError::{InvalidState as S, Unpriced as U};
-        // Expected result per edit, for spent_cap, day_spent_cap and day_total_cap. `None` passes.
-        let expected: [[Option<AllowitError>; 3]; 7] = [
-            [None, None, None],
-            [None, Some(S), Some(S)],
-            [Some(S), None, None],
-            [None, Some(S), None],
-            [None, None, Some(S)],
-            [Some(U), None, None],
-            [None, Some(U), Some(U)],
-        ];
-        for (edit, expected) in edits.iter().zip(expected) {
-            let mut ctx = base.clone();
-            edit(&mut ctx);
-            for i in 0..3 {
-                let result = caps[i](&ctx, &Some(1000));
-                assert_eq!(result, expected[i].map_or(Ok(passing[i]), Err));
-            }
-        }
-        for cap in caps {
-            assert_eq!(cap(&base, &Some(-1)), Err(AllowitError::InvalidParameter));
-        }
+    let base = fixture(&env);
+    type Cap = fn(&AllowitContext, &Option<i128>) -> Result<i128>;
+    let caps: [Cap; 3] = [spent_cap, day_spent_cap, day_total_cap];
+    let passing = [955, 955, 957];
+    let edits: [fn(&mut AllowitContext); 7] = [
+        |c| c.request.amount = 0,
+        |c| c.state.day += 1,
+        |c| c.state.spent = -1,
+        |c| c.state.day_spent = -1,
+        |c| c.state.day_total = -1,
+        |c| c.state.unpriced = true,
+        |c| c.state.day_unpriced = true,
+    ];
+    use AllowitError::{InvalidState as S, Unpriced as U};
+    // Expected result per edit, for spent_cap, day_spent_cap and day_total_cap. `None` passes.
+    let expected: [[Option<AllowitError>; 3]; 7] = [
+        [None, None, None],
+        [None, Some(S), Some(S)],
+        [Some(S), None, None],
+        [None, Some(S), None],
+        [None, None, Some(S)],
+        [Some(U), None, None],
+        [None, Some(U), Some(U)],
+    ];
+    for (edit, expected) in edits.iter().zip(expected) {
         let mut ctx = base.clone();
-        assert_eq!(
-            transaction_cap(&ctx, &Some(-1)),
-            Err(AllowitError::InvalidParameter)
-        );
-        ctx.request.amount = 0;
-        assert_eq!(
-            transaction_cap(&ctx, &Some(100)),
-            Err(AllowitError::InvalidParameter)
-        );
-    });
+        edit(&mut ctx);
+        for i in 0..3 {
+            let result = caps[i](&ctx, &Some(1000));
+            assert_eq!(result, expected[i].map_or(Ok(passing[i]), Err));
+        }
+    }
+    for cap in caps {
+        assert_eq!(cap(&base, &Some(-1)), Err(AllowitError::InvalidParameter));
+    }
+    let mut ctx = base.clone();
+    assert_eq!(
+        transaction_cap(&ctx, &Some(-1)),
+        Err(AllowitError::InvalidParameter)
+    );
+    ctx.request.amount = 0;
+    assert_eq!(
+        transaction_cap(&ctx, &Some(100)),
+        Err(AllowitError::InvalidParameter)
+    );
 }
 
 #[test]
 fn preflight_enforces_every_set_field_with_its_rule_error() {
     let env = Env::default();
-    let id = env.register(Scope, ());
-    env.as_contract(&id, || {
-        let other = Address::generate(&env);
-        for rule in ALL {
-            let mut ctx = fixture(&env);
-            let now = ctx.request.now;
-            let g = &mut ctx.grant;
-            let expected = match rule {
-                AllowitRule::transaction_cap => {
-                    g.transaction_cap = Some(39);
-                    AllowitError::TransactionCapExceeded
-                }
-                AllowitRule::spent_cap => {
-                    g.spent_cap = Some(44);
-                    AllowitError::SpentCapExceeded
-                }
-                AllowitRule::day_spent_cap => {
-                    g.day_spent_cap = Some(44);
-                    AllowitError::DaySpentCapExceeded
-                }
-                AllowitRule::day_total_cap => {
-                    g.day_total_cap = Some(42);
-                    AllowitError::DayTotalCapExceeded
-                }
-                AllowitRule::call_cap => {
-                    g.call_cap = Some(0);
-                    AllowitError::CallCapExceeded
-                }
-                AllowitRule::recipients => {
-                    g.recipients = Some(vec![&env, other.clone()]);
-                    AllowitError::RecipientNotAllowed
-                }
-                AllowitRule::tokens => {
-                    g.tokens = Some(vec![&env, other.clone()]);
-                    AllowitError::TokenNotAllowed
-                }
-                AllowitRule::expiry => {
-                    g.expiry = Some(now);
-                    AllowitError::Expired
-                }
-            };
-            assert_eq!(preflight(&ctx, rule), Err(expected));
-            // Only the edited rule denies.
-            for other in ALL.into_iter().filter(|r| *r != rule) {
-                assert_eq!(preflight(&ctx, other), Ok(()));
+    let other = Address::generate(&env);
+    for rule in ALL {
+        let mut ctx = fixture(&env);
+        let now = ctx.request.now;
+        let g = &mut ctx.grant;
+        let expected = match rule {
+            AllowitRule::transaction_cap => {
+                g.transaction_cap = Some(39);
+                AllowitError::TransactionCapExceeded
             }
+            AllowitRule::spent_cap => {
+                g.spent_cap = Some(44);
+                AllowitError::SpentCapExceeded
+            }
+            AllowitRule::day_spent_cap => {
+                g.day_spent_cap = Some(44);
+                AllowitError::DaySpentCapExceeded
+            }
+            AllowitRule::day_total_cap => {
+                g.day_total_cap = Some(42);
+                AllowitError::DayTotalCapExceeded
+            }
+            AllowitRule::call_cap => {
+                g.call_cap = Some(0);
+                AllowitError::CallCapExceeded
+            }
+            AllowitRule::recipients => {
+                g.recipients = Some(vec![&env, other.clone()]);
+                AllowitError::RecipientNotAllowed
+            }
+            AllowitRule::tokens => {
+                g.tokens = Some(vec![&env, other.clone()]);
+                AllowitError::TokenNotAllowed
+            }
+            AllowitRule::expiry => {
+                g.expiry = Some(now);
+                AllowitError::Expired
+            }
+        };
+        assert_eq!(preflight(&ctx, rule), Err(expected));
+        // Only the edited rule denies.
+        for other in ALL.into_iter().filter(|r| *r != rule) {
+            assert_eq!(preflight(&ctx, other), Ok(()));
         }
-    });
+    }
 }
 
 #[test]
 fn allowlists_match_exact_addresses_and_empty_lists_deny() {
     let env = Env::default();
-    let id = env.register(Scope, ());
-    env.as_contract(&id, || {
-        let ctx = fixture(&env);
-        let other = Address::generate(&env);
-        assert_eq!(
-            recipients(&ctx, &Some(vec![&env])),
-            Err(AllowitError::RecipientNotAllowed)
-        );
-        assert_eq!(
-            recipients(&ctx, &Some(vec![&env, other.clone()])),
-            Err(AllowitError::RecipientNotAllowed)
-        );
-        assert_eq!(
-            recipients(
-                &ctx,
-                &Some(vec![&env, other.clone(), ctx.request.recipient.clone()])
-            ),
-            Ok(ctx.request.recipient.clone())
-        );
-        assert_eq!(
-            tokens(&ctx, &Some(vec![&env])),
-            Err(AllowitError::TokenNotAllowed)
-        );
-        assert_eq!(
-            tokens(&ctx, &Some(vec![&env, ctx.request.recipient.clone()])),
-            Err(AllowitError::TokenNotAllowed)
-        );
-    });
+    let ctx = fixture(&env);
+    let other = Address::generate(&env);
+    assert_eq!(
+        recipients(&ctx, &Some(vec![&env])),
+        Err(AllowitError::RecipientNotAllowed)
+    );
+    assert_eq!(
+        recipients(&ctx, &Some(vec![&env, other.clone()])),
+        Err(AllowitError::RecipientNotAllowed)
+    );
+    assert_eq!(
+        recipients(
+            &ctx,
+            &Some(vec![&env, other.clone(), ctx.request.recipient.clone()])
+        ),
+        Ok(ctx.request.recipient.clone())
+    );
+    assert_eq!(
+        tokens(&ctx, &Some(vec![&env])),
+        Err(AllowitError::TokenNotAllowed)
+    );
+    assert_eq!(
+        tokens(&ctx, &Some(vec![&env, ctx.request.recipient.clone()])),
+        Err(AllowitError::TokenNotAllowed)
+    );
 }
 
 #[test]
 fn expiry_bounds_grant_and_request() {
     let env = Env::default();
-    let id = env.register(Scope, ());
-    env.as_contract(&id, || {
-        let mut ctx = fixture(&env);
-        let now = ctx.request.now;
-        assert_eq!(expiry(&ctx, &Some(now)), Err(AllowitError::Expired));
-        // A request cannot outlive the grant.
-        assert_eq!(
-            expiry(&ctx, &Some(ctx.request.expires_at - 1)),
-            Err(AllowitError::Expired)
-        );
-        ctx.request.expires_at = now;
-        assert_eq!(expiry(&ctx, &Some(now + 10)), Err(AllowitError::Expired));
-    });
+    let mut ctx = fixture(&env);
+    let now = ctx.request.now;
+    assert_eq!(expiry(&ctx, &Some(now)), Err(AllowitError::Expired));
+    // A request cannot outlive the grant.
+    assert_eq!(
+        expiry(&ctx, &Some(ctx.request.expires_at - 1)),
+        Err(AllowitError::Expired)
+    );
+    ctx.request.expires_at = now;
+    assert_eq!(expiry(&ctx, &Some(now + 10)), Err(AllowitError::Expired));
 }
 
 #[test]
@@ -418,40 +397,71 @@ fn catching(ctx: &AllowitContext) -> Result {
 #[test]
 fn a_caught_rule_failure_still_denies_the_run_with_the_first_rule_error() {
     let env = Env::default();
-    let fresh = || env.register(Scope, ());
     let mut ctx = fixture(&env);
-    env.as_contract(&fresh(), || assert_eq!(run(&ctx, catching), Ok(())));
+    assert_eq!(run(&ctx, catching), Ok(()));
     ctx.grant.day_spent_cap = Some(44);
-    env.as_contract(&fresh(), || {
-        assert_eq!(catching(&ctx), Ok(()));
-        assert_eq!(run(&ctx, catching), Err(AllowitError::DaySpentCapExceeded));
-    });
+    assert_eq!(catching(&ctx), Ok(()));
+    assert_eq!(run(&ctx, catching), Err(AllowitError::DaySpentCapExceeded));
     // The first failure wins, also over the policy's own error.
     ctx.grant.spent_cap = Some(44);
-    env.as_contract(&fresh(), || {
-        assert_eq!(run(&ctx, catching), Err(AllowitError::SpentCapExceeded));
+    assert_eq!(run(&ctx, catching), Err(AllowitError::SpentCapExceeded));
+    let returns_other = |ctx: &AllowitContext| {
+        let _ = spent_cap(ctx, &ctx.grant.spent_cap);
+        Err(AllowitError::Expired)
+    };
+    assert_eq!(
+        run(&ctx, returns_other),
+        Err(AllowitError::SpentCapExceeded)
+    );
+    // A nested run cannot clear the record, before or after the failure.
+    let nested_after = |ctx: &AllowitContext| {
+        let _ = spent_cap(ctx, &ctx.grant.spent_cap);
+        let _ = run(ctx, |_| Ok(()));
+        Ok(())
+    };
+    assert_eq!(run(&ctx, nested_after), Err(AllowitError::SpentCapExceeded));
+    let nested_inside = |ctx: &AllowitContext| {
+        let _ = run(ctx, |ctx| spent_cap(ctx, &ctx.grant.spent_cap).map(|_| ()));
+        Ok(())
+    };
+    assert_eq!(
+        run(&ctx, nested_inside),
+        Err(AllowitError::SpentCapExceeded)
+    );
+    // Clones share the record.
+    let clone = |ctx: &AllowitContext| {
+        let copy = ctx.clone();
+        let _ = spent_cap(&copy, &copy.grant.spent_cap);
+        Ok(())
+    };
+    assert_eq!(run(&ctx, clone), Err(AllowitError::SpentCapExceeded));
+    // Each run reads only the failures of its own policy call, so a failure recorded before it,
+    // or by an earlier run in the same invocation, does not deny it.
+    let passing = fixture(&env);
+    assert!(spent_cap(&ctx, &ctx.grant.spent_cap).is_err());
+    assert_eq!(run(&passing, catching), Ok(()));
+}
+
+/// A failed rule writes no contract storage. Its record lives in the memory of the running
+/// contract instance, so a failure at apply time that simulation did not see cannot need a ledger
+/// entry outside the simulated footprint.
+#[test]
+fn a_failed_rule_writes_no_contract_storage() {
+    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _, Temporary as _};
+    let env = Env::default();
+    let mut ctx = fixture(&env);
+    ctx.grant.spent_cap = Some(1);
+    let id = env.register(Scope, ());
+    env.as_contract(&id, || {
         assert_eq!(
-            run(&ctx, |_| Err(AllowitError::Expired)),
+            preflight(&ctx, AllowitRule::spent_cap),
             Err(AllowitError::SpentCapExceeded)
         );
-    });
-    // A nested run cannot clear the record.
-    env.as_contract(&fresh(), || {
-        let nested = |ctx: &AllowitContext| {
-            let _ = spent_cap(ctx, &ctx.grant.spent_cap);
-            let _ = run(ctx, |_| Ok(()));
-            Ok(())
-        };
-        assert_eq!(run(&ctx, nested), Err(AllowitError::SpentCapExceeded));
-    });
-    // Clones share the record.
-    env.as_contract(&fresh(), || {
-        let clone = |ctx: &AllowitContext| {
-            let copy = ctx.clone();
-            let _ = spent_cap(&copy, &copy.grant.spent_cap);
-            Ok(())
-        };
-        assert_eq!(run(&ctx, clone), Err(AllowitError::SpentCapExceeded));
+        assert_eq!(run(&ctx, catching), Err(AllowitError::SpentCapExceeded));
+        let storage = env.storage();
+        assert!(storage.temporary().all().is_empty());
+        assert!(storage.persistent().all().is_empty());
+        assert!(storage.instance().all().is_empty());
     });
 }
 
@@ -512,8 +522,6 @@ fn every_rule_error_survives_its_record() {
             let _ = expiry(ctx, &g.expiry);
             day_total_cap(ctx, &g.day_total_cap).map(|_| ())
         };
-        env.as_contract(&env.register(Scope, ()), || {
-            assert_eq!(run(&ctx, all), Err(error));
-        });
+        assert_eq!(run(&ctx, all), Err(error));
     }
 }
