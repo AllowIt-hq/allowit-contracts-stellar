@@ -1,131 +1,98 @@
 # Policy wallet engines
 
-Policy wallets account for one immutable underlying Stellar Asset Contract (SAC) asset. Deposits
-keep the received vault shares in the same wallet. The owner chooses
-wallet code, agent, independent server signer and policy configuration. The server signer is not a
-shared checker contract or its parent administrator.
+Wallets keep one immutable underlying Stellar Asset Contract (SAC). The owner selects code, agent,
+independent server signer and Grant. SimplePolicyEngine relies on agent/server authorization.
+CommonPolicyEngine is the standard implementation for an owner-approved initial preflight prefix.
+CustomPolicy artifacts retain an explicit compiled-source binding. Shared checkers have no custody.
 
-| Implementation | Delegated authorization | Local policy |
-| --- | --- | --- |
-| `SimplePolicyEngine` | Agent and server | Custody invariants only. The server checks the authored policy offchain. |
-| `CommonPolicyEngine` | Agent and server | Ordered owner-selected canonical checks using Grant and current Spent. |
-| `CustomPolicy` | Agent and server | Bespoke compiled local policy using wallet mixins. |
+## One policy and its standard prefix
 
-All implementations use a direct owner-selected Wasm executable. A system-managed reference cannot
-replace wallet custody code. The [engine parent](engine-parent.md) manages shared checker code
-only. Policy compilation recommends an implementation compatible with the selected rail and the
-complete policy semantics. Wallet policies run their selected checks locally, with no shared fallback.
+Source uses one matching Grant argument: `allowit::spent_cap(grant::spent_cap)?;`.
+The SDK extracts only consecutive initial top-level canonical calls. Any subset is valid.
+Conditional calls and other custom logic run offchain within the same policy.
+The standard contract receives the exact owner-approved ordered prefix, never caller selectors.
 
-## Common and custom policy
+| Rule and same-named Grant key | Native value and meaning |
+| --- | --- |
+| `transaction_cap` | Nonnegative I128/U64 gross underlying units for one operation |
+| `spent_cap` | Nonnegative cumulative irreversible-expense ceiling |
+| `day_spent_cap` | Nonnegative UTC-day irreversible-expense ceiling |
+| `day_total_cap` | Nonnegative UTC-day gross amount plus separate attributable gas |
+| `call_cap` | U64 successful operation count ceiling |
+| `recipients` | `Vec<Address>` permitted destinations, including vaults |
+| `expiry` | U64 exclusive Unix timestamp |
+| `tokens` | `Vec<Address>` exact permitted SAC identities |
 
-Common's `rules` is an ordered list of zero-extra-parameter function names: `transaction_cap`,
-`daily_cap`, `total_cap`, `call_cap`, `recipient`, `expiry`, and `token`. Each receives the normalized
-request, owner Grant and current Spent. There are no extra authored arguments. Unknown or duplicate selectors reject. An empty list explicitly selects no local business checks, like Simple. The wallet enforces only the rules that the owner selects explicitly.
+Missing or Null owner parameters disable that selected check. Wrong non-Null types reject.
+Unreadable state never becomes absence. Unmentioned checks do not activate through Grant keys.
+Repeated rules retain exact order and use independent operation markers to avoid duplicate charges.
+Changed economic facts cannot reuse a prior operation marker. Grant changes preserve accounting.
+Protected `State.history` records every delegated success independently of selected or disabled rules.
+Rules read the proposed history through `EngineRequest.history`, separate from mutable business Spent.
+With cost bounds it records conservative expenses and gas. Without them it records raw gross and calls
+plus an unpriced liability. Active lifetime expense caps reject lifetime unpriced history.
+Daily expense/total caps reject unpriced history for that UTC day. Rollover clears only daily liability.
+No owner reconciliation or refund method silently clears this protected history.
 
-| Rule | Required Grant values | Updated Spent |
-| --- | --- | --- |
-| `transaction_cap` | Positive `per_transfer` in native units | None |
-| `daily_cap` | Positive `daily_limit` in native units | UTC `day`, `daily`, `daily_operation` |
-| `total_cap` | Positive `total_limit` in native units | `total`, `total_operation` |
-| `call_cap` | U64 `max_calls`; zero denies every call | `calls`, `call_operation` |
-| `recipient` | `recipients: Vec<Address>` | None |
-| `expiry` | `expires_at: u64`, exclusive Unix seconds | None |
-| `token` | `token: String`, authenticated asset label | None |
+## Source and configuration binding
 
-Amount limits accept positive native I128 or U64 values. Each canonical rule checks its selected
-parameters and usage values. Invalid values or a denied check reject execution. Checks pass their
-resulting Spent map to the next selected check. Operation markers prevent duplicate charges for
-one operation. All rules preserve unrelated native values without coercion.
+Fixed standard `source_digest` is SHA-256 of canonical XDR containing the domain
+`allowit_std_prefix`, implementation kind, actual module hash, immutable SAC, transfer/deposit schema
+hashes and ordered `(rule, matching Grant reference)` pairs. It excludes Grant values and full
+source. The constructor and binding getter check it against the actual runtime module.
+Custom `source_digest` remains its exact compiled source hash.
 
-Simple requires an empty rule list. Grant fields alone do not create local enforcement. Custom
-also uses an empty selector list because its compiled code defines the complete check sequence. The sample
-calls local daily, total and call rules, then increments its own `custom_count`. Its source digest
-must equal the compiled source. Mixins protect authority and execution mechanics independently of
-that business state. Custom code is owner-selected code and therefore remains trusted for custody.
+The complete source has separate offline owner authorization, scoped to wallet, network, policy,
+prefix and monotonic source revision. Changing only that offchain suffix needs no chain call.
+Each execution separately carries `source_hash`, covered by agent/server authorization and the x402
+digest. Offline updates do not replace already signed operation bytes or their recovery identity.
 
-## Configuration and effects
+`deploy_policy` changes owner configuration at exactly the next `deployment_version`.
+With `wasm_hash=None`, Grant values change without code redeployment. Prefix, Spent, custody,
+execution nonce and pause remain intact when only Grant changes. The new revision rejects old
+inflight packets. A changed prefix or executable requires a new owner binding.
 
-`PolicyConfig` contains `owner`, `agent`, `server`, `asset`, `policy_instance`, `source_digest`,
-`rules`, `grant`, and `x402_enabled`. Owner, agent and server must differ. The asset is an admitted
-native SAC. The nonzero policy identity and asset stay fixed. Source digests bind the owner-approved
-policy. The exact wallet Wasm hash identifies implementation code.
+## Expenses and native effects
 
-Grant is an owner-signed map of UTF-8 names to native values. Spent is a separate persistent map
-under the stable policy identity. Only the final policy result commits. An unused empty map creates
-no entry, and unchanged data avoids another write. Archived persistent records require restoration.
-The wallet never treats archival as a fresh allowance. Normal calls do not migrate stored state.
+An external payment spends principal plus attributable gas. A deposit retains principal as shares.
+Its conversion cost plus attributable gas counts toward spent limits. Daily total includes principal
+plus separate gas; embedded conversion fees are not counted twice. Underlying units use seven
+decimals. Share units retain their independent native scale.
 
-The kernel checks the complete invocation, installed module and schema, source wallet, immutable
-asset, positive amount, recipient, pause, expiry, deployment version, execution nonce and replay.
-Direct execution requires native authorization from both agent and server. Sender debit and
-recipient credit must match the exact transfer. Delegated execution and recovery reject issuer destinations because these burn tokens. The owner can explicitly burn through `invoke`. Usage, nonce, receipt and effects commit atomically.
+`ExecutionRequest.expense` is optional bounded canonical XDR of `ExpenseBounds`: asset, decimals,
+gas units, conversion units, spent units, attributable fee ceiling, observation ledger and UTC day.
+Unknown fields, wrong types, noncanonical maps, extra data and oversized bytes reject.
+The server approves exact conservative economic ceilings. The kernel checks denomination, day,
+ledger and operation-class identities. It cannot observe final transaction gas. XLM/stroop identity
+conversion is intrinsic; other gas conversions need an admitted trusted source.
+Onchain counters retain ceilings. The server separately settles actual expenses and temporary loss.
+No automatic onchain refund authority follows from that accounting.
 
-`policy_binding()` reports `engine_kind`, `contract_version`, logical identity, exact module hash,
-source digest, argument schema digest and private `_execute` selector. Its tier identifier does not
-replace verification of the executable hash. `policy_spent()` returns the full raw map.
+`execute` and the owner-enabled x402 transfer hook require agent and server authority. The kernel
+checks source/module/schema, immutable asset, exact parties/amount, positive debit, pause, expiry,
+configuration version, execution nonce and single-use operation ID independently of business checks.
+State, effects and receipts commit atomically. Denials and native failures roll them back.
 
-## SEP-56 deposits
+SEP-56 deposits bind vault, assets, minimum shares and wallet source/operator/share receiver.
+Ordinary `recipients` controls destination vaults; no separate vault list or code-hash pin applies.
+The vault must report the immutable underlying SAC. Custody authorizes one exact deeper
+`transfer(wallet, vault, assets)`. Extra debits, including a second debit later refunded, lack authority.
+Returned shares must match the observed balance credit and meet the minimum. Any conversion-loss
+ceiling also checks `preview_redeem(actual_shares)`. Foreign reads precede final balances.
+The immutable SAC balance read is last. A vault getter cannot mutate already-checked effects.
 
-`execute` also accepts the exact deposit schema reported by `policy_binding_for(schema_digest)`.
-`Sep56DepositArgs` binds `vault`, positive underlying `assets`, positive `min_shares`, `from`,
-`receiver` and `operator`. All three wallet roles equal the custody wallet. The vault itself is the
-share token. `query_asset()` must return the immutable underlying SAC before and after execution.
-The native call is `deposit(assets, receiver, from, operator)`, returning minted share units.
+`TransferReceipt` retains the underlying leg. `deposit_receipt(operation_id)` and `sep56_deposit`
+record the observed share output. Vault code can misreport ownership, valuation or redeemability.
+The wrapper bounds SAC spending and interface observations; it cannot prove investment value.
+Owner `invoke` can redeem shares independently. The server reconciles actual settled redemptions.
 
-The normalized policy amount is the gross underlying debit, and its recipient is the vault address.
-An authored `recipient` rule can allow one or several vault destinations through the ordinary
-`recipients` Grant list. Without that rule, the list does not create a restriction. There is no
-separate required vault list or contract-code hash configuration.
+## Owner authority and public metadata
 
-Custody authorizes one exact deeper SAC `transfer(wallet, vault, assets)`. It grants no allowance or
-arbitrary subtree. The actual underlying debit must equal `assets`. Share credit must equal the
-positive returned amount and meet `min_shares` in the share token's native scale. An extra debit,
-including one later refunded, lacks authorization. Denial or failure rolls back usage, nonce,
-receipts and native effects together.
+Owner pause, configuration, recovery, upgrades and exact `invoke` bypass agent/server business checks
+and never call an engine. Owner authorization binds exact target, arguments and supplied subtrees.
+`policy_binding()` reports the default profile; `policy_binding_for(schema_digest)` checks another
+admitted profile. `policy_spent()` returns the complete raw map without a public setter.
+Unknown stored layouts reject. Upgrades do not migrate state implicitly.
 
-The unchanged `TransferReceipt` reports the underlying debit leg to the vault. The
-`deposit_receipt(operation_id)` getter returns its exact asset, parties, assets and observed shares.
-The wallet emits `sep56_deposit` with operation and vault topics and `assets`/`shares` data.
-Share balances are observations from the selected vault's code. Dishonest code can misreport
-share ownership. These checks bound SAC spending but cannot prove share value or redeemability.
-
-Simple and Common admit both native schemas. Custom admits only its compiled argument schema.
-`PolicyContext.operation` is an internal native String with the qualified operation name.
-Existing onchain spending rules charge gross deposited assets. Server expense and temporary-loss
-accounting is separate. Redemption does not reset gross-debit limits. The owner can redeem shares
-through exact `invoke` without delegated signer approval.
-
-## x402 and owner operations
-
-The owner explicitly enables x402. Both agent and server must then be G-addresses. The wallet derives
-their raw Ed25519 master public keys and requires both signatures over SHA-256 of XDR
-`(Symbol("allowit_wallet_v1"), host_payload, execution)`. The host payload binds network, native
-nonce, expiry and invocation tree. The hook admits one exact installed-SAC transfer context and
-uses the same local policy, replay and usage checks as direct execution. The wallet caches asset metadata before the active token call. Native SAC effects and hook state changes roll back together.
-
-Changing a classic account signer or master weight does not revoke this explicit raw-key x402 delegation. The wallet owner must disable x402, pause the wallet, or replace the agent/server address through `deploy_policy`. Direct `execute` follows native account signer thresholds.
-
-`deploy_policy` atomically signs owner, agent, server, source digest, rules, Grant, x402 enablement,
-optional wallet Wasm hash and the next deployment version. A changed owner must accept the packet.
-Deployment preserves pause, Spent and execution nonce. Only `set_pause` changes pause.
-
-Owner recovery and `invoke(contract, function, args, auth)` require the current owner. They bypass
-delegated business limits and preserve delegated Spent and nonce. Passthrough authorization binds
-the exact target, function, arguments and all supplied nested authorization trees. The owner can
-therefore authorize token allowances or other general operations deliberately. Agent and server
-cannot use that path. Native transaction sequencing and Soroban authorization nonces prevent replay
-of an owner's signed authorization. No automatic shared checker participates in owner operations.
-
-Wallet release/layout, owner deployment sequence and parent administration version are distinct.
-Unknown stored formats reject. Simple, Common and Custom share the version-1 layout. Tier changes must install matching rules and source digest. Deployments with a different code hash defer tier parameter validation to delegated admission; unchanged-code redeployments validate immediately. For an incompatible layout, the owner must select reviewed code that reads the retained layout and performs the explicit migration. Installing code that cannot read that layout can disable owner recovery and upgrades. Pausing alone does not prevent this. Contract upgrades require explicit owner authorization.
-
-## Classic Stellar accounts
-
-A classic G-address account can implement Simple-style authorization with owner weight 3, agent
-and server weights 1, low/medium thresholds 2 and high threshold 3. The owner can act alone, while
-the agent and server must jointly authorize delegated transfers. Admission must reject extra
-signers and preserve the owner-only high-threshold path.
-
-This route has no Soroban custody contract or contract storage rent. Classic account and subentry
-reserves still apply. Policy checks run in the server before signing. Common onchain rules and
-bespoke CustomPolicy code require a compatible contract rail.
+Classic G-address multisig has no contract prefix enforcement. Owner-selected signer thresholds
+control native transactions. Its policy source and economic checks run offchain before signing.

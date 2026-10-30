@@ -2,6 +2,7 @@
 //! Canonical owner-policy rules shared by bundled code and the shared engine contract.
 //! Each rule interprets only its selected keys. Unrelated native values remain unchanged.
 use allowit_wallet_protocol::{EngineError as Error, EngineRequest, EngineResult, EngineState};
+use soroban_sdk::xdr::{FromXdr, ToXdr};
 use soroban_sdk::{Address, BytesN, Env, IntoVal, String, TryFromVal, Val, Vec};
 type Result<T> = core::result::Result<T, Error>;
 const DAY: u64 = 86_400;
@@ -19,79 +20,83 @@ fn integer(env: &Env, value: &Val) -> Option<i128> {
         .ok()
         .or_else(|| u64::try_from_val(env, value).ok().map(i128::from))
 }
-fn limit(env: &Env, state: &EngineState, name: &str) -> Result<i128> {
-    let value = state
+fn nonnegative_limit(env: &Env, state: &EngineState, name: &str) -> Result<i128> {
+    let raw = state
         .grant
         .get(key(env, name))
         .ok_or(Error::InvalidParameter)?;
-    let value = integer(env, &value).ok_or(Error::InvalidParameter)?;
-    if value <= 0 {
+    let amount = integer(env, &raw).ok_or(Error::InvalidParameter)?;
+    if amount < 0 {
         Err(Error::InvalidParameter)
     } else {
-        Ok(value)
+        Ok(amount)
     }
 }
-/// Validate the native owner parameters required by one canonical zero-parameter rule.
-/// Zero call capacity and an empty recipient list are valid deny-all configurations.
+fn addresses(env: &Env, raw: &Val) -> Result<Vec<Address>> {
+    let values = Vec::<Val>::try_from_val(env, raw).map_err(|_| Error::InvalidParameter)?;
+    let mut out = Vec::new(env);
+    for value in values.iter() {
+        out.push_back(Address::try_from_val(env, &value).map_err(|_| Error::InvalidParameter)?);
+    }
+    Ok(out)
+}
+fn disabled(env: &Env, state: &EngineState, name: &str) -> bool {
+    state
+        .grant
+        .get(key(env, name))
+        .is_none_or(|value| value.is_void())
+}
+/// Only canonical selected rules inspect their same-named owner parameter. Missing/Null disables that rule.
+/// An unreadable Grant or incompatible non-Null selected value never becomes absence.
 pub fn validate_rule(
     env: &Env,
     rule: &soroban_sdk::Symbol,
     grant: &allowit_wallet_protocol::Grant,
 ) -> Result<()> {
+    let name = if *rule == soroban_sdk::Symbol::new(env, "transaction_cap") {
+        "transaction_cap"
+    } else if *rule == soroban_sdk::Symbol::new(env, "spent_cap") {
+        "spent_cap"
+    } else if *rule == soroban_sdk::Symbol::new(env, "day_spent_cap") {
+        "day_spent_cap"
+    } else if *rule == soroban_sdk::Symbol::new(env, "day_total_cap") {
+        "day_total_cap"
+    } else if *rule == soroban_sdk::Symbol::new(env, "call_cap") {
+        "call_cap"
+    } else if *rule == soroban_sdk::Symbol::new(env, "recipients") {
+        "recipients"
+    } else if *rule == soroban_sdk::Symbol::new(env, "expiry") {
+        "expiry"
+    } else if *rule == soroban_sdk::Symbol::new(env, "tokens") {
+        "tokens"
+    } else {
+        return Err(Error::InvalidParameter);
+    };
     let state = EngineState {
         grant: grant.clone(),
         spent: allowit_wallet_protocol::Spent::new(env),
     };
-    for (name, parameter) in [
-        ("transaction_cap", "per_transfer"),
-        ("daily_cap", "daily_limit"),
-        ("total_cap", "total_limit"),
-    ] {
-        if *rule == soroban_sdk::Symbol::new(env, name) {
-            limit(env, &state, parameter)?;
-            return Ok(());
-        }
+    if disabled(env, &state, name) {
+        return Ok(());
     }
-    for (name, parameter) in [("call_cap", "max_calls"), ("expiry", "expires_at")] {
-        if *rule == soroban_sdk::Symbol::new(env, name) {
-            grant_u64(env, &state, parameter)?;
-            return Ok(());
+    match name {
+        "transaction_cap" => {
+            nonnegative_limit(env, &state, name)?;
         }
-    }
-    if *rule == soroban_sdk::Symbol::new(env, "recipient") {
-        let recipients = Vec::<Val>::try_from_val(
-            env,
-            &grant
-                .get(key(env, "recipients"))
-                .ok_or(Error::InvalidParameter)?,
-        )
-        .map_err(|_| Error::InvalidParameter)?;
-        for recipient in recipients.iter() {
-            Address::try_from_val(env, &recipient).map_err(|_| Error::InvalidParameter)?;
+        "spent_cap" | "day_spent_cap" | "day_total_cap" => {
+            nonnegative_limit(env, &state, name)?;
         }
-    } else if *rule == soroban_sdk::Symbol::new(env, "token") {
-        String::try_from_val(
-            env,
-            &grant
-                .get(key(env, "token"))
-                .ok_or(Error::InvalidParameter)?,
-        )
-        .map_err(|_| Error::InvalidParameter)?;
-    } else {
-        return Err(Error::InvalidParameter);
+        "call_cap" | "expiry" => {
+            grant_u64(env, &state, name)?;
+        }
+        _ => {
+            addresses(
+                env,
+                &grant.get(key(env, name)).ok_or(Error::InvalidParameter)?,
+            )?;
+        }
     }
     Ok(())
-}
-fn spent_amount(env: &Env, state: &EngineState, name: &str) -> Result<i128> {
-    let Some(value) = state.spent.get(key(env, name)) else {
-        return Ok(0);
-    };
-    let value = integer(env, &value).ok_or(Error::InvalidState)?;
-    if value < 0 {
-        Err(Error::InvalidState)
-    } else {
-        Ok(value)
-    }
 }
 fn spent_u64(env: &Env, state: &EngineState, name: &str, default: u64) -> Result<u64> {
     state
@@ -128,71 +133,179 @@ fn valid_amount(request: &EngineRequest) -> Result<()> {
         Err(Error::InvalidParameter)
     }
 }
-fn expected_token(request: &EngineRequest, token: &String) -> Result<()> {
-    if request.token == *token && request.decimals == 7 {
-        Ok(())
-    } else {
-        Err(Error::InvalidParameter)
+
+/// Return the server-attested cost ceiling after checking its native denomination and execution day.
+/// Kernel operation validation distinguishes irreversible payments from retained deposit principal.
+fn expenses(env: &Env, request: &EngineRequest) -> Result<allowit_wallet_protocol::ExpenseBounds> {
+    let raw = request.expense.as_ref().ok_or(Error::InvalidParameter)?;
+    if raw.len() > allowit_wallet_protocol::MAX_EXPENSE_BYTES {
+        return Err(Error::InvalidParameter);
     }
+    let value = allowit_wallet_protocol::ExpenseBounds::from_xdr(env, raw)
+        .map_err(|_| Error::InvalidParameter)?;
+    if value.clone().to_xdr(env) != *raw {
+        return Err(Error::InvalidParameter);
+    }
+    if value.asset != request.asset
+        || value.decimals != request.decimals
+        || value.decimals != 7
+        || value.gas_units < 0
+        || value.conversion_units < 0
+        || value.spent_units < 0
+        || value.gas_units != i128::from(value.max_fee_stroops)
+        || value.day != request.now / DAY
+        || value.observed_ledger == 0
+        || value.spent_units
+            < value
+                .gas_units
+                .checked_add(value.conversion_units)
+                .ok_or(Error::Overflow)?
+    {
+        return Err(Error::InvalidParameter);
+    }
+    Ok(value)
 }
-fn daily(
+fn charge_named(
     env: &Env,
     request: EngineRequest,
     mut state: EngineState,
     cap: i128,
+    amount: i128,
+    usage: &str,
+    marker: &str,
+    facts_key: &str,
+    day_key: Option<&str>,
 ) -> Result<EngineResult> {
-    valid_amount(&request)?;
-    if cap <= 0 {
+    if cap < 0 || amount < 0 {
         return Err(Error::InvalidParameter);
     }
     let day = request.now / DAY;
-    let old_day = spent_u64(env, &state, "day", day)?;
-    if old_day > day {
+    let previous_day = match day_key {
+        Some(name) => spent_u64(env, &state, name, day)?,
+        None => day,
+    };
+    if previous_day > day {
         return Err(Error::InvalidState);
     }
-    let current = if old_day == day {
-        spent_amount(env, &state, "daily")?
-    } else {
-        0
+    let same_day = previous_day == day;
+    if request.history.day != day
+        || request.history.spent < 0
+        || request.history.day_spent < 0
+        || request.history.day_total < 0
+    {
+        return Err(Error::InvalidState);
+    }
+    let next = match usage {
+        "spent" if !request.history.unpriced => request.history.spent,
+        "day_spent" if !request.history.day_unpriced => request.history.day_spent,
+        "day_total" if !request.history.day_unpriced => request.history.day_total,
+        _ => return Err(Error::InvalidState),
     };
-    let already = old_day == day && charged(env, &request, &state, "daily_operation")?;
-    let next = if already {
-        current
-    } else {
-        current.checked_add(request.amount).ok_or(Error::Overflow)?
-    };
+    let facts: Vec<Val> = (request.amount, request.expense.clone()).into_val(env);
+    if same_day && charged(env, &request, &state, marker)? {
+        let prior = state
+            .spent
+            .get(key(env, facts_key))
+            .ok_or(Error::InvalidState)?;
+        if Vec::<Val>::try_from_val(env, &prior).map_err(|_| Error::InvalidState)? != facts {
+            return Err(Error::InvalidState);
+        }
+    }
     if next > cap {
         return Ok(result(state, false));
     }
-    state.spent.set(key(env, "day"), day.into_val(env));
-    state.spent.set(key(env, "daily"), next.into_val(env));
-    state.spent.set(
-        key(env, "daily_operation"),
-        request.operation_id.into_val(env),
-    );
+    state.spent.set(key(env, usage), next.into_val(env));
+    state.spent.set(key(env, facts_key), facts.into_val(env));
+    state
+        .spent
+        .set(key(env, marker), request.operation_id.into_val(env));
+    if let Some(name) = day_key {
+        state.spent.set(key(env, name), day.into_val(env));
+    }
     Ok(result(state, true))
 }
-
-/// Run the explicitly selected daily_cap rule.
-///
-/// Grant `daily_limit` is required, positive U64 or I128 native base units. Spent `day` is U64, `daily` is nonnegative U64 or I128, and `daily_operation` is Bytes32. Missing usage starts at zero and the current UTC day. A later UTC day resets daily usage, while a future stored day is invalid. An operation marker matching this request adds zero and rechecks the cap. Approval sets canonical I128 daily usage, U64 day and this operation ID in the returned map. Denial preserves the input map. Invalid grant types return InvalidParameter, invalid usage returns InvalidState, and checked addition can return Overflow.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn daily_cap(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
-    let cap = limit(&env, &state, "daily_limit")?;
-    daily(&env, request, state, cap)
+/// Cumulative irreversible-expense ceiling. Grant spent_cap is nonnegative I128/U64 underlying units.
+/// Spent spent/spent_operation preserve conservative server-approved expense ceilings without automatic refunds.
+pub fn spent_cap(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
+    if disabled(&env, &state, "spent_cap") {
+        return Ok(result(state, true));
+    }
+    valid_amount(&request)?;
+    let amount = expenses(&env, &request)?.spent_units;
+    let cap = nonnegative_limit(&env, &state, "spent_cap")?;
+    charge_named(
+        &env,
+        request,
+        state,
+        cap,
+        amount,
+        "spent",
+        "spent_operation",
+        "spent_facts",
+        None,
+    )
+}
+/// UTC-day irreversible-expense ceiling. Grant day_spent_cap is nonnegative native underlying units.
+/// Approval updates day_spent/day_spent_day/day_spent_operation. A backward stored day rejects.
+pub fn day_spent_cap(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
+    if disabled(&env, &state, "day_spent_cap") {
+        return Ok(result(state, true));
+    }
+    valid_amount(&request)?;
+    let amount = expenses(&env, &request)?.spent_units;
+    let cap = nonnegative_limit(&env, &state, "day_spent_cap")?;
+    charge_named(
+        &env,
+        request,
+        state,
+        cap,
+        amount,
+        "day_spent",
+        "day_spent_operation",
+        "day_spent_facts",
+        Some("day_spent_day"),
+    )
+}
+/// UTC-day gross-notional ceiling. Underlying principal plus separate attributable gas counts once.
+/// Embedded deposit conversion fees already belong to principal and are not added again.
+pub fn day_total_cap(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
+    if disabled(&env, &state, "day_total_cap") {
+        return Ok(result(state, true));
+    }
+    valid_amount(&request)?;
+    let amount = request
+        .amount
+        .checked_add(expenses(&env, &request)?.gas_units)
+        .ok_or(Error::Overflow)?;
+    let cap = nonnegative_limit(&env, &state, "day_total_cap")?;
+    charge_named(
+        &env,
+        request,
+        state,
+        cap,
+        amount,
+        "day_total",
+        "day_total_operation",
+        "day_total_facts",
+        Some("day_total_day"),
+    )
+}
+/// Authored exact SAC-address allowlist. Grant tokens is Vec<Address>, distinct from the old token label check.
+pub fn tokens(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
+    if disabled(&env, &state, "tokens") {
+        return Ok(result(state, true));
+    }
+    let raw = state
+        .grant
+        .get(key(&env, "tokens"))
+        .ok_or(Error::InvalidParameter)?;
+    let allowed = addresses(&env, &raw)?;
+    Ok(result(state, allowed.contains(&request.asset)))
 }
 
 /// Run the explicitly selected transaction_cap rule.
 ///
-/// Requires positive Grant `per_transfer` as U64 or I128 native base units and a positive request amount. Missing or invalid selected grant data returns InvalidParameter. Approval compares the amount to this cap. It reads no usage keys and returns the spent map unchanged.
+/// Requires nonnegative Grant `transaction_cap` as U64 or I128 native base units and a positive request amount. Missing or invalid selected grant data returns InvalidParameter. Approval compares the amount to this cap. It reads no usage keys and returns the spent map unchanged.
 /// Unrelated Grant and Spent entries are preserved without coercion.
 ///
 /// # Parameters
@@ -207,47 +320,17 @@ pub fn transaction_cap(
     request: EngineRequest,
     state: EngineState,
 ) -> Result<EngineResult> {
-    valid_amount(&request)?;
-    let cap = limit(&env, &state, "per_transfer")?;
-    Ok(result(state, request.amount <= cap))
-}
-
-/// Run the explicitly selected total_cap rule.
-///
-/// Requires positive Grant `total_limit` as U64 or I128 native base units. Spent `total` is nonnegative U64 or I128, default zero. `total_operation` is optional Bytes32. Matching operation identity adds zero and rechecks the cap. Approval sets canonical I128 total and this operation marker in the returned map. Denial preserves the input map. Invalid grant/usage and checked-add overflow return their respective errors.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn total_cap(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
-    valid_amount(&request)?;
-    let cap = limit(&env, &state, "total_limit")?;
-    let current = spent_amount(&env, &state, "total")?;
-    let next = if charged(&env, &request, &state, "total_operation")? {
-        current
-    } else {
-        current.checked_add(request.amount).ok_or(Error::Overflow)?
-    };
-    if next > cap {
-        return Ok(result(state, false));
+    if disabled(&env, &state, "transaction_cap") {
+        return Ok(result(state, true));
     }
-    let mut state = state;
-    state.spent.set(key(&env, "total"), next.into_val(&env));
-    state.spent.set(
-        key(&env, "total_operation"),
-        request.operation_id.into_val(&env),
-    );
-    Ok(result(state, true))
+    valid_amount(&request)?;
+    let cap = nonnegative_limit(&env, &state, "transaction_cap")?;
+    Ok(result(state, request.amount <= cap))
 }
 
 /// Run the explicitly selected call_cap rule.
 ///
-/// Requires Grant `max_calls` as U64. Spent `calls` is U64, default zero, and `call_operation` is optional Bytes32. A new operation adds one call, while a matching marker adds zero and rechecks the cap. Zero capacity denies. Approval sets calls and the operation marker in the returned map. Denial preserves the input map. Invalid types and checked-add overflow return errors.
+/// Requires Grant `call_cap` as U64. Compares the proposed protected custody call count, including operations while this rule was disabled. Approval mirrors calls and the operation marker into authored Spent. Denial preserves the input map.
 /// Unrelated Grant and Spent entries are preserved without coercion.
 ///
 /// # Parameters
@@ -258,13 +341,11 @@ pub fn total_cap(env: Env, request: EngineRequest, state: EngineState) -> Result
 /// # Returns
 /// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
 pub fn call_cap(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
-    let cap = grant_u64(&env, &state, "max_calls")?;
-    let current = spent_u64(&env, &state, "calls", 0)?;
-    let next = if charged(&env, &request, &state, "call_operation")? {
-        current
-    } else {
-        current.checked_add(1).ok_or(Error::Overflow)?
-    };
+    if disabled(&env, &state, "call_cap") {
+        return Ok(result(state, true));
+    }
+    let cap = grant_u64(&env, &state, "call_cap")?;
+    let next = request.history.calls;
     if cap == 0 || next > cap {
         return Ok(result(state, false));
     }
@@ -289,18 +370,21 @@ pub fn call_cap(env: Env, request: EngineRequest, state: EngineState) -> Result<
 ///
 /// # Returns
 /// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn recipient(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
+pub fn recipients(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
+    if disabled(&env, &state, "recipients") {
+        return Ok(result(state, true));
+    }
     let raw = state
         .grant
         .get(key(&env, "recipients"))
         .ok_or(Error::InvalidParameter)?;
-    let allowed = Vec::<Address>::try_from_val(&env, &raw).map_err(|_| Error::InvalidParameter)?;
+    let allowed = addresses(&env, &raw)?;
     Ok(result(state, allowed.contains(&request.recipient)))
 }
 
 /// Run the explicitly selected expiry rule.
 ///
-/// Requires Grant `expires_at` as U64 Unix ledger seconds. The request and grant must remain unexpired, and the request expiry cannot exceed the grant expiry. Missing or invalid grant data returns InvalidParameter. Denial leaves usage unchanged. Custody independently enforces request expiry even when this rule is not selected.
+/// Requires Grant `expiry` as U64 Unix ledger seconds. The request and grant must remain unexpired, and the request expiry cannot exceed the grant expiry. Missing or invalid grant data returns InvalidParameter. Denial leaves usage unchanged. Custody independently enforces request expiry even when this rule is not selected.
 /// Unrelated Grant and Spent entries are preserved without coercion.
 ///
 /// # Parameters
@@ -311,195 +395,14 @@ pub fn recipient(env: Env, request: EngineRequest, state: EngineState) -> Result
 /// # Returns
 /// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
 pub fn expiry(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
-    let expiry = grant_u64(&env, &state, "expires_at")?;
+    if disabled(&env, &state, "expiry") {
+        return Ok(result(state, true));
+    }
+    let expiry = grant_u64(&env, &state, "expiry")?;
     Ok(result(
         state,
         request.now < expiry && request.now < request.expires_at && request.expires_at <= expiry,
     ))
-}
-
-/// Run the explicitly selected token rule.
-///
-/// Requires Grant `token` as a native String. It compares the authenticated label and requires the seven-decimal custody profile. Missing or invalid selected grant data returns InvalidParameter; a mismatch returns false. Labels do not replace the immutable SAC address identity. No usage key changes.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn token(env: Env, request: EngineRequest, state: EngineState) -> Result<EngineResult> {
-    let raw = state
-        .grant
-        .get(key(&env, "token"))
-        .ok_or(Error::InvalidParameter)?;
-    let expected = String::try_from_val(&env, &raw).map_err(|_| Error::InvalidParameter)?;
-    Ok(result(
-        state,
-        request.decimals == 7 && request.token == expected,
-    ))
-}
-
-/// Run the explicitly selected cap_per_transaction rule.
-///
-/// Uses only the explicit positive I128 limit and authenticated token label, not any Grant key. Token or decimal mismatch, invalid amount or invalid limit returns InvalidParameter. An exceeded bound returns false. No usage key changes.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-/// - `limit`: Positive cap in native i128 asset base units.
-/// - `token`: Expected authenticated SAC label.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn cap_per_transaction(
-    env: Env,
-    request: EngineRequest,
-    state: EngineState,
-    limit: i128,
-    token: String,
-) -> Result<EngineResult> {
-    let _ = env;
-    valid_amount(&request)?;
-    expected_token(&request, &token)?;
-    if limit <= 0 {
-        return Err(Error::InvalidParameter);
-    }
-    Ok(result(state, request.amount <= limit))
-}
-
-/// Run the explicitly selected cap_per_day rule.
-///
-/// Uses the explicit positive I128 limit and token label without reading Grant daily_limit. The spent keys, UTC rollover and once-per-operation behavior are identical to daily_cap, including the shared daily_operation marker. Token or decimal mismatch returns InvalidParameter.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-/// - `limit`: Positive cap in native i128 asset base units.
-/// - `token`: Expected authenticated SAC label.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn cap_per_day(
-    env: Env,
-    request: EngineRequest,
-    state: EngineState,
-    limit: i128,
-    token: String,
-) -> Result<EngineResult> {
-    expected_token(&request, &token)?;
-    daily(&env, request, state, limit)
-}
-
-/// Run the explicitly selected recipient_is rule.
-///
-/// Uses the explicit expected address and no Grant key. A mismatch returns false. The spent map is returned unchanged.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-/// - `expected`: Exact expected native address or authenticated label.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn recipient_is(
-    env: Env,
-    request: EngineRequest,
-    state: EngineState,
-    expected: Address,
-) -> Result<EngineResult> {
-    let _ = env;
-    Ok(result(state, request.recipient == expected))
-}
-
-/// Run the explicitly selected asset_label rule.
-///
-/// Uses the explicit expected token label and the authenticated seven-decimal profile, with no Grant key. A mismatch returns false. This label check does not replace custody SAC address binding. The spent map is unchanged.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-/// - `expected`: Exact expected native address or authenticated label.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn asset_label(
-    env: Env,
-    request: EngineRequest,
-    state: EngineState,
-    expected: String,
-) -> Result<EngineResult> {
-    let _ = env;
-    Ok(result(
-        state,
-        request.decimals == 7 && request.token == expected,
-    ))
-}
-
-/// Run the explicitly selected actions rule.
-///
-/// Uses the explicit allowed list and no Grant key. This custody profile admits only stellar::sep41_transfer, so approval requires that exact identifier in the list. No usage key changes.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-/// - `allowed`: Explicitly permitted action identifiers.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn actions(
-    env: Env,
-    request: EngineRequest,
-    state: EngineState,
-    allowed: Vec<String>,
-) -> Result<EngineResult> {
-    let _ = request;
-    Ok(result(
-        state,
-        allowed.contains(String::from_str(&env, "stellar::sep41_transfer")),
-    ))
-}
-
-/// Run the explicitly selected amount_at_most rule.
-///
-/// Uses the explicit nonnegative I128 bound and authenticated token label, not Grant keys. A greater positive amount returns ordinary false, including a zero bound, so source may handle that predicate branch. Invalid amount, negative bound, token or decimal mismatch returns InvalidParameter rather than false. No usage key changes.
-/// Unrelated Grant and Spent entries are preserved without coercion.
-///
-/// # Parameters
-/// - `env`: Native value environment supplied by the invoking wrapper.
-/// - `request`: Exact custody-authenticated proposal and operation identity.
-/// - `state`: Complete immutable grant and current mutable spent copies.
-/// - `limit`: Nonnegative bound in native i128 asset base units.
-/// - `token`: Expected authenticated SAC label.
-///
-/// # Returns
-/// Returns a predicate decision and proposed spent map. Invalid state or parameters return an error.
-pub fn amount_at_most(
-    env: Env,
-    request: EngineRequest,
-    state: EngineState,
-    limit: i128,
-    token: String,
-) -> Result<EngineResult> {
-    let _ = env;
-    valid_amount(&request)?;
-    expected_token(&request, &token)?;
-    if limit < 0 {
-        return Err(Error::InvalidParameter);
-    }
-    Ok(result(state, request.amount <= limit))
 }
 
 /// Execute a compiler-selected local rule with the same arguments as the shared contract ABI.
@@ -518,56 +421,21 @@ pub fn check(
     method: &str,
     params: Vec<Val>,
 ) -> Result<EngineResult> {
+    if !params.is_empty() {
+        return Err(Error::InvalidParameter);
+    }
     match method {
-        "daily_cap" if params.is_empty() => daily_cap(env.clone(), request, state),
-        "transaction_cap" if params.is_empty() => transaction_cap(env.clone(), request, state),
-        "total_cap" if params.is_empty() => total_cap(env.clone(), request, state),
-        "call_cap" if params.is_empty() => call_cap(env.clone(), request, state),
-        "recipient" if params.is_empty() => recipient(env.clone(), request, state),
-        "expiry" if params.is_empty() => expiry(env.clone(), request, state),
-        "token" if params.is_empty() => token(env.clone(), request, state),
-        "cap_per_transaction" if params.len() == 2 => cap_per_transaction(
-            env.clone(),
-            request,
-            state,
-            arg::<i128>(env, &params, 0)?,
-            arg::<String>(env, &params, 1)?,
-        ),
-        "cap_per_day" if params.len() == 2 => cap_per_day(
-            env.clone(),
-            request,
-            state,
-            arg::<i128>(env, &params, 0)?,
-            arg::<String>(env, &params, 1)?,
-        ),
-        "recipient_is" if params.len() == 1 => recipient_is(
-            env.clone(),
-            request,
-            state,
-            arg::<Address>(env, &params, 0)?,
-        ),
-        "asset_label" if params.len() == 1 => {
-            asset_label(env.clone(), request, state, arg::<String>(env, &params, 0)?)
-        }
-        "actions" if params.len() == 1 => actions(
-            env.clone(),
-            request,
-            state,
-            arg::<Vec<String>>(env, &params, 0)?,
-        ),
-        "amount_at_most" if params.len() == 2 => amount_at_most(
-            env.clone(),
-            request,
-            state,
-            arg::<i128>(env, &params, 0)?,
-            arg::<String>(env, &params, 1)?,
-        ),
+        "transaction_cap" => transaction_cap(env.clone(), request, state),
+        "spent_cap" => spent_cap(env.clone(), request, state),
+        "day_spent_cap" => day_spent_cap(env.clone(), request, state),
+        "day_total_cap" => day_total_cap(env.clone(), request, state),
+        "call_cap" => call_cap(env.clone(), request, state),
+        "recipients" => recipients(env.clone(), request, state),
+        "expiry" => expiry(env.clone(), request, state),
+        "tokens" => tokens(env.clone(), request, state),
         _ => Err(Error::InvalidParameter),
     }
 }
-fn arg<T: TryFromVal<Env, Val>>(env: &Env, params: &Vec<Val>, i: u32) -> Result<T> {
-    T::try_from_val(env, &params.get(i).ok_or(Error::InvalidParameter)?)
-        .map_err(|_| Error::InvalidParameter)
-}
+
 #[cfg(test)]
 mod tests;

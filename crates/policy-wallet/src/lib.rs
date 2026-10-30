@@ -1,10 +1,11 @@
 #![no_std]
 //! Owner-controlled custody mixins shared by fixed and bespoke policy wallets.
 use allowit_wallet_protocol::{
-    ARGUMENT_SCHEMA_DESCRIPTOR, EngineRequest, EngineResult, EngineState, ExecutionRequest, Grant,
-    MAX_ARGUMENT_BYTES, PolicyBinding, PolicyContext, PolicyEngine, PolicyFailure,
-    SEP56_DEPOSIT_SCHEMA_DESCRIPTOR, Sep41TransferArgs, Sep56DepositArgs, Sep56DepositEvent,
-    Sep56DepositReceipt, Spent, TransferReceipt, named_values_valid,
+    ARGUMENT_SCHEMA_DESCRIPTOR, AccountingHistory, EngineRequest, EngineResult, EngineState,
+    ExecutionRequest, ExpenseBounds, Grant, MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, PolicyBinding,
+    PolicyContext, PolicyEngine, PolicyFailure, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR, Sep41TransferArgs,
+    Sep56DepositArgs, Sep56DepositEvent, Sep56DepositReceipt, Spent, TransferReceipt,
+    named_values_valid,
 };
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, Executable, String, Symbol, TryFromVal, Val, Vec,
@@ -30,6 +31,7 @@ pub struct PolicyConfig {
     pub server: Address,
     pub asset: Address,
     pub policy_instance: BytesN<32>,
+    /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     /// Ordered explicit Common checks. Simple and Custom use an empty list.
     pub rules: Vec<Symbol>,
@@ -45,6 +47,7 @@ pub struct PolicyDeployment {
     pub owner: Address,
     pub agent: Address,
     pub server: Address,
+    /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     pub rules: Vec<Symbol>,
     pub grant: soroban_sdk::Map<String, Val>,
@@ -55,12 +58,14 @@ pub struct PolicyDeployment {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct State {
+    pub history: AccountingHistory,
     pub contract_version: u32,
     pub owner: Address,
     pub agent: Address,
     pub server: Address,
     pub asset: Address,
     pub policy_instance: BytesN<32>,
+    /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     pub rules: Vec<Symbol>,
     pub grant: soroban_sdk::Map<String, Val>,
@@ -115,6 +120,8 @@ enum Key {
 /// Compile-time policy mixin. No runtime fallback or system-controlled executable reference exists.
 pub trait Policy {
     const KIND: &'static str;
+    /// Fixed standard implementations bind only their owner-approved initial preflight prefix.
+    const STANDARD_PREFIX: bool = false;
     /// A bespoke implementation binds its compiled source. Fixed tiers use the owner's source digest.
     fn source_digest(_env: &Env) -> Option<BytesN<32>> {
         None
@@ -159,7 +166,7 @@ fn load(env: &Env, initial: Option<State>) -> Result<State, Error> {
     let state = State::try_from_val(env, &raw).map_err(|_| Error::InvalidState)?;
     let fields = soroban_sdk::Map::<Symbol, Val>::try_from_val(env, &raw)
         .map_err(|_| Error::InvalidState)?;
-    if state.contract_version != CONTRACT_VERSION || fields.len() != 14 {
+    if state.contract_version != CONTRACT_VERSION || fields.len() != 15 {
         return Err(Error::InvalidState);
     }
     let ttl = env.storage().max_ttl();
@@ -190,6 +197,50 @@ fn public_key(env: &Env, address: &Address) -> Result<BytesN<32>, Error> {
     encoded.slice(12..44).copy_into_slice(&mut key);
     Ok(BytesN::from_array(env, &key))
 }
+/// Pure standard-prefix binding. Grant values and the owner-signed offchain suffix are excluded.
+pub fn standard_prefix_digest(
+    env: &Env,
+    kind: &Symbol,
+    module: &BytesN<32>,
+    asset: &Address,
+    rules: &Vec<Symbol>,
+) -> BytesN<32> {
+    use soroban_sdk::IntoVal;
+    let mut checks = Vec::<Val>::new(env);
+    for name in rules.iter() {
+        checks.push_back((name.clone(), name).into_val(env));
+    }
+    env.crypto()
+        .sha256(
+            &(
+                Symbol::new(env, "allowit_std_prefix"),
+                kind.clone(),
+                module.clone(),
+                asset.clone(),
+                schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR),
+                schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR),
+                checks,
+            )
+                .to_xdr(env),
+        )
+        .to_bytes()
+}
+fn checked_prefix<P: Policy>(
+    env: &Env,
+    asset: &Address,
+    rules: &Vec<Symbol>,
+) -> Result<BytesN<32>, Error> {
+    let Some(Executable::Wasm(module)) = env.current_contract_address().executable() else {
+        return Err(Error::InvalidState);
+    };
+    Ok(standard_prefix_digest(
+        env,
+        &Symbol::new(env, P::KIND),
+        &module,
+        asset,
+        rules,
+    ))
+}
 fn validate<P: Policy>(env: &Env, config: &PolicyConfig) -> Result<(), Error> {
     let roles = [&config.owner, &config.agent, &config.server];
     for (i, role) in roles.iter().enumerate() {
@@ -208,11 +259,17 @@ fn validate<P: Policy>(env: &Env, config: &PolicyConfig) -> Result<(), Error> {
     if !named_values_valid(env, &config.grant) {
         return Err(Error::InvalidGrant);
     }
+    P::validate(env, &config.rules, &config.grant)?;
+    if P::STANDARD_PREFIX
+        && config.source_digest != checked_prefix::<P>(env, &config.asset, &config.rules)?
+    {
+        return Err(Error::InvalidState);
+    }
     if config.x402_enabled {
         public_key(env, &config.agent)?;
         public_key(env, &config.server)?;
     }
-    P::validate(env, &config.rules, &config.grant)
+    Ok(())
 }
 fn schema_digest(env: &Env, descriptor: &[u8]) -> BytesN<32> {
     env.crypto()
@@ -231,6 +288,11 @@ fn binding_for<P: Policy>(
         return Err(Error::InvalidState);
     };
     if P::source_digest(env).is_some_and(|digest| digest != state.source_digest) {
+        return Err(Error::InvalidState);
+    }
+    if P::STANDARD_PREFIX
+        && state.source_digest != checked_prefix::<P>(env, &state.asset, &state.rules)?
+    {
         return Err(Error::InvalidState);
     }
     Ok(PolicyBinding {
@@ -393,7 +455,81 @@ fn move_tokens(env: &Env, asset: &Address, to: &Address, amount: i128) -> Result
     }
     Ok(())
 }
-fn deposit_tokens(env: &Env, asset: &Address, args: &Sep56DepositArgs) -> Result<i128, Error> {
+fn decode_expense(env: &Env, raw: Option<&Bytes>) -> Result<Option<ExpenseBounds>, Error> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.len() > MAX_EXPENSE_BYTES {
+        return Err(Error::InvalidInvocation);
+    }
+    let value = ExpenseBounds::from_xdr(env, raw).map_err(|_| Error::InvalidInvocation)?;
+    if value.clone().to_xdr(env) != *raw {
+        return Err(Error::InvalidInvocation);
+    }
+    Ok(Some(value))
+}
+/// Check denomination, operation class and conservative signed cost identities. External facts remain server-attested.
+fn validate_expense(
+    env: &Env,
+    state: &State,
+    execution: &ExecutionRequest,
+    operation: &NativeOperation,
+) -> Result<(), Error> {
+    let Some(expense) = decode_expense(env, execution.expense.as_ref())? else {
+        return Ok(());
+    };
+    if expense.asset != state.asset
+        || expense.decimals != 7
+        || expense.gas_units < 0
+        || expense.conversion_units < 0
+        || expense.spent_units < 0
+        || expense.observed_ledger == 0
+        || expense.observed_ledger > env.ledger().sequence()
+        || expense.day != env.ledger().timestamp() / 86_400
+    {
+        return Err(Error::InvalidInvocation);
+    }
+    let native_asset = env
+        .deployer()
+        .with_stellar_asset(Bytes::from_array(env, &[0; 4]))
+        .deployed_address();
+    // There is no admitted cross-asset gas oracle. Only exact XLM/stroop identity conversion is supported.
+    if expense.max_fee_stroops > 0 && state.asset != native_asset {
+        return Err(Error::UnsupportedAsset);
+    }
+    if expense.gas_units != i128::from(expense.max_fee_stroops) {
+        return Err(Error::InvalidInvocation);
+    }
+    let principal = match operation {
+        NativeOperation::Transfer(args) => {
+            if expense.conversion_units != 0 {
+                return Err(Error::InvalidInvocation);
+            }
+            args.amount
+        }
+        NativeOperation::Deposit(args) => {
+            if expense.conversion_units > args.assets {
+                return Err(Error::InvalidInvocation);
+            }
+            expense.conversion_units
+        }
+    };
+    if expense.spent_units
+        != principal
+            .checked_add(expense.gas_units)
+            .ok_or(Error::Overflow)?
+    {
+        return Err(Error::InvalidInvocation);
+    }
+    Ok(())
+}
+
+fn deposit_tokens(
+    env: &Env,
+    asset: &Address,
+    args: &Sep56DepositArgs,
+    expense: Option<&ExpenseBounds>,
+) -> Result<i128, Error> {
     use soroban_sdk::IntoVal;
     let underlying: Address =
         env.invoke_contract(&args.vault, &Symbol::new(env, "query_asset"), Vec::new(env));
@@ -434,6 +570,17 @@ fn deposit_tokens(env: &Env, asset: &Address, args: &Sep56DepositArgs) -> Result
         )
             .into_val(env),
     );
+    if let Some(expense) = expense {
+        // The selected vault supplies this valuation. It is not a proof of future redemption or economic honesty.
+        let redeemable: i128 = env.invoke_contract(
+            &args.vault,
+            &Symbol::new(env, "preview_redeem"),
+            (shares,).into_val(env),
+        );
+        if redeemable < 0 || args.assets - args.assets.min(redeemable) > expense.conversion_units {
+            return Err(Error::InvalidEffects);
+        }
+    }
     // Finish foreign metadata reads before measuring final effects. A vault getter is not trusted to be pure.
     let after_asset: Address =
         env.invoke_contract(&args.vault, &Symbol::new(env, "query_asset"), Vec::new(env));
@@ -456,6 +603,45 @@ fn deposit_tokens(env: &Env, asset: &Address, args: &Sep56DepositArgs) -> Result
     }
     Ok(shares)
 }
+fn next_history(
+    env: &Env,
+    prior: &AccountingHistory,
+    execution: &ExecutionRequest,
+    amount: i128,
+    now: u64,
+) -> Result<AccountingHistory, Error> {
+    let day = now / 86_400;
+    if prior.day > day || prior.spent < 0 || prior.day_spent < 0 || prior.day_total < 0 {
+        return Err(Error::InvalidState);
+    }
+    let mut next = prior.clone();
+    if next.day != day {
+        next.day = day;
+        next.day_spent = 0;
+        next.day_total = 0;
+        next.day_unpriced = false;
+    }
+    next.calls = next.calls.checked_add(1).ok_or(Error::Overflow)?;
+    next.day_total = next.day_total.checked_add(amount).ok_or(Error::Overflow)?;
+    if let Some(expense) = decode_expense(env, execution.expense.as_ref())? {
+        next.spent = next
+            .spent
+            .checked_add(expense.spent_units)
+            .ok_or(Error::Overflow)?;
+        next.day_spent = next
+            .day_spent
+            .checked_add(expense.spent_units)
+            .ok_or(Error::Overflow)?;
+        next.day_total = next
+            .day_total
+            .checked_add(expense.gas_units)
+            .ok_or(Error::Overflow)?;
+    } else {
+        next.unpriced = true;
+        next.day_unpriced = true;
+    }
+    Ok(next)
+}
 fn admit<P: Policy>(
     env: &Env,
     execution: ExecutionRequest,
@@ -469,6 +655,8 @@ fn admit<P: Policy>(
     )?;
     let invocation = &execution.invocation;
     if execution.policy_instance != installed.policy_instance
+        || execution.source_hash == BytesN::from_array(env, &[0; 32])
+        || (!P::STANDARD_PREFIX && execution.source_hash != installed.source_digest)
         || execution.operation_id == BytesN::from_array(env, &[0; 32])
         || invocation.module_digest != installed.module_digest
         || invocation.entrypoint != installed.entrypoint
@@ -479,8 +667,8 @@ fn admit<P: Policy>(
     }
     let args = operation.transfer(&state.asset);
     let operation_name = operation.name(env);
-    let operation = Key::Operation(execution.operation_id.clone());
-    if env.storage().persistent().has(&operation) {
+    let replay_key = Key::Operation(execution.operation_id.clone());
+    if env.storage().persistent().has(&replay_key) {
         return Err(Error::Replay);
     }
     if state.paused {
@@ -499,8 +687,11 @@ fn admit<P: Policy>(
     if args.to == env.current_contract_address() || issuer_destination(env, &state, &args.to)? {
         return Err(Error::InvalidRecipient);
     }
+    validate_expense(env, &state, &execution, operation)?;
     let nonce = state.nonce.checked_add(1).ok_or(Error::Overflow)?;
+    let history = next_history(env, &state.history, &execution, args.amount, now)?;
     let request = EngineRequest {
+        history: history.clone(),
         wallet: args.from.clone(),
         agent: state.agent.clone(),
         asset: state.asset.clone(),
@@ -509,6 +700,7 @@ fn admit<P: Policy>(
         recipient: args.to.clone(),
         amount: args.amount,
         operation_id: execution.operation_id.clone(),
+        expense: execution.expense.clone(),
         nonce: execution.nonce,
         deployment_version: execution.deployment_version,
         expires_at: execution.expires_at,
@@ -535,6 +727,7 @@ fn admit<P: Policy>(
     }
     storage.commit(&initial, &final_spent);
     state.nonce = nonce;
+    state.history = history;
     store(env, &state);
     let receipt = TransferReceipt {
         operation_id: execution.operation_id,
@@ -545,7 +738,7 @@ fn admit<P: Policy>(
         nonce: execution.nonce,
         deployment_version: execution.deployment_version,
     };
-    Ok(persistent::load(env, &operation, Some(&receipt)).unwrap())
+    Ok(persistent::load(env, &replay_key, Some(&receipt)).unwrap())
 }
 
 pub fn construct<P: Policy>(env: &Env, config: PolicyConfig) -> Result<(), Error> {
@@ -558,6 +751,7 @@ pub fn construct<P: Policy>(env: &Env, config: PolicyConfig) -> Result<(), Error
     load(
         env,
         Some(State {
+            history: AccountingHistory::default(),
             contract_version: CONTRACT_VERSION,
             owner: config.owner,
             agent: config.agent,
@@ -614,13 +808,14 @@ pub fn execute<P: Policy>(
     state.agent.require_auth();
     state.server.require_auth();
     let operation = decode_operation(env, &execution, &state)?;
+    let expense = decode_expense(env, execution.expense.as_ref())?;
     let receipt = admit::<P>(env, execution, state, &operation)?;
     match operation {
         NativeOperation::Transfer(_) => {
             move_tokens(env, &receipt.token, &receipt.to, receipt.amount)?
         }
         NativeOperation::Deposit(args) => {
-            let shares = deposit_tokens(env, &receipt.token, &args)?;
+            let shares = deposit_tokens(env, &receipt.token, &args, expense.as_ref())?;
             let deposited = Sep56DepositReceipt {
                 operation_id: receipt.operation_id.clone(),
                 vault: args.vault,
@@ -819,6 +1014,7 @@ pub fn check_auth<P: Policy>(
 pub struct Simple;
 impl Policy for Simple {
     const KIND: &'static str = "simple_policy_engine";
+    const STANDARD_PREFIX: bool = true;
     fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
@@ -843,15 +1039,13 @@ impl Policy for Simple {
 pub struct Common;
 impl Policy for Common {
     const KIND: &'static str = "common_policy_engine";
+    const STANDARD_PREFIX: bool = true;
     fn admits_schema(env: &Env, digest: &BytesN<32>) -> bool {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
     fn validate(env: &Env, rules: &Vec<Symbol>, grant: &Grant) -> Result<(), Error> {
-        for (i, rule) in rules.iter().enumerate() {
-            if rules.iter().take(i).any(|prior| prior == rule) {
-                return Err(Error::InvalidGrant);
-            }
+        for rule in rules.iter() {
             allowit_policy_rules::validate_rule(env, &rule, grant)
                 .map_err(|_| Error::InvalidGrant)?;
         }
@@ -865,24 +1059,28 @@ impl Policy for Common {
     ) -> Result<Spent, Error> {
         let grant = state.grant.clone();
         for rule in rules.iter() {
-            let result = if rule == Symbol::new(env, "transaction_cap") {
-                allowit_policy_rules::transaction_cap(env.clone(), request.clone(), state)
-            } else if rule == Symbol::new(env, "daily_cap") {
-                allowit_policy_rules::daily_cap(env.clone(), request.clone(), state)
-            } else if rule == Symbol::new(env, "total_cap") {
-                allowit_policy_rules::total_cap(env.clone(), request.clone(), state)
+            let name = if rule == Symbol::new(env, "transaction_cap") {
+                "transaction_cap"
+            } else if rule == Symbol::new(env, "spent_cap") {
+                "spent_cap"
+            } else if rule == Symbol::new(env, "day_spent_cap") {
+                "day_spent_cap"
+            } else if rule == Symbol::new(env, "day_total_cap") {
+                "day_total_cap"
             } else if rule == Symbol::new(env, "call_cap") {
-                allowit_policy_rules::call_cap(env.clone(), request.clone(), state)
-            } else if rule == Symbol::new(env, "recipient") {
-                allowit_policy_rules::recipient(env.clone(), request.clone(), state)
+                "call_cap"
+            } else if rule == Symbol::new(env, "recipients") {
+                "recipients"
             } else if rule == Symbol::new(env, "expiry") {
-                allowit_policy_rules::expiry(env.clone(), request.clone(), state)
-            } else if rule == Symbol::new(env, "token") {
-                allowit_policy_rules::token(env.clone(), request.clone(), state)
+                "expiry"
+            } else if rule == Symbol::new(env, "tokens") {
+                "tokens"
             } else {
                 return Err(Error::InvalidGrant);
-            }
-            .map_err(|_| Error::PolicyDenied)?;
+            };
+            let result =
+                allowit_policy_rules::check(env, request.clone(), state, name, Vec::new(env))
+                    .map_err(|_| Error::PolicyDenied)?;
             if !result.approval {
                 return Err(Error::PolicyDenied);
             }

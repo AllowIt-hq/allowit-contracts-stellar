@@ -9,6 +9,7 @@ pub const ARGUMENT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep41_transfer.v
 /// Exact SEP-56 deposit encoding. The vault is also its SEP-41 share-token contract.
 pub const SEP56_DEPOSIT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep56_deposit.v1:ScValMap(assets:i128,from:Address,min_shares:i128,operator:Address,receiver:Address,vault:Address)";
 pub const MAX_ARGUMENT_BYTES: u32 = 1024;
+pub const MAX_EXPENSE_BYTES: u32 = 1024;
 
 /// Owner-signed UTF-8 names mapped to exact native values. Values retain their representation.
 /// No names or limits are mandatory. Authored policy selects and validates the values it reads.
@@ -247,6 +248,29 @@ pub struct PolicyInvocation {
     pub arguments: Bytes,
 }
 
+/// Request-bound conservative economic ceilings, approved by the configured server signer.
+/// These are not a proof of final gas or external vault valuation. Amounts use the immutable underlying asset.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpenseBounds {
+    /// Immutable underlying SAC denomination, distinct from the share token.
+    pub asset: Address,
+    /// Exact underlying scale. This native custody profile requires seven.
+    pub decimals: u32,
+    /// Conservative attributable gas ceiling in underlying units. Native XLM identity conversion is supported.
+    pub gas_units: i128,
+    /// Deposit fee/slippage ceiling in underlying units. Transfers require zero.
+    pub conversion_units: i128,
+    /// Full payment principal plus gas, or deposit conversion loss plus gas. The kernel checks the operation class.
+    pub spent_units: i128,
+    /// Signed outer transaction fee bound in stroops, checked by the SDK/server; the contract cannot observe final fees.
+    pub max_fee_stroops: u32,
+    /// Nonzero ledger at which the server observed the economic inputs. It cannot exceed execution ledger.
+    pub observed_ledger: u32,
+    /// UTC execution day (Unix seconds / 86400). Cross-day use rejects.
+    pub day: u64,
+}
+
 /// The SDK maps OperationRef.policy_instance and OperationRef.nonce without changing them.
 /// The monotonic execution nonce and deployment version come from authenticated custody state.
 #[contracttype]
@@ -254,6 +278,8 @@ pub struct PolicyInvocation {
 pub struct ExecutionRequest {
     /// Stable nonzero logical policy identifier. Upgrades and configuration changes preserve this identity.
     pub policy_instance: BytesN<32>,
+    /// Exact full offchain source identity covered by agent/server authorization. Std binds its prefix separately.
+    pub source_hash: BytesN<32>,
     /// Nonzero logical operation identifier consumed once with successful effects; replacement preparations retain it.
     pub operation_id: BytesN<32>,
     /// Strict next execution sequence shared by delegated spending paths. It is distinct from the native authorization nonce.
@@ -264,6 +290,8 @@ pub struct ExecutionRequest {
     pub expires_at: u64,
     /// Installed module selection and exact canonical arguments, bound before compiled policy execution.
     pub invocation: PolicyInvocation,
+    /// Optional canonical XDR of ExpenseBounds, bounded by MAX_EXPENSE_BYTES. New cost rules require Some.
+    pub expense: Option<Bytes>,
 }
 
 #[contracttype]
@@ -277,7 +305,8 @@ pub struct PolicyBinding {
     pub policy_instance: BytesN<32>,
     /// Actual wallet Wasm SHA-256 identity. It differs from both release metadata and the authored-source digest.
     pub module_digest: BytesN<32>,
-    /// SHA-256 of the complete authored policy source compiled into this kernel.
+    /// Fixed standard prefix binding, or the complete compiled source digest for Custom.
+    /// Standard offchain source authorization is separate and does not change this binding.
     pub source_digest: BytesN<32>,
     /// SHA-256 of the admitted native argument schema. Unknown schemas reject.
     pub argument_schema_digest: BytesN<32>,
@@ -324,11 +353,27 @@ pub struct PolicyContext {
     pub now: u64,
 }
 
+/// Protected custody accounting, separate from policy-authored mutable Spent data.
+/// Values include the proposed operation once. Missing price facts create explicit liabilities.
+#[contracttype]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AccountingHistory {
+    pub calls: u64,
+    pub spent: i128,
+    pub unpriced: bool,
+    pub day: u64,
+    pub day_spent: i128,
+    pub day_total: i128,
+    pub day_unpriced: bool,
+}
+
 /// Exact proposal copied by custody into every explicitly selected shared-engine check.
 /// This record grants no token authority and contains no caller-controlled accounting override.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EngineRequest {
+    /// Kernel-derived proposed protected history; authored Spent cannot override it.
+    pub history: AccountingHistory,
     /// Custody contract that owns the transfer and named spent data.
     pub wallet: Address,
     /// Configured agent whose request custody authenticated.
@@ -353,6 +398,8 @@ pub struct EngineRequest {
     pub expires_at: u64,
     /// Authenticated ledger close time in Unix seconds.
     pub now: u64,
+    /// Canonical XDR of kernel-checked ExpenseBounds. External facts remain server and selected-vault observations.
+    pub expense: Option<Bytes>,
 }
 
 /// Shared copies supplied to each selected engine check, never mutable references into custody.
@@ -386,204 +433,52 @@ pub enum EngineError {
 
 #[contractclient(name = "EngineClient")]
 pub trait EngineInterface {
-    /// Run the explicitly selected daily_cap shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn daily_cap(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected transaction_cap shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
+    /// Run the selected canonical transaction_cap rule with authenticated request, owner Grant and current Spent.
     fn transaction_cap(
         env: Env,
         request: EngineRequest,
         state: EngineState,
     ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected total_cap shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn total_cap(
+    /// Run the selected canonical spent_cap rule with authenticated request, owner Grant and current Spent.
+    fn spent_cap(
         env: Env,
         request: EngineRequest,
         state: EngineState,
     ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected call_cap shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
+    /// Run the selected canonical day_spent_cap rule with authenticated request, owner Grant and current Spent.
+    fn day_spent_cap(
+        env: Env,
+        request: EngineRequest,
+        state: EngineState,
+    ) -> Result<EngineResult, EngineError>;
+    /// Run the selected canonical day_total_cap rule with authenticated request, owner Grant and current Spent.
+    fn day_total_cap(
+        env: Env,
+        request: EngineRequest,
+        state: EngineState,
+    ) -> Result<EngineResult, EngineError>;
+    /// Run the selected canonical call_cap rule with authenticated request, owner Grant and current Spent.
     fn call_cap(
         env: Env,
         request: EngineRequest,
         state: EngineState,
     ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected recipient shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn recipient(
+    /// Run the selected canonical recipients rule with authenticated request, owner Grant and current Spent.
+    fn recipients(
         env: Env,
         request: EngineRequest,
         state: EngineState,
     ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected expiry shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
+    /// Run the selected canonical expiry rule with authenticated request, owner Grant and current Spent.
     fn expiry(
         env: Env,
         request: EngineRequest,
         state: EngineState,
     ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected token shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn token(
+    /// Run the selected canonical tokens rule with authenticated request, owner Grant and current Spent.
+    fn tokens(
         env: Env,
         request: EngineRequest,
         state: EngineState,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected cap_per_transaction shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    /// - `limit`: Positive cap in native asset base units.
-    /// - `token`: Expected authenticated SAC label.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn cap_per_transaction(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        limit: i128,
-        token: String,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected cap_per_day shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    /// - `limit`: Positive UTC-day cap in native asset base units.
-    /// - `token`: Expected authenticated SAC label.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn cap_per_day(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        limit: i128,
-        token: String,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected recipient_is shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    /// - `expected`: Exact allowed destination address.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn recipient_is(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        expected: Address,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected asset_label shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    /// - `expected`: Exact authenticated SAC label required by this source check.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn asset_label(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        expected: String,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected actions shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    /// - `allowed`: Explicit source-selected action identifiers.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn actions(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        allowed: Vec<String>,
-    ) -> Result<EngineResult, EngineError>;
-    /// Run the explicitly selected amount_at_most shared-engine check.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from native serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Full owner grant and current spent map copied by custody.
-    /// - `limit`: Positive comparison bound in native asset base units.
-    /// - `token`: Expected authenticated SAC label.
-    ///
-    /// # Returns
-    /// Returns a decision and proposed spent map, or an error for invalid parameters or state.
-    fn amount_at_most(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        limit: i128,
-        token: String,
     ) -> Result<EngineResult, EngineError>;
 }

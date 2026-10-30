@@ -28,6 +28,19 @@ fn allow_recipient(f: &Fixture, vault: &Address) {
 }
 fn request(f: &Fixture, vault: &Address, assets: i128, min_shares: i128) -> ExecutionRequest {
     let mut e = f.execution(assets);
+    e.expense = Some(
+        ExpenseBounds {
+            asset: f.asset.clone(),
+            decimals: 7,
+            gas_units: 0,
+            conversion_units: 0,
+            spent_units: 0,
+            max_fee_stroops: 0,
+            observed_ledger: 1,
+            day: f.env.ledger().timestamp() / 86_400,
+        }
+        .to_xdr(&f.env),
+    );
     e.invocation.argument_schema_digest = schema_digest(&f.env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR);
     e.invocation.arguments = Sep56DepositArgs {
         vault: vault.clone(),
@@ -95,8 +108,8 @@ fn deposit_compiled_simple_and_common_wallets_bind_and_retain_actual_effects() {
         assert_eq!(deposited.receiver, f.wallet);
         assert_eq!(f.client().state().nonce, 1);
         if wasm == COMMON {
-            assert_eq!(f.used("total"), 50);
-            assert_eq!(f.used("daily"), 50);
+            assert_eq!(f.used("spent"), 0);
+            assert_eq!(f.used("day_spent"), 0);
             assert_eq!(f.used("calls"), 1);
         }
         assert_eq!(execute(&f, &e), Err(Ok(Error::Replay)));
@@ -232,6 +245,14 @@ fn deposit_vault_upgrade_cannot_hide_inconsistent_effects_and_rolls_back_all_usa
 fn qualified_operation_names_survive_native_context_without_symbol_coercion() {
     let f = Fixture::new(SIMPLE, false);
     let request = EngineRequest {
+        history: allowit_wallet_protocol::AccountingHistory {
+            calls: 1,
+            spent: 5,
+            day_spent: 5,
+            day_total: 43,
+            ..Default::default()
+        },
+        expense: None,
         wallet: f.wallet.clone(),
         agent: f.agent.clone(),
         asset: f.asset.clone(),
@@ -273,7 +294,7 @@ fn ordinary_recipient_allowlist_admits_multiple_vaults_and_denies_other_targets(
     assert_eq!(execute(&f, &e), Err(Ok(Error::PolicyDenied)));
     assert_eq!(f.balance(), 920);
     assert_eq!(f.client().state().nonce, 2);
-    assert_eq!(f.used("total"), 80);
+    assert_eq!(f.used("day_total"), 80);
     assert_eq!(f.client().deposit_receipt(&e.operation_id), None);
 }
 
@@ -289,4 +310,316 @@ fn deposit_untrusted_metadata_getter_cannot_mutate_final_share_or_asset_effects(
         assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
         assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
     }
+}
+
+fn set_cost(f: &Fixture, e: &mut ExecutionRequest, gas: i128, conversion: i128) {
+    let depositing = e.invocation.argument_schema_digest
+        == schema_digest(&f.env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR);
+    let principal = if depositing {
+        conversion
+    } else {
+        Sep41TransferArgs::from_xdr(&f.env, &e.invocation.arguments)
+            .unwrap()
+            .amount
+    };
+    e.expense = Some(
+        ExpenseBounds {
+            asset: f.asset.clone(),
+            decimals: 7,
+            gas_units: gas,
+            conversion_units: conversion,
+            spent_units: principal + gas,
+            max_fee_stroops: u32::try_from(gas).unwrap(),
+            observed_ledger: 100,
+            day: f.env.ledger().timestamp() / 86400,
+        }
+        .to_xdr(&f.env),
+    );
+}
+#[test]
+fn native_xlm_expense_caps_separate_deposit_principal_from_costs_and_daily_total() {
+    let f = Fixture::new_native(COMMON);
+    let v = vault(&f, 11, None);
+    allow_recipient(&f, &v);
+    let mut e = request(&f, &v, 50, 50);
+    set_cost(&f, &mut e, 3, 2);
+    assert!(execute(&f, &e).is_ok());
+    assert_eq!(f.used("spent"), 5);
+    assert_eq!(f.used("day_spent"), 5);
+    assert_eq!(f.used("day_total"), 53);
+    assert_eq!(f.balance(), 950);
+    assert_eq!(
+        f.client().deposit_receipt(&e.operation_id).unwrap().shares,
+        50
+    );
+    // A payment spends principal as well as its attributable gas ceiling.
+    let f = Fixture::new_native(COMMON);
+    let mut e = f.execution(50);
+    set_cost(&f, &mut e, 3, 0);
+    assert!(execute(&f, &e).is_ok());
+    assert_eq!(f.used("spent"), 53);
+    assert_eq!(f.used("day_total"), 53);
+}
+#[test]
+fn expense_and_gross_cap_denials_and_valuation_bound_roll_back_atomic_effects() {
+    for (key, limit) in [
+        ("spent_cap", 4i128),
+        ("day_spent_cap", 4),
+        ("day_total_cap", 52),
+    ] {
+        let f = Fixture::new_native(COMMON);
+        let v = vault(&f, 11, None);
+        allow_recipient(&f, &v);
+        let mut d = f.deployment();
+        d.grant
+            .set(String::from_str(&f.env, key), limit.into_val(&f.env));
+        f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+        f.client().deploy_policy(&d);
+        let mut e = request(&f, &v, 50, 50);
+        set_cost(&f, &mut e, 3, 2);
+        let before = f.client().state();
+        let spent = f.client().policy_spent();
+        assert_eq!(execute(&f, &e), Err(Ok(Error::PolicyDenied)));
+        assert_unchanged(&f, &v, &e.operation_id, &before, &spent);
+    }
+    for (behavior, conversion) in [(11, 1), (12, 0)] {
+        let f = Fixture::new_native(COMMON);
+        let v = vault(&f, behavior, None);
+        allow_recipient(&f, &v);
+        let mut e = request(&f, &v, 50, 50);
+        set_cost(&f, &mut e, 3, conversion);
+        let before = f.client().state();
+        let spent = f.client().policy_spent();
+        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
+        assert_unchanged(&f, &v, &e.operation_id, &before, &spent);
+    }
+}
+#[test]
+fn economic_class_denomination_gas_and_observation_facts_cannot_be_forged() {
+    let f = Fixture::new_native(COMMON);
+    for mutation in 0..7 {
+        let mut e = f.execution(50);
+        set_cost(&f, &mut e, 3, 0);
+        let mut c = ExpenseBounds::from_xdr(&f.env, e.expense.as_ref().unwrap()).unwrap();
+        match mutation {
+            0 => {
+                c.conversion_units = 1;
+                c.spent_units = 4;
+            } // Ordinary payment cannot claim swap classification.
+            1 => c.spent_units = 1,
+            2 => c.gas_units = 2,
+            3 => c.decimals = 6,
+            4 => c.day += 1,
+            5 => c.observed_ledger = 101,
+            _ => c.asset = f.recipient.clone(),
+        }
+        e.expense = Some(c.to_xdr(&f.env));
+        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+        assert_eq!(f.balance(), 1000);
+        assert_eq!(f.client().state().nonce, 0);
+    }
+    let f = Fixture::new(COMMON, false);
+    let mut e = f.execution(50);
+    set_cost(&f, &mut e, 3, 0);
+    assert_eq!(execute(&f, &e), Err(Ok(Error::UnsupportedAsset))); // No implicit USDC/XLM gas conversion.
+}
+#[test]
+fn expense_bytes_require_exact_canonical_known_fields_and_bounded_length() {
+    use soroban_sdk::xdr::{Limits, ReadXdr, ScMap, ScVal, WriteXdr};
+    let f = Fixture::new_native(COMMON);
+    let mut e = f.execution(50);
+    set_cost(&f, &mut e, 3, 0);
+    let original = e.expense.clone().unwrap();
+    let mut bytes = [0u8; 1024];
+    let n = original.len() as usize;
+    original.copy_into_slice(&mut bytes[..n]);
+    let ScVal::Map(Some(map)) = <ScVal as ReadXdr>::from_xdr(&bytes[..n], Limits::none()).unwrap()
+    else {
+        panic!("Expected expense map")
+    };
+    for mutation in 0..5 {
+        let mut fields = map.0.to_vec();
+        match mutation {
+            0 => fields.swap(0, 1),
+            1 => fields.insert(1, fields[0].clone()),
+            2 => {
+                let mut extra = fields.last().unwrap().clone();
+                extra.key = ScVal::Symbol(soroban_sdk::xdr::ScSymbol(
+                    b"unknown".to_vec().try_into().unwrap(),
+                ));
+                fields.push(extra);
+            }
+            3 => fields[0].val = ScVal::U64(1),
+            _ => {}
+        }
+        let mut encoded = WriteXdr::to_xdr(
+            &ScVal::Map(Some(ScMap(fields.try_into().unwrap()))),
+            Limits::none(),
+        )
+        .unwrap();
+        if mutation == 4 {
+            encoded.extend_from_slice(&[0; 4]);
+        }
+        e.expense = Some(Bytes::from_slice(&f.env, &encoded));
+        assert!(execute(&f, &e).is_err());
+        assert_eq!(f.balance(), 1000);
+        assert_eq!(f.client().state().nonce, 0);
+    }
+    e.expense = Some(Bytes::from_slice(&f.env, &[0u8; 1025]));
+    assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidInvocation)));
+    e.expense = Some(original);
+    assert!(execute(&f, &e).is_ok());
+}
+
+#[test]
+fn standard_prefix_digest_matches_independent_xdr_vector_and_binds_context() {
+    let env = Env::default();
+    let kind = Symbol::new(&env, "common_policy_engine");
+    let module = BytesN::from_array(&env, &[1; 32]);
+    let asset = Address::from_str(
+        &env,
+        "CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ",
+    );
+    let rules = vec![
+        &env,
+        Symbol::new(&env, "spent_cap"),
+        Symbol::new(&env, "recipients"),
+    ];
+    let expected = BytesN::from_array(
+        &env,
+        &[
+            152, 233, 25, 0, 157, 157, 73, 184, 118, 168, 228, 141, 147, 251, 67, 32, 58, 162, 116,
+            189, 17, 83, 162, 152, 5, 132, 219, 76, 55, 163, 51, 159,
+        ],
+    );
+    assert_eq!(
+        standard_prefix_digest(&env, &kind, &module, &asset, &rules),
+        expected
+    );
+    let reversed = vec![
+        &env,
+        Symbol::new(&env, "recipients"),
+        Symbol::new(&env, "spent_cap"),
+    ];
+    assert_ne!(
+        standard_prefix_digest(&env, &kind, &module, &asset, &reversed),
+        expected
+    );
+    assert_ne!(
+        standard_prefix_digest(
+            &env,
+            &kind,
+            &BytesN::from_array(&env, &[3; 32]),
+            &asset,
+            &rules
+        ),
+        expected
+    );
+    assert_ne!(
+        standard_prefix_digest(&env, &kind, &module, &Address::generate(&env), &rules),
+        expected
+    );
+}
+#[test]
+fn owner_grant_update_preserves_prefix_code_usage_and_revokes_old_revision() {
+    let f = Fixture::new(COMMON, false);
+    f.transfer(50);
+    let original = f.client().state();
+    let code = f.wallet.executable();
+    let inflight = f.execution(1);
+    let mut d = f.deployment();
+    d.grant
+        .set(String::from_str(&f.env, "spent_cap"), Val::VOID.into());
+    d.grant.remove(String::from_str(&f.env, "day_spent_cap"));
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+    assert_eq!(f.wallet.executable(), code);
+    assert_eq!(f.client().state().source_digest, original.source_digest);
+    assert_eq!(f.client().state().nonce, original.nonce);
+    assert_eq!(execute(&f, &inflight), Err(Ok(Error::StaleRequest)));
+    f.transfer(20);
+    assert_eq!(f.used("spent"), 50);
+    assert_eq!(f.used("day_spent"), 50);
+    assert_eq!(f.used("day_total"), 70);
+    assert_eq!(f.client().state().history.spent, 70);
+    assert_eq!(f.client().state().history.calls, 2);
+    let mut d = f.deployment();
+    d.grant.set(
+        String::from_str(&f.env, "spent_cap"),
+        75i128.into_val(&f.env),
+    );
+    d.grant.set(
+        String::from_str(&f.env, "day_spent_cap"),
+        75i128.into_val(&f.env),
+    );
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+    let next = f.execution(6);
+    assert_eq!(execute(&f, &next), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(f.balance(), 930);
+    assert_eq!(f.used("spent"), 50);
+    assert_eq!(f.client().state().nonce, 2);
+    assert_eq!(f.client().state().source_digest, original.source_digest);
+}
+
+#[test]
+fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollover() {
+    use soroban_sdk::testutils::Ledger;
+    let f = Fixture::new(COMMON, false);
+    let mut d = f.deployment();
+    for name in ["spent_cap", "day_spent_cap", "day_total_cap", "call_cap"] {
+        d.grant.remove(String::from_str(&f.env, name));
+    }
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+    let mut e = f.execution(20);
+    e.expense = None;
+    execute(&f, &e).unwrap();
+    let history = f.client().state().history;
+    assert_eq!(history.calls, 1);
+    assert_eq!(history.day_total, 20);
+    assert_eq!(history.spent, 0); // Unpriced is an explicit liability, never a zero-cost assertion.
+    assert!(history.unpriced && history.day_unpriced);
+    let mut d = f.deployment();
+    d.grant.set(
+        String::from_str(&f.env, "spent_cap"),
+        1000i128.into_val(&f.env),
+    );
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+    assert_eq!(execute(&f, &f.execution(1)), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(f.client().state().history, history);
+    let mut d = f.deployment();
+    d.grant.remove(String::from_str(&f.env, "spent_cap"));
+    for name in ["day_spent_cap", "day_total_cap"] {
+        d.grant
+            .set(String::from_str(&f.env, name), 1000i128.into_val(&f.env));
+    }
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+    assert_eq!(execute(&f, &f.execution(1)), Err(Ok(Error::PolicyDenied)));
+    f.env.ledger().with_mut(|l| l.timestamp += 86_400);
+    execute(&f, &f.execution(1)).unwrap();
+    let history = f.client().state().history;
+    assert_eq!(history.calls, 2);
+    assert_eq!(history.day_total, 1);
+    assert_eq!(history.day_spent, 1);
+    assert!(!history.day_unpriced && history.unpriced);
+}
+#[test]
+fn reenabled_call_cap_counts_operations_while_disabled() {
+    let f = Fixture::new(COMMON, false);
+    let mut d = f.deployment();
+    d.grant.remove(String::from_str(&f.env, "call_cap"));
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+    f.transfer(1);
+    f.transfer(1);
+    let mut d = f.deployment();
+    d.grant
+        .set(String::from_str(&f.env, "call_cap"), 2u64.into_val(&f.env));
+    f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&d);
+    assert_eq!(execute(&f, &f.execution(1)), Err(Ok(Error::PolicyDenied)));
+    assert_eq!(f.client().state().history.calls, 2);
 }

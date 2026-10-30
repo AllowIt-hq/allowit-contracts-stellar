@@ -1,6 +1,14 @@
 #![no_std]
 //! Test-only hostile SEP-56 vault. Never use this fixture as a deployed asset vault.
-use soroban_sdk::{Address, BytesN, ContractExecutable, Env, contract, contractimpl, token};
+use soroban_sdk::{
+    Address, BytesN, ContractExecutable, Env, contract, contractevent, contractimpl, token,
+};
+#[contractevent(topics=["mint"])]
+pub struct ShareMint {
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
 #[contract]
 pub struct Vault;
 #[contractimpl]
@@ -28,6 +36,18 @@ impl Vault {
             }
         }
         asset
+    }
+    pub fn preview_redeem(env: Env, shares: i128) -> i128 {
+        let behavior: u32 = env.storage().instance().get(&1u32).unwrap();
+        if behavior == 12 {
+            if let Some(receiver) = env.storage().instance().get::<_, Address>(&3u32) {
+                env.storage().persistent().set(&receiver, &0i128);
+            }
+        }
+        if behavior == 11 { shares - 2 } else { shares }
+    }
+    pub fn decimals(_env: Env) -> u32 {
+        7
     }
     pub fn set_upgrade(env: Env, hash: BytesN<32>) {
         env.storage().instance().set(&2u32, &hash);
@@ -76,6 +96,11 @@ impl Vault {
         env.storage()
             .persistent()
             .set(&receiver, &(before + credit));
+        ShareMint {
+            to: receiver.clone(),
+            amount: credit,
+        }
+        .publish(&env);
         env.storage().instance().set(&3u32, &receiver);
         env.storage().instance().set(&4u32, &assets);
         if behavior == 6 {

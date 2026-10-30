@@ -1,242 +1,241 @@
 use super::*;
+use allowit_wallet_protocol::{ExpenseBounds, Grant, Spent};
 use soroban_sdk::{Bytes, testutils::Address as _, vec};
 fn fixture(env: &Env) -> (EngineRequest, EngineState) {
-    let mut grant = allowit_wallet_protocol::Grant::new(env);
+    let asset = Address::generate(env);
+    let recipient = Address::generate(env);
+    let mut grant = Grant::new(env);
     for (name, value) in [
-        ("daily_limit", 100u64),
-        ("total_limit", 150),
-        ("per_transfer", 100),
-        ("max_calls", 3),
-        ("expires_at", 999999),
+        ("spent_cap", 1000i128),
+        ("day_spent_cap", 1000),
+        ("day_total_cap", 1000),
+        ("transaction_cap", 100),
     ] {
         grant.set(key(env, name), value.into_val(env));
     }
-    grant.set(
-        key(env, "token"),
-        String::from_str(env, "USDC").into_val(env),
-    );
-    let recipient = Address::generate(env);
+    grant.set(key(env, "call_cap"), 3u64.into_val(env));
+    grant.set(key(env, "expiry"), 999999u64.into_val(env));
+    grant.set(key(env, "tokens"), vec![env, asset.clone()].into_val(env));
     grant.set(
         key(env, "recipients"),
         vec![env, recipient.clone()].into_val(env),
     );
-    let mut spent = allowit_wallet_protocol::Spent::new(env);
+    let e = ExpenseBounds {
+        asset: asset.clone(),
+        decimals: 7,
+        gas_units: 3,
+        conversion_units: 2,
+        spent_units: 5,
+        max_fee_stroops: 3,
+        observed_ledger: 1,
+        day: 0,
+    };
+    let request = EngineRequest {
+        history: allowit_wallet_protocol::AccountingHistory {
+            calls: 1,
+            spent: 5,
+            day_spent: 5,
+            day_total: 43,
+            ..Default::default()
+        },
+        expense: Some(e.to_xdr(env)),
+        wallet: Address::generate(env),
+        agent: Address::generate(env),
+        asset,
+        token: String::from_str(env, "USDC"),
+        decimals: 7,
+        recipient,
+        amount: 40,
+        operation_id: BytesN::from_array(env, &[1; 32]),
+        nonce: 0,
+        deployment_version: 0,
+        expires_at: 500,
+        now: 100,
+    };
+    let mut spent = Spent::new(env);
     spent.set(
         key(env, "custom_bytes"),
         Bytes::from_slice(env, &[4, 5]).into_val(env),
     );
-    (
-        EngineRequest {
-            wallet: Address::generate(env),
-            agent: Address::generate(env),
-            asset: Address::generate(env),
-            token: String::from_str(env, "USDC"),
-            decimals: 7,
-            recipient,
-            amount: 40,
-            operation_id: BytesN::from_array(env, &[1; 32]),
-            nonce: 0,
-            deployment_version: 0,
-            expires_at: 500,
-            now: 100,
-        },
-        EngineState { grant, spent },
-    )
+    (request, EngineState { grant, spent })
 }
-fn amount(env: &Env, result: &EngineResult, name: &str) -> i128 {
-    integer(env, &result.spent.get(key(env, name)).unwrap()).unwrap()
+fn cost(env: &Env, r: &EngineRequest) -> ExpenseBounds {
+    ExpenseBounds::from_xdr(env, r.expense.as_ref().unwrap()).unwrap()
+}
+fn amount(env: &Env, s: &Spent, k: &str) -> i128 {
+    integer(env, &s.get(key(env, k)).unwrap()).unwrap()
 }
 #[test]
-fn daily_aliases_charge_once_and_recheck_stricter_bounds() {
+fn split_caps_chain_and_repeat_without_suppressing_other_counters() {
     let env = Env::default();
-    let (request, mut state) = fixture(&env);
-    let first = daily_cap(env.clone(), request.clone(), state.clone()).unwrap();
-    assert!(first.approval);
-    assert_eq!(amount(&env, &first, "daily"), 40);
-    state.spent = first.spent;
-    let again = cap_per_day(
-        env.clone(),
-        request.clone(),
-        state.clone(),
-        40,
-        String::from_str(&env, "USDC"),
-    )
-    .unwrap();
-    assert!(again.approval);
-    assert_eq!(again.spent, state.spent);
-    let denied = cap_per_day(
-        env.clone(),
-        request.clone(),
-        state.clone(),
-        39,
-        String::from_str(&env, "USDC"),
-    )
-    .unwrap();
-    assert!(!denied.approval);
-    assert_eq!(denied.spent, state.spent);
-    let mut next = request;
-    next.operation_id = BytesN::from_array(&env, &[2; 32]);
-    next.amount = 60;
-    let full = daily_cap(env.clone(), next.clone(), state.clone()).unwrap();
-    assert!(full.approval);
-    assert_eq!(amount(&env, &full, "daily"), 100);
-    state.spent = full.spent;
-    next.operation_id = BytesN::from_array(&env, &[3; 32]);
-    next.amount = 1;
-    let denied = daily_cap(env.clone(), next, state.clone()).unwrap();
-    assert!(!denied.approval);
-    assert_eq!(denied.spent, state.spent);
-}
-#[test]
-fn selected_checks_update_distinct_fields_and_preserve_unknown_values() {
-    let env = Env::default();
-    let (request, mut state) = fixture(&env);
-    let total = total_cap(env.clone(), request.clone(), state.clone()).unwrap();
-    assert_eq!(amount(&env, &total, "total"), 40);
-    state.spent = total.spent;
-    let calls = call_cap(env.clone(), request.clone(), state.clone()).unwrap();
-    state.spent = calls.spent;
-    let calls = call_cap(env.clone(), request.clone(), state.clone()).unwrap();
-    assert_eq!(calls.spent, state.spent);
+    let (r, mut s) = fixture(&env);
+    for f in [spent_cap, day_spent_cap, day_total_cap] {
+        let x = f(env.clone(), r.clone(), s.clone()).unwrap();
+        assert!(x.approval);
+        s.spent = x.spent;
+    }
+    assert_eq!(amount(&env, &s.spent, "spent"), 5);
+    assert_eq!(amount(&env, &s.spent, "day_spent"), 5);
+    assert_eq!(amount(&env, &s.spent, "day_total"), 43);
+    for f in [spent_cap, day_spent_cap, day_total_cap] {
+        let x = f(env.clone(), r.clone(), s.clone()).unwrap();
+        assert!(x.approval);
+        assert_eq!(x.spent, s.spent);
+    }
     assert_eq!(
-        u64::try_from_val(&env, &calls.spent.get(key(&env, "calls")).unwrap()).unwrap(),
-        1
-    );
-    assert_eq!(
-        Bytes::try_from_val(&env, &calls.spent.get(key(&env, "custom_bytes")).unwrap()).unwrap(),
+        Bytes::try_from_val(&env, &s.spent.get(key(&env, "custom_bytes")).unwrap()).unwrap(),
         Bytes::from_slice(&env, &[4, 5])
     );
-    assert!(
-        recipient(env.clone(), request.clone(), state.clone())
-            .unwrap()
-            .approval
-    );
-    assert!(
-        token(env.clone(), request.clone(), state.clone())
-            .unwrap()
-            .approval
-    );
-    let mut expired = request.clone();
-    expired.expires_at = expired.now;
-    assert!(
-        !expiry(env.clone(), expired, state.clone())
-            .unwrap()
-            .approval
-    );
-    assert!(expiry(env.clone(), request, state).unwrap().approval);
 }
 #[test]
-fn daily_rollover_is_explicit_and_regression_denies() {
+fn repeated_operation_cannot_rewrite_expense_or_gross_facts() {
     let env = Env::default();
-    let (mut request, mut state) = fixture(&env);
-    state.spent = daily_cap(env.clone(), request.clone(), state.clone())
-        .unwrap()
-        .spent;
-    request.now = DAY;
-    request.expires_at = DAY + 1;
-    request.operation_id = BytesN::from_array(&env, &[2; 32]);
-    request.amount = 5;
-    let next = daily_cap(env.clone(), request.clone(), state.clone()).unwrap();
-    assert_eq!(amount(&env, &next, "daily"), 5);
-    state.spent = next.spent;
-    request.now = 0;
-    assert_eq!(daily_cap(env, request, state), Err(Error::InvalidState));
+    let (mut r, mut s) = fixture(&env);
+    for f in [spent_cap, day_spent_cap, day_total_cap] {
+        s.spent = f(env.clone(), r.clone(), s.clone()).unwrap().spent;
+    }
+    let mut e = cost(&env, &r);
+    e.gas_units = 4;
+    e.max_fee_stroops = 4;
+    e.spent_units = 6;
+    r.expense = Some(e.to_xdr(&env));
+    for f in [spent_cap, day_spent_cap, day_total_cap] {
+        assert_eq!(
+            f(env.clone(), r.clone(), s.clone()),
+            Err(Error::InvalidState)
+        );
+    }
 }
 #[test]
-fn optional_keys_do_not_activate_and_invalid_selected_values_fail() {
+fn daily_rollover_preserves_lifetime_expenses_and_rejects_clock_regression() {
     let env = Env::default();
-    let (request, mut state) = fixture(&env);
-    state.grant.remove(key(&env, "daily_limit"));
+    let (mut r, mut s) = fixture(&env);
+    for f in [spent_cap, day_spent_cap, day_total_cap] {
+        s.spent = f(env.clone(), r.clone(), s.clone()).unwrap().spent;
+    }
+    r.now += DAY;
+    r.history.day += 1;
+    r.history.spent += 5;
+    r.operation_id = BytesN::from_array(&env, &[2; 32]);
+    let mut e = cost(&env, &r);
+    e.day = r.now / DAY;
+    r.expense = Some(e.to_xdr(&env));
+    for f in [spent_cap, day_spent_cap, day_total_cap] {
+        s.spent = f(env.clone(), r.clone(), s.clone()).unwrap().spent;
+    }
+    assert_eq!(amount(&env, &s.spent, "spent"), 10);
+    assert_eq!(amount(&env, &s.spent, "day_spent"), 5);
+    assert_eq!(amount(&env, &s.spent, "day_total"), 43);
+    r.now -= DAY;
+    let mut e = cost(&env, &r);
+    e.day = r.now / DAY;
+    r.expense = Some(e.to_xdr(&env));
+    assert_eq!(day_spent_cap(env.clone(), r, s), Err(Error::InvalidState));
+}
+#[test]
+fn zero_cost_cap_and_missing_or_invalid_facts_fail_closed() {
+    let env = Env::default();
+    let (mut r, mut s) = fixture(&env);
+    r.expense = None;
+    for f in [spent_cap, day_spent_cap, day_total_cap] {
+        assert_eq!(
+            f(env.clone(), r.clone(), s.clone()),
+            Err(Error::InvalidParameter)
+        );
+    }
+    let (mut r, _) = fixture(&env);
+    let mut e = cost(&env, &r);
+    e.gas_units = 0;
+    e.max_fee_stroops = 0;
+    e.conversion_units = 0;
+    e.spent_units = 0;
+    r.expense = Some(e.to_xdr(&env));
+    r.history.spent = 0;
+    s.grant.set(key(&env, "spent_cap"), 0i128.into_val(&env));
     assert!(
-        transaction_cap(env.clone(), request.clone(), state.clone())
+        spent_cap(env.clone(), r.clone(), s.clone())
             .unwrap()
             .approval
     );
-    assert_eq!(
-        daily_cap(env.clone(), request.clone(), state.clone()),
-        Err(Error::InvalidParameter)
-    );
-    state
-        .grant
-        .set(key(&env, "daily_limit"), true.into_val(&env));
-    assert_eq!(
-        daily_cap(env.clone(), request.clone(), state.clone()),
-        Err(Error::InvalidParameter)
-    );
-    state
-        .grant
-        .set(key(&env, "daily_limit"), 100u64.into_val(&env));
-    state.spent.set(key(&env, "daily"), (-1i128).into_val(&env));
-    assert_eq!(
-        daily_cap(env.clone(), request.clone(), state.clone()),
-        Err(Error::InvalidState)
-    );
-    state
-        .spent
-        .set(key(&env, "daily"), i128::MAX.into_val(&env));
-    assert_eq!(daily_cap(env, request, state), Err(Error::Overflow));
+    let mut e = cost(&env, &r);
+    e.spent_units = 1;
+    r.history.spent = 1;
+    r.expense = Some(e.to_xdr(&env));
+    assert!(!spent_cap(env.clone(), r, s).unwrap().approval);
 }
 #[test]
-fn predicates_keep_false_distinct_from_error_and_dispatch_is_exact() {
+fn canonical_allowlists_use_exact_addresses_and_never_coerce_labels() {
     let env = Env::default();
-    let (request, state) = fixture(&env);
-    let denied = amount_at_most(
-        env.clone(),
-        request.clone(),
-        state.clone(),
-        39,
-        String::from_str(&env, "USDC"),
-    )
-    .unwrap();
+    let (mut r, mut s) = fixture(&env);
+    assert!(tokens(env.clone(), r.clone(), s.clone()).unwrap().approval);
+    assert!(
+        recipients(env.clone(), r.clone(), s.clone())
+            .unwrap()
+            .approval
+    );
+    r.asset = Address::generate(&env);
+    assert!(!tokens(env.clone(), r.clone(), s.clone()).unwrap().approval);
+    s.grant.set(
+        key(&env, "tokens"),
+        vec![&env, String::from_str(&env, "USDC")].into_val(&env),
+    );
+    assert_eq!(tokens(env.clone(), r, s), Err(Error::InvalidParameter));
+}
+#[test]
+fn aliases_and_unselected_keys_create_no_hidden_rule() {
+    let env = Env::default();
+    let (r, s) = fixture(&env);
+    for name in [
+        "daily_cap",
+        "total_cap",
+        "recipient",
+        "token",
+        "cap_per_transaction",
+        "cap_per_day",
+        "recipient_is",
+        "asset_label",
+        "actions",
+        "amount_at_most",
+    ] {
+        assert!(validate_rule(&env, &soroban_sdk::Symbol::new(&env, name), &s.grant).is_err());
+        assert_eq!(
+            check(&env, r.clone(), s.clone(), name, Vec::new(&env)),
+            Err(Error::InvalidParameter)
+        );
+    }
+    assert!(
+        transaction_cap(env.clone(), r.clone(), s.clone())
+            .unwrap()
+            .approval
+    );
+    let mut bad = s.clone();
+    bad.grant.set(key(&env, "spent_cap"), true.into_val(&env));
+    assert!(
+        transaction_cap(env.clone(), r.clone(), bad.clone())
+            .unwrap()
+            .approval
+    );
+    assert_eq!(spent_cap(env.clone(), r, bad), Err(Error::InvalidParameter));
+}
+#[test]
+fn selected_cap_boundaries_and_authored_map_cannot_rewrite_protected_history() {
+    let env = Env::default();
+    let (r, mut s) = fixture(&env);
+    s.grant.set(key(&env, "spent_cap"), 5i128.into_val(&env));
+    let a = spent_cap(env.clone(), r.clone(), s.clone()).unwrap();
+    assert!(a.approval);
+    s.spent = a.spent;
+    s.grant.set(key(&env, "spent_cap"), 4i128.into_val(&env));
+    let denied = spent_cap(env.clone(), r.clone(), s.clone()).unwrap();
     assert!(!denied.approval);
-    assert_eq!(denied.spent, state.spent);
-    assert!(
-        !amount_at_most(
-            env.clone(),
-            request.clone(),
-            state.clone(),
-            0,
-            String::from_str(&env, "USDC")
-        )
-        .unwrap()
-        .approval
-    );
-    assert_eq!(
-        amount_at_most(
-            env.clone(),
-            request.clone(),
-            state.clone(),
-            39,
-            String::from_str(&env, "XLM")
-        ),
-        Err(Error::InvalidParameter)
-    );
-    assert_eq!(
-        check(&env, request.clone(), state.clone(), "unknown", vec![&env]),
-        Err(Error::InvalidParameter)
-    );
-    assert_eq!(
-        check(
-            &env,
-            request.clone(),
-            state.clone(),
-            "daily_cap",
-            vec![&env, true.into_val(&env)]
-        ),
-        Err(Error::InvalidParameter)
-    );
-    assert_eq!(
-        check(
-            &env,
-            request,
-            state,
-            "cap_per_day",
-            vec![
-                &env,
-                true.into_val(&env),
-                String::from_str(&env, "USDC").into_val(&env)
-            ]
-        ),
-        Err(Error::InvalidParameter)
-    );
+    assert_eq!(denied.spent, s.spent);
+    s.grant
+        .set(key(&env, "spent_cap"), i128::MAX.into_val(&env));
+    s.spent.set(key(&env, "spent"), i128::MAX.into_val(&env));
+    let mut next = r;
+    next.operation_id = BytesN::from_array(&env, &[9; 32]);
+    // A forged business counter does not become the protected custody history.
+    let checked = spent_cap(env.clone(), next, s).unwrap();
+    assert!(checked.approval);
+    assert_eq!(amount(&env, &checked.spent, "spent"), 5);
 }

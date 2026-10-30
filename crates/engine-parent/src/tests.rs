@@ -55,9 +55,20 @@ impl Fixture {
 }
 fn context(env: &Env) -> (EngineRequest, EngineState) {
     let mut grant = Grant::new(env);
-    grant.set(String::from_str(env, "daily_limit"), 10u64.into_val(env));
+    grant.set(
+        String::from_str(env, "transaction_cap"),
+        10u64.into_val(env),
+    );
     (
         EngineRequest {
+            history: allowit_wallet_protocol::AccountingHistory {
+                calls: 1,
+                spent: 5,
+                day_spent: 5,
+                day_total: 43,
+                ..Default::default()
+            },
+            expense: None,
             wallet: Address::generate(env),
             agent: Address::generate(env),
             asset: Address::generate(env),
@@ -80,7 +91,7 @@ fn context(env: &Env) -> (EngineRequest, EngineState) {
 fn approved(env: &Env, engine: &Address) -> bool {
     let (request, state) = context(env);
     EngineClient::new(env, engine)
-        .daily_cap(&request, &state)
+        .transaction_cap(&request, &state)
         .approval
 }
 
@@ -211,7 +222,7 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     let context = context(&f.env);
     assert!(
         EngineClient::new(&f.env, &engine)
-            .daily_cap(&context.0, &context.1)
+            .transaction_cap(&context.0, &context.1)
             .approval
     );
     let deny = f
@@ -228,7 +239,7 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     assert_eq!(f.client().engine(), engine);
     assert!(
         !EngineClient::new(&f.env, &engine)
-            .daily_cap(&context.0, &context.1)
+            .transaction_cap(&context.0, &context.1)
             .approval
     );
     assert_eq!(f.client().state().version, 1);
@@ -241,7 +252,7 @@ fn compiled_engine_reference_upgrade_changes_veto_without_changing_address() {
     f.client().upgrade_engine(&f.engine_hash, &1);
     assert!(
         EngineClient::new(&f.env, &engine)
-            .daily_cap(&context.0, &context.1)
+            .transaction_cap(&context.0, &context.1)
             .approval
     );
     assert_eq!(f.client().state().version, 2);
