@@ -486,7 +486,7 @@ class ContractAdmin(unittest.TestCase):
                 ca.policy_rules(packet, "common", None)
             # The admin packet path applies the same binding.
             deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
-                          "rules": ["expiry"], "grant": {}, "x402_enabled": False, "wasm_hash": None}
+                          "rules": ["expiry"], "grant": {"recipients": [KEYS[3]], "expiry": 2000000000}, "x402_enabled": False, "wasm_hash": None}
             args = SimpleNamespace(action="admin", network="testnet", allow_mainnet=False, source=KEYS[0], family="wallet",
                                    contract=StrKey.encode_contract(bytes([2]) * 32), method="deploy_policy", tier="common",
                                    policy_source=str(policy), arguments=json.dumps({"deployment": deployment}))
@@ -579,6 +579,35 @@ class ContractAdmin(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / "scripts/check-policy-bindings.py")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_prefix_rules_require_their_grant_fields(self):
+        deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
+                      "rules": ["recipients", "expiry"], "grant": {"recipients": [KEYS[3]], "expiry": 2000000000},
+                      "x402_enabled": False, "wasm_hash": None}
+        self.assertEqual(ca.deployment(deployment), deployment)
+        # An unset field would skip onchain while the full policy denies it with MissingGrant.
+        for grant in ({"recipients": [KEYS[3]]}, {"recipients": [KEYS[3]], "expiry": None}, {}):
+            with self.subTest(grant=grant), self.assertRaisesRegex(ValueError, "Grant field set: "):
+                ca.deployment(dict(deployment, grant=grant))
+        # An empty allowlist is a set field; it denies onchain and offchain alike.
+        self.assertEqual(ca.deployment(dict(deployment, grant={"recipients": [], "expiry": 0})), dict(deployment, grant={"recipients": [], "expiry": 0}))
+        # Fields outside the prefix may stay unset; the full policy decides them.
+        self.assertEqual(ca.deployment(dict(deployment, rules=[], grant={}))["rules"], [])
+        # The wallet deployment path applies the same check.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallet.wasm"
+            path.write_bytes(b"reviewed-artifact")
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(source("    allowit::expiry(ctx, &ctx.grant.expiry)?;\n"))
+            config = {"owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "asset": StrKey.encode_contract(bytes([2]) * 32),
+                      "source_digest": "22" * 32, "rules": ["expiry"], "grant": {}, "x402_enabled": False, "policy_instance": "11" * 32}
+            args = SimpleNamespace(action="deploy-wallet", network="testnet", allow_mainnet=False, tier="common", policy_source=str(policy),
+                                   source=KEYS[0], config=json.dumps(config), wasm=str(path), wasm_hash=hashlib.sha256(path.read_bytes()).hexdigest())
+            with self.assertRaisesRegex(ValueError, "Grant field set: expiry"):
+                ca.command(args)
+            config["grant"] = {"expiry": 2000000000}
+            args.config = json.dumps(config)
+            self.assertIn("deploy", ca.command(args))
+
     def test_wallet_code_changes_require_custody_layout_2(self):
         self.assertEqual(ca.custody_layout(meta_wasm((b"rsver", b"1.98.0"), (ca.CUSTODY_LAYOUT_KEY, b"2"))), 2)
         # The version 1 release declares only SDK metadata.
@@ -593,7 +622,7 @@ class ContractAdmin(unittest.TestCase):
             policy = Path(directory) / "policy.rs"
             policy.write_text(source("    allowit::expiry(ctx, &ctx.grant.expiry)?;\n"))
             deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
-                          "rules": ["expiry"], "grant": {}, "x402_enabled": False, "wasm_hash": None}
+                          "rules": ["expiry"], "grant": {"expiry": 2000000000}, "x402_enabled": False, "wasm_hash": None}
             args = SimpleNamespace(action="admin", network="testnet", allow_mainnet=False, source=KEYS[0], family="wallet",
                                    contract=StrKey.encode_contract(bytes([2]) * 32), method="deploy_policy", tier="common",
                                    policy_source=str(policy), wasm=None)

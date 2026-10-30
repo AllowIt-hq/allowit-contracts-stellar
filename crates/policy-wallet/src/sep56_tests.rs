@@ -553,8 +553,8 @@ fn owner_grant_update_preserves_prefix_code_usage_and_revokes_old_revision() {
     let code = f.wallet.executable();
     let inflight = f.execution(1);
     let mut d = f.deployment();
-    d.grant.spent_cap = None;
-    d.grant.day_spent_cap = None;
+    d.grant.spent_cap = Some(1000);
+    d.grant.day_spent_cap = Some(1000);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
     assert_eq!(f.wallet.executable(), code);
@@ -565,7 +565,7 @@ fn owner_grant_update_preserves_prefix_code_usage_and_revokes_old_revision() {
         Err(Ok(AllowitWalletError::StaleRequest))
     );
     f.transfer(20);
-    // Protected history counts every success, including those while a cap was unset.
+    // Protected history counts every success across Grant updates.
     assert_eq!(f.history().spent, 70);
     assert_eq!(f.history().day_spent, 70);
     assert_eq!(f.history().day_total, 70);
@@ -595,6 +595,7 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
     d.grant.day_spent_cap = None;
     d.grant.day_total_cap = None;
     d.grant.call_cap = None;
+    f.set_rules_only(&mut d);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
     let mut e = f.execution(20);
@@ -607,6 +608,7 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
     assert!(history.unpriced && history.day_unpriced);
     let mut d = f.deployment();
     d.grant.spent_cap = Some(1000);
+    f.set_rules_only(&mut d);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
     assert_eq!(
@@ -618,6 +620,7 @@ fn disabled_caps_keep_unpriced_history_and_daily_unknown_expires_only_at_rollove
     d.grant.spent_cap = None;
     d.grant.day_spent_cap = Some(1000);
     d.grant.day_total_cap = Some(1000);
+    f.set_rules_only(&mut d);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
     assert_eq!(
@@ -637,12 +640,14 @@ fn reenabled_call_cap_counts_operations_while_disabled() {
     let f = Fixture::new(COMMON, false);
     let mut d = f.deployment();
     d.grant.call_cap = None;
+    f.set_rules_only(&mut d);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
     f.transfer(1);
     f.transfer(1);
     let mut d = f.deployment();
     d.grant.call_cap = Some(2);
+    f.set_rules_only(&mut d);
     f.auth(&[&f.owner], "deploy_policy", (d.clone(),).into_val(&f.env));
     f.client().deploy_policy(&d);
     assert_eq!(

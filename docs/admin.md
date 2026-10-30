@@ -75,7 +75,9 @@ rebinding of `allowit` reject ([details](architecture.md#one-portable-policy-sou
 Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`
 (unsigned 64-bit integers), `recipients` and `tokens` (address lists). A missing field or null is
-unset. The standard preflight skips an unset selected rule; full policy code denies it.
+unset. Every rule in `rules` needs its Grant field set: the tool and the contract reject an unset
+prefix field, which full policy code denies with `MissingGrant`. Fields outside the prefix may stay
+unset; the full policy decides them.
 Legacy names such as `per_transfer`, `daily_limit` or `max_calls` reject. Negative caps reject at
 configuration. Code changes defer the new tier validation to delegated admission.
 Duplicate JSON keys reject. Fund the wallet only with its

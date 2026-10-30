@@ -13,7 +13,8 @@
 //!
 //! Rules are pure checks. Each returns its passing constraint or an `AllowitError`. An unset AllowitGrant field
 //! is `MissingGrant`. The standard contract runs only the leading canonical calls, supplied by the
-//! owner as `rules`, through `preflight`, which skips unset fields. `scripts/contract_admin.py`
+//! owner as `rules`, through `preflight`, which makes the same unguarded calls. Owner
+//! configuration rejects a prefix rule whose Grant field is unset. `scripts/contract_admin.py`
 //! derives `rules` from the source.
 //!
 //! Portable authored code uses rule calls, typed scalar fields and enum comparisons such as

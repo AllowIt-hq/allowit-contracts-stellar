@@ -19,6 +19,18 @@ pub(super) const COMMON: &[u8] =
 pub(super) const CUSTOM: &[u8] =
     include_bytes!("../../../target/wasm32v1-none/release/allowit_custom_policy.wasm");
 
+/// Common fixture prefix order.
+const COMMON_RULES: [AllowitRule; 8] = [
+    AllowitRule::recipients,
+    AllowitRule::tokens,
+    AllowitRule::transaction_cap,
+    AllowitRule::day_spent_cap,
+    AllowitRule::day_total_cap,
+    AllowitRule::spent_cap,
+    AllowitRule::call_cap,
+    AllowitRule::expiry,
+];
+
 pub(super) struct Fixture {
     pub(super) env: Env,
     pub(super) wallet: Address,
@@ -91,16 +103,7 @@ impl Fixture {
         };
         let mut rules = Vec::new(&env);
         if wasm == COMMON {
-            for rule in [
-                AllowitRule::recipients,
-                AllowitRule::tokens,
-                AllowitRule::transaction_cap,
-                AllowitRule::day_spent_cap,
-                AllowitRule::day_total_cap,
-                AllowitRule::spent_cap,
-                AllowitRule::call_cap,
-                AllowitRule::expiry,
-            ] {
+            for rule in COMMON_RULES {
                 rules.push_back(rule);
             }
         }
@@ -319,6 +322,22 @@ impl Fixture {
             wasm_hash: None,
         }
     }
+    /// Select the Common prefix rules whose Grant field is set, in fixture order, and rebind the
+    /// standard prefix digest. Owner configuration rejects a prefix rule with an unset field.
+    pub(super) fn set_rules_only(&self, d: &mut AllowitPolicyDeployment) {
+        let mut rules = Vec::new(&self.env);
+        for rule in COMMON_RULES {
+            if d.grant.is_set(rule) {
+                rules.push_back(rule);
+            }
+        }
+        let Some(Executable::Wasm(module)) = self.wallet.executable() else {
+            panic!("Expected a Wasm wallet")
+        };
+        let kind = Symbol::new(&self.env, "common_policy_engine");
+        d.source_digest = standard_prefix_digest(&self.env, &kind, &module, &self.asset, &rules);
+        d.rules = rules;
+    }
     fn authorization(
         &self,
         execution: AllowitExecutionRequest,
@@ -430,7 +449,7 @@ fn common_rules_bound_transfers_and_commit_usage_once() {
     assert_eq!(f.history().spent, 250);
 }
 #[test]
-fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
+fn common_rejects_unset_prefix_fields_unknown_names_and_negative_caps() {
     let f = Fixture::new(COMMON, false);
     // Soroban decodes vector elements when read. The packet binds a digest over the raw rules, so
     // only the kernel's element decoding rejects them before they are stored.
@@ -507,13 +526,41 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
             Err(Ok(AllowitWalletError::InvalidGrant))
         );
     }
+    // A prefix rule with an unset Grant field would skip onchain while the full policy denies it.
+    let full = f.client().state().grant;
+    for rule in COMMON_RULES {
+        let mut p = f.deployment();
+        let g = &mut p.grant;
+        match rule {
+            AllowitRule::transaction_cap => g.transaction_cap = None,
+            AllowitRule::spent_cap => g.spent_cap = None,
+            AllowitRule::day_spent_cap => g.day_spent_cap = None,
+            AllowitRule::day_total_cap => g.day_total_cap = None,
+            AllowitRule::call_cap => g.call_cap = None,
+            AllowitRule::recipients => g.recipients = None,
+            AllowitRule::tokens => g.tokens = None,
+            AllowitRule::expiry => g.expiry = None,
+        }
+        assert!(!p.grant.is_set(rule));
+        f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+        assert_eq!(
+            f.client().try_deploy_policy(&p),
+            Err(Ok(AllowitWalletError::InvalidGrant))
+        );
+    }
+    // Without those rules in the prefix, an empty Grant is valid configuration.
     let mut p = f.deployment();
     p.grant = AllowitGrant::default();
+    f.set_rules_only(&mut p);
+    assert!(p.rules.is_empty());
     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
     f.client().deploy_policy(&p);
     assert_eq!(f.client().state().grant, AllowitGrant::default());
-    // Every selected rule is skipped by the standard preflight when its field is unset.
     assert_eq!(f.transfer(500).amount, 500);
+    let mut p = f.deployment();
+    p.grant = full;
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&p);
     // The same raw path stores a known rule.
     assert!(f.deploy_raw(packet(recipient, None)));
     assert_eq!(
@@ -522,11 +569,20 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
     );
 }
 #[test]
-fn custom_policy_denies_an_unset_grant_field_that_common_preflight_skips() {
+fn unset_grant_fields_never_skip_onchain_checks() {
     for wasm in [COMMON, CUSTOM] {
         let f = Fixture::new(wasm, false);
         let mut p = f.deployment();
         p.grant.expiry = None;
+        if wasm == COMMON {
+            // Common rejects the unset prefix field, then accepts a prefix without its rule.
+            f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+            assert_eq!(
+                f.client().try_deploy_policy(&p),
+                Err(Ok(AllowitWalletError::InvalidGrant))
+            );
+            f.set_rules_only(&mut p);
+        }
         f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
         f.client().deploy_policy(&p);
         let e = f.execution(10);
@@ -1430,9 +1486,12 @@ fn x402_enforces_compiled_business_rules_without_committing() {
                 _ => {
                     let mut p = f.deployment();
                     p.grant.expiry = None;
+                    if wasm == COMMON {
+                        f.set_rules_only(&mut p);
+                    }
                     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
                     f.client().deploy_policy(&p);
-                    // Common preflight skips the unset field; Custom denies it.
+                    // Common runs its prefix without expiry; Custom denies the unset field.
                     let expected = if wasm == CUSTOM {
                         AllowitWalletError::InvalidGrant
                     } else {
