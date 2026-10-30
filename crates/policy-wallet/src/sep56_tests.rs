@@ -276,3 +276,17 @@ fn ordinary_recipient_allowlist_admits_multiple_vaults_and_denies_other_targets(
     assert_eq!(f.used("total"), 80);
     assert_eq!(f.client().deposit_receipt(&e.operation_id), None);
 }
+
+#[test]
+fn deposit_untrusted_metadata_getter_cannot_mutate_final_share_or_asset_effects() {
+    for behavior in [9, 10] {
+        let f = Fixture::new(COMMON, false);
+        let vault = vault(&f, behavior, None);
+        allow_recipient(&f, &vault);
+        let e = request(&f, &vault, 50, 50);
+        let before = f.client().state();
+        let spent = f.client().policy_spent();
+        assert_eq!(execute(&f, &e), Err(Ok(Error::InvalidEffects)));
+        assert_unchanged(&f, &vault, &e.operation_id, &before, &spent);
+    }
+}

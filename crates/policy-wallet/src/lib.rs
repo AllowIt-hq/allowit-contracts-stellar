@@ -434,21 +434,24 @@ fn deposit_tokens(env: &Env, asset: &Address, args: &Sep56DepositArgs) -> Result
         )
             .into_val(env),
     );
+    // Finish foreign metadata reads before measuring final effects. A vault getter is not trusted to be pure.
+    let after_asset: Address =
+        env.invoke_contract(&args.vault, &Symbol::new(env, "query_asset"), Vec::new(env));
+    if after_asset != *asset {
+        return Err(Error::InvalidEffects);
+    }
     let expected_assets = before_assets
         .checked_sub(args.assets)
         .ok_or(Error::Overflow)?;
     let expected_shares = before_shares.checked_add(shares).ok_or(Error::Overflow)?;
+    let after_shares = shares_client.balance(&wallet);
+    // The immutable SAC read is last: no untrusted vault code runs after these final observations.
+    let after_assets = asset_client.balance(&wallet);
     if shares < args.min_shares
         || shares <= 0
-        || asset_client.balance(&wallet) != expected_assets
-        || shares_client.balance(&wallet) != expected_shares
+        || after_assets != expected_assets
+        || after_shares != expected_shares
     {
-        return Err(Error::InvalidEffects);
-    }
-    // The external vault cannot change the underlying identity during an accepted deposit.
-    let after_asset: Address =
-        env.invoke_contract(&args.vault, &Symbol::new(env, "query_asset"), Vec::new(env));
-    if after_asset != *asset {
         return Err(Error::InvalidEffects);
     }
     Ok(shares)

@@ -84,9 +84,10 @@ including one later refunded, lacks authorization. Denial or failure rolls back 
 receipts and native effects together.
 
 The unchanged `TransferReceipt` reports the underlying debit leg to the vault. The
-`deposit_receipt(operation_id)` getter returns its exact asset, parties, assets and actual shares.
+`deposit_receipt(operation_id)` getter returns its exact asset, parties, assets and observed shares.
 The wallet emits `sep56_deposit` with operation and vault topics and `assets`/`shares` data.
-These observations establish the executed exchange, not the external vault's value or solvency.
+Share balances are observations from the selected vault's code. Dishonest code can misreport
+share ownership. These checks bound SAC spending but cannot prove share value or redeemability.
 
 Simple and Common admit both native schemas. Custom admits only its compiled argument schema.
 `PolicyContext.operation` is an internal native String with the qualified operation name.

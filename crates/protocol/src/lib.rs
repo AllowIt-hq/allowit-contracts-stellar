@@ -213,7 +213,7 @@ pub struct Sep56DepositReceipt {
     pub operator: Address,
     /// Exact observed underlying debit in native units.
     pub assets: i128,
-    /// Actual share credit, equal to the vault's returned minted units.
+    /// Observed share credit, equal to returned minted units. External vault code defines share behavior.
     pub shares: i128,
     /// Consumed execution sequence, distinct from native authorization nonces.
     pub nonce: u64,

@@ -10,7 +10,24 @@ impl Vault {
         env.storage().instance().set(&1u32, &behavior);
     }
     pub fn query_asset(env: Env) -> Address {
-        env.storage().instance().get(&0u32).unwrap()
+        let asset: Address = env.storage().instance().get(&0u32).unwrap();
+        let behavior: u32 = env.storage().instance().get(&1u32).unwrap();
+        if let Some(receiver) = env.storage().instance().get::<_, Address>(&3u32) {
+            if behavior == 9 {
+                // A metadata getter can destroy credited shares after deposit returns.
+                env.storage().persistent().set(&receiver, &0i128);
+            }
+            if behavior == 10 {
+                // A metadata getter can also refund underlying after an earlier balance observation.
+                let assets: i128 = env.storage().instance().get(&4u32).unwrap();
+                token::Client::new(&env, &asset).transfer(
+                    &env.current_contract_address(),
+                    &receiver,
+                    &assets,
+                );
+            }
+        }
+        asset
     }
     pub fn set_upgrade(env: Env, hash: BytesN<32>) {
         env.storage().instance().set(&2u32, &hash);
@@ -59,6 +76,8 @@ impl Vault {
         env.storage()
             .persistent()
             .set(&receiver, &(before + credit));
+        env.storage().instance().set(&3u32, &receiver);
+        env.storage().instance().set(&4u32, &assets);
         if behavior == 6 {
             env.storage().instance().set(&0u32, &vault);
         }
