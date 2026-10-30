@@ -1,8 +1,19 @@
 # Policy wallet engines
 
-Policy wallets hold one immutable native Stellar Asset Contract (SAC) asset. The owner chooses
-wallet code, agent, independent server signer and policy configuration. The server signer is not a
-shared checker contract or its parent administrator.
+This page explains how an Allowit policy wallet is put together on Stellar: the three wallet
+implementations, the canonical rules, the configuration the owner signs, what happens on every
+transfer, and the operations only the owner can perform. Read the [README](../README.md) first for
+the short version and the build steps.
+
+A policy wallet holds one immutable native Stellar Asset Contract (SAC) asset. The owner chooses
+the wallet code, the agent, an independent server signer and the policy configuration. Delegated
+transfers need both the agent and the server. The owner needs nobody. The server signer is a plain
+co-signer; it is not a shared checker contract or that contract's parent administrator.
+
+All three implementations are built from the same custody core in `crates/policy-wallet`. The
+`policy_wallet!` macro attaches the complete owner and delegated-execution interface to a `Policy`
+implementation, so Simple, Common and Custom expose identical entrypoints and differ only in their
+`validate` and `check` logic.
 
 | Implementation | Delegated authorization | Local policy |
 | --- | --- | --- |
