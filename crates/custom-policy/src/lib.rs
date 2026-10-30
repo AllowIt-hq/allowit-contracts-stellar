@@ -5,10 +5,15 @@ use allowit_policy_wallet::{AllowitPolicy, AllowitWalletError};
 use soroban_sdk::{BytesN, Env, Vec};
 
 /// Authored policy source, compiled unchanged as a module. The offchain server compiles the same file.
+#[cfg(not(feature = "test-catching"))]
 #[path = "../policy/policy.rs"]
 mod policy;
+/// Test fixture only: a policy that catches rule failures, so tests exercise the onchain record.
+#[cfg(feature = "test-catching")]
+#[path = "catching_policy.rs"]
+mod policy;
 
-/// SHA-256 of the exact `policy/policy.rs` bytes, computed by `build.rs`.
+/// SHA-256 of the exact bytes of the compiled policy source, computed by `build.rs`.
 pub const SOURCE_HASH: [u8; 32] = include!(concat!(env!("OUT_DIR"), "/source_hash.rs"));
 /// The only native operation this policy admits, enforced through `ARGUMENT_SCHEMA_HASH`.
 pub const ADMITTED_OPERATION: &str = "stellar::sep41_transfer";

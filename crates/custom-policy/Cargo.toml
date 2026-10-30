@@ -7,6 +7,11 @@ license = "UNLICENSED"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Test fixture only: compile `src/catching_policy.rs` instead of `policy/policy.rs`, so tests run
+# a policy that catches rule failures in the deployed Wasm. Never deploy this build.
+test-catching = []
+
 [dependencies]
 soroban-sdk = { workspace = true }
 allowit-wallet-protocol = { path = "../protocol" }

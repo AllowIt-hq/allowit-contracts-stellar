@@ -18,6 +18,9 @@ pub(super) const COMMON: &[u8] =
     include_bytes!("../../../target/wasm32v1-none/release/allowit_common_policy_engine.wasm");
 pub(super) const CUSTOM: &[u8] =
     include_bytes!("../../../target/wasm32v1-none/release/allowit_custom_policy.wasm");
+/// `AllowitCustomPolicy` built with `test-catching` by `scripts/build-contracts.sh`.
+pub(super) const CATCHING: &[u8] =
+    include_bytes!("../../../target/test-fixtures/custom_catching.wasm");
 
 pub(super) struct Fixture {
     pub(super) env: Env,
@@ -104,12 +107,14 @@ impl Fixture {
                 rules.push_back(rule);
             }
         }
-        let source_digest = if wasm == CUSTOM {
+        let source_digest = if wasm == CUSTOM || wasm == CATCHING {
+            let source: &[u8] = if wasm == CUSTOM {
+                include_bytes!("../../custom-policy/policy/policy.rs")
+            } else {
+                include_bytes!("../../custom-policy/src/catching_policy.rs")
+            };
             env.crypto()
-                .sha256(&Bytes::from_slice(
-                    &env,
-                    include_bytes!("../../custom-policy/policy/policy.rs"),
-                ))
+                .sha256(&Bytes::from_slice(&env, source))
                 .to_bytes()
         } else {
             let kind = if wasm == COMMON {

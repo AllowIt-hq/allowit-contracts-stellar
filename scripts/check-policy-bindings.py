@@ -31,7 +31,11 @@ source = (ROOT / "crates/custom-policy/policy/policy.rs").read_bytes()
 contract = (ROOT / "crates/custom-policy/src/lib.rs").read_text()
 if binding(contract, "ARGUMENT_SCHEMA_HASH") != hashlib.sha256(SCHEMA).digest():
     raise SystemExit("Custom policy argument schema differs")
-if '#[path = "../policy/policy.rs"]\nmod policy;' not in contract or "/source_hash.rs" not in contract:
+# The only alternative module is the `test-catching` fixture, which deployment tooling rejects.
+POLICY_MODULE = ('#[cfg(not(feature = "test-catching"))]\n#[path = "../policy/policy.rs"]\nmod policy;\n'
+                 '/// Test fixture only: a policy that catches rule failures, so tests exercise the onchain record.\n'
+                 '#[cfg(feature = "test-catching")]\n#[path = "catching_policy.rs"]\nmod policy;\n')
+if contract.count("mod policy;") != 2 or POLICY_MODULE not in contract or "/source_hash.rs" not in contract:
     raise SystemExit("Custom policy must compile and hash its authored source verbatim")
 for path in ("crates/custom-policy/policy/policy.rs", "crates/custom-policy/src/branch_policy.rs",
              "crates/custom-policy/src/catching_policy.rs"):

@@ -164,7 +164,10 @@ The portability test, `crates/policy-wallet/src/portability_tests.rs`, runs one 
 
 1. The host backend: the std-only compile of `scripts/policy-smoke.rs` prints its outcomes.
 2. `AllowitCustomPolicy`: the Soroban backend of the same sources must give identical pass values
-   and errors. The real custom Wasm must then return the mapped policy result.
+   and errors. The real custom Wasm must then return the mapped policy result. A fixture Wasm
+   built with the `test-catching` feature compiles `src/catching_policy.rs` instead, and must
+   return the mapped catching result. That policy catches `spent_cap` and `day_spent_cap`
+   failures, so only the onchain rule-failure record denies vectors such as `over_spent_cap`.
 3. `AllowitCommonPolicyEngine`: the real standard Wasm, bound to the sample policy's prefix, must
    return the mapped first prefix preflight error. It skips unset Grant fields.
 4. `AllowitSimplePolicyEngine`: the real simple Wasm must accept every vector that the kernel
@@ -175,7 +178,15 @@ kernel proposes exactly the history that the host evaluated, and checks the comm
 each success. Vectors that the kernel cannot produce, such as another UTC day, a deposit into the
 transfer-only custom contract or a negative cap, run only on the two backends. Kernel violations
 (another asset, payment to the wallet, request expiry, stale nonce, replay and pause) reject with the
-same kernel error in all three contracts.
+same kernel error in every contract.
+
+`scripts/build-contracts.sh` builds the test-feature fixtures (`engine_deny.wasm` and
+`custom_catching.wasm`) in their own target directory and copies them to `target/test-fixtures`,
+so the deployable release paths never hold a test artifact. The tests read every Wasm from the
+default `target/` directory, so the script ignores `CARGO_TARGET_DIR`. Run one build or
+`cargo test` at a time in a worktree; a lock directory stops a second concurrent build. Use another
+worktree for concurrent runs. The mainnet tooling rejects any artifact whose hash matches a test
+fixture.
 
 Portable authored code beyond canonical calls uses typed scalar fields and enum comparisons, such
 as `ctx.request.operation == AllowitOperation::sep56_deposit`. Backend list methods differ (`len`

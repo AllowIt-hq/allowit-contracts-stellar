@@ -2,16 +2,18 @@
 //!
 //! 1. the host backend: `scripts/policy-smoke.rs` compiled with plain `rustc` against `allowit`
 //!    with only the `std` feature, so a policy that names `soroban_sdk` or a wallet crate fails;
-//! 2. `AllowitCustomPolicy`: the Soroban backend of the same sources, then the real custom Wasm;
+//! 2. `AllowitCustomPolicy`: the Soroban backend of the same sources, then the real custom Wasm,
+//!    and the `test-catching` fixture Wasm, which compiles the catching policy, so the onchain
+//!    rule-failure record must deny the failures that the policy catches;
 //! 3. `AllowitCommonPolicyEngine`: the real standard Wasm with the policy's leading-rule prefix;
 //! 4. `AllowitSimplePolicyEngine`: the real simple Wasm, which has no rules.
 //!
 //! Host and Soroban outcomes must be identical on every pass value and error. The custom contract
-//! must return the mapped policy result. The standard contract must return the mapped first
+//! must return the mapped policy result, and the catching fixture the mapped catching result. The standard contract must return the mapped first
 //! prefix preflight error, which skips unset Grant fields. The simple contract must accept every
-//! vector that the kernel accepts. Kernel violations reject identically in all three contracts.
+//! vector that the kernel accepts. Kernel violations reject identically in every contract.
 extern crate std;
-use super::tests::{COMMON, CUSTOM, Fixture, SIMPLE};
+use super::tests::{CATCHING, COMMON, CUSTOM, Fixture, SIMPLE};
 use super::*;
 use allowit::AllowitError;
 use allowit_wallet_protocol::AllowitPolicyInvocation;
@@ -275,7 +277,11 @@ enum Tier {
     Custom,
     Common,
     Simple,
+    /// The custom contract compiled with the catching policy.
+    Catching,
 }
+/// Every deployed contract that the vectors run through.
+const TIERS: [Tier; 4] = [Tier::Custom, Tier::Common, Tier::Simple, Tier::Catching];
 /// One deployed wallet Wasm and its address universe.
 struct Wallet {
     f: Fixture,
@@ -289,6 +295,7 @@ impl Wallet {
             Tier::Custom => CUSTOM,
             Tier::Common => COMMON,
             Tier::Simple => SIMPLE,
+            Tier::Catching => CATCHING,
         };
         let f = Fixture::new(wasm, false);
         f.env.mock_all_auths();
@@ -358,7 +365,7 @@ impl Wallet {
             day: v.now / 86_400,
         };
         AllowitExecutionRequest {
-            source_hash: if self.tier == Tier::Custom {
+            source_hash: if matches!(self.tier, Tier::Custom | Tier::Catching) {
                 b.source_digest.clone()
             } else {
                 BytesN::from_array(env, &[9; 32])
@@ -403,11 +410,13 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
     let all = vectors::vectors();
     let host = host_lines();
     assert_eq!(host.len(), all.len());
-    let wallets = [Tier::Custom, Tier::Common, Tier::Simple].map(Wallet::new);
+    let wallets = TIERS.map(Wallet::new);
     let custom = &wallets[0];
     let prefix = sample_prefix();
     assert_eq!(prefix, RULES);
     let mut realized = 0;
+    // Realized vectors whose rule failure the catching policy catches and the record denies.
+    let mut caught = List::new();
     for (v, host) in all.iter().zip(&host) {
         // 1 and 2: the host smoke and the Soroban backend agree on every pass value and error.
         let outcome = soroban_outcome(&custom.f.env, &custom.universe, v);
@@ -417,6 +426,11 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
         };
         realized += 1;
         let expected_custom = outcome.policy.map_err(wallet_error);
+        let expected_catching = outcome.catching.map_err(wallet_error);
+        let direct = catching::execute(&context(&custom.f.env, &custom.universe, v));
+        if direct.is_ok() && outcome.catching.is_err() {
+            caught.push(v.name);
+        }
         let first_prefix_error = prefix
             .iter()
             .map(|rule| outcome.preflight[RULES.iter().position(|r| r == rule).unwrap()])
@@ -437,6 +451,7 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
                 Tier::Custom => expected_custom,
                 Tier::Common => expected_common,
                 Tier::Simple => Ok(()),
+                Tier::Catching => expected_catching,
             };
             assert_eq!(result, expected, "{} {:?}", v.name, wallet.tier);
             // The kernel proposed exactly the history that the host evaluated.
@@ -446,14 +461,18 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
         }
     }
     assert_eq!(realized, 24);
+    // The deployed catching Wasm denied these only through the onchain rule-failure record.
+    for name in ["over_spent_cap", "over_day_spent_cap"] {
+        assert!(caught.contains(&name), "{name} {caught:?}");
+    }
 }
 
 #[test]
-fn kernel_violations_reject_identically_in_custom_standard_and_simple() {
+fn kernel_violations_reject_identically_in_every_contract() {
     use AllowitWalletError as W;
     let v = vectors::base();
     let (prior, _) = kernel_input(&v).unwrap();
-    for wallet in [Tier::Custom, Tier::Common, Tier::Simple].map(Wallet::new) {
+    for wallet in TIERS.map(Wallet::new) {
         let env = &wallet.f.env;
         let tier = wallet.tier;
         let reject = |change: &dyn Fn(&mut AllowitExecutionRequest), paused: bool| {
