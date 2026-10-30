@@ -271,37 +271,55 @@ pub fn expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
 }
 
 /// Standard-contract preflight of one canonical prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`.
-/// It runs the rule exactly as the full policy does, so an unset field is `MissingGrant`, and it
-/// discards the pass value. Owner configuration also rejects a prefix rule with an unset field.
+/// Only this runner skips a rule whose AllowitGrant field is unset. It discards pass values.
 pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
     let grant = &ctx.grant;
     match rule {
-        AllowitRule::transaction_cap => transaction_cap(ctx, &grant.transaction_cap).map(drop),
-        AllowitRule::spent_cap => spent_cap(ctx, &grant.spent_cap).map(drop),
-        AllowitRule::day_spent_cap => day_spent_cap(ctx, &grant.day_spent_cap).map(drop),
-        AllowitRule::day_total_cap => day_total_cap(ctx, &grant.day_total_cap).map(drop),
-        AllowitRule::call_cap => call_cap(ctx, &grant.call_cap).map(drop),
-        AllowitRule::recipients => recipients(ctx, &grant.recipients).map(drop),
-        AllowitRule::tokens => tokens(ctx, &grant.tokens).map(drop),
-        AllowitRule::expiry => expiry(ctx, &grant.expiry).map(drop),
+        AllowitRule::transaction_cap => {
+            if grant.transaction_cap.is_some() {
+                transaction_cap(ctx, &grant.transaction_cap)?;
+            }
+        }
+        AllowitRule::spent_cap => {
+            if grant.spent_cap.is_some() {
+                spent_cap(ctx, &grant.spent_cap)?;
+            }
+        }
+        AllowitRule::day_spent_cap => {
+            if grant.day_spent_cap.is_some() {
+                day_spent_cap(ctx, &grant.day_spent_cap)?;
+            }
+        }
+        AllowitRule::day_total_cap => {
+            if grant.day_total_cap.is_some() {
+                day_total_cap(ctx, &grant.day_total_cap)?;
+            }
+        }
+        AllowitRule::call_cap => {
+            if grant.call_cap.is_some() {
+                call_cap(ctx, &grant.call_cap)?;
+            }
+        }
+        AllowitRule::recipients => {
+            if grant.recipients.is_some() {
+                recipients(ctx, &grant.recipients)?;
+            }
+        }
+        AllowitRule::tokens => {
+            if grant.tokens.is_some() {
+                tokens(ctx, &grant.tokens)?;
+            }
+        }
+        AllowitRule::expiry => {
+            if grant.expiry.is_some() {
+                expiry(ctx, &grant.expiry)?;
+            }
+        }
     }
+    Ok(())
 }
 
 impl AllowitGrant {
-    /// Whether the same-named field of `rule` is set.
-    pub fn is_set(&self, rule: AllowitRule) -> bool {
-        match rule {
-            AllowitRule::transaction_cap => self.transaction_cap.is_some(),
-            AllowitRule::spent_cap => self.spent_cap.is_some(),
-            AllowitRule::day_spent_cap => self.day_spent_cap.is_some(),
-            AllowitRule::day_total_cap => self.day_total_cap.is_some(),
-            AllowitRule::call_cap => self.call_cap.is_some(),
-            AllowitRule::recipients => self.recipients.is_some(),
-            AllowitRule::tokens => self.tokens.is_some(),
-            AllowitRule::expiry => self.expiry.is_some(),
-        }
-    }
-
     /// Check owner configuration before storing it. Negative caps are `InvalidParameter`.
     /// The struct enforces types. Unset fields are valid configuration.
     pub fn validate(&self) -> Result {

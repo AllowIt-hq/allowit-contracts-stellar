@@ -293,10 +293,6 @@ fn validate<P: AllowitPolicy>(
         .validate()
         .map_err(|_| AllowitWalletError::InvalidGrant)?;
     decoded(&config.rules)?;
-    // The full policy denies an unset field with MissingGrant. A prefix rule must not skip it.
-    if config.rules.iter().any(|rule| !config.grant.is_set(rule)) {
-        return Err(AllowitWalletError::InvalidGrant);
-    }
     let lists = [&config.grant.recipients, &config.grant.tokens];
     for list in lists.into_iter().flatten() {
         decoded(list)?;
@@ -1134,12 +1130,12 @@ impl AllowitPolicy for AllowitCommon {
         *digest == schema_digest(env, ARGUMENT_SCHEMA_DESCRIPTOR)
             || *digest == schema_digest(env, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR)
     }
-    /// Any ordered list of typed rules. The kernel decodes each element and requires its Grant
-    /// field before storing it.
+    /// Any ordered list of typed rules. The kernel decodes each element before storing it.
     fn validate(_rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         Ok(())
     }
     /// Run each prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;` in owner order.
+    /// An unset AllowitGrant field skips its rule here only; the full offchain policy denies it.
     fn check(ctx: &AllowitContext, rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         for rule in rules.iter() {
             allowit::preflight(ctx, rule)?;

@@ -8,7 +8,7 @@ Three owner-controlled contract implementations share custody and administration
 
 Policy source is portable Rust against `crates/allowit`: `allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;`.
 The offchain server and CustomPolicy compile the file verbatim. The standard contract runs only its
-leading canonical calls, supplied by the owner as `rules`; each needs its Grant field set.
+leading canonical calls, supplied by the owner as `rules`, and skips unset fields.
 `scripts/contract_admin.py` derives `rules` from the source. Rules are pure checks over
 `AllowitContext` (typed Grant, protected history, request) and return their passing constraint or an
 error. The server uses `allowit = { default-features = false, features = ["std"] }`.

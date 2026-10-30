@@ -210,10 +210,6 @@ def deployment(value):
     code_hash(value["source_digest"])
     if not isinstance(value["rules"], list) or any(rule not in GRANT_FIELDS for rule in value["rules"]):
         raise ValueError("Rules must name canonical rules: " + ", ".join(GRANT_FIELDS))
-    # The full policy denies an unset field with MissingGrant; the contract rejects the packet.
-    unset = [rule for rule in value["rules"] if value["grant"].get(rule) is None]
-    if unset:
-        raise ValueError("Every prefix rule needs its Grant field set: " + ", ".join(unset))
     if type(value["x402_enabled"]) is not bool:
         raise ValueError("x402_enabled must be boolean")
     if value["x402_enabled"] and any(not StrKey.is_valid_ed25519_public_key(value[role]) for role in ("agent", "server")):

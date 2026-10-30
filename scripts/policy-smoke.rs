@@ -59,10 +59,7 @@ fn approval_denies_unset_grant_fields() {
     let mut c = context();
     c.grant.tokens = None;
     assert_eq!(policy::execute(&c), Err(AllowitError::MissingGrant));
-    assert_eq!(
-        allowit::preflight(&c, allowit::AllowitRule::tokens),
-        Err(AllowitError::MissingGrant)
-    );
+    assert_eq!(allowit::preflight(&c, allowit::AllowitRule::tokens), Ok(()));
 }
 #[test]
 fn limits_boundary_denial_and_accounting() {

@@ -86,7 +86,7 @@ fn rules_return_exact_passing_constraints() {
 }
 
 #[test]
-fn unset_grant_fields_deny_in_rules_and_preflight() {
+fn unset_grant_fields_deny_in_rules_and_skip_only_in_preflight() {
     let env = Env::default();
     let mut ctx = fixture(&env);
     ctx.grant = AllowitGrant::default();
@@ -109,14 +109,11 @@ fn unset_grant_fields_deny_in_rules_and_preflight() {
     ctx.state.calls = u64::MAX;
     assert_eq!(spent_cap(&ctx, &None), Err(AllowitError::MissingGrant));
     assert_eq!(expiry(&ctx, &None), Err(AllowitError::MissingGrant));
-    // Preflight runs the same unguarded call, so an unset prefix field denies onchain too.
     for rule in ALL {
-        assert!(!ctx.grant.is_set(rule));
-        assert_eq!(preflight(&ctx, rule), Err(AllowitError::MissingGrant));
+        assert_eq!(preflight(&ctx, rule), Ok(()));
     }
     // A set field is checked by preflight exactly as by the rule.
     ctx.grant.spent_cap = Some(1000);
-    assert!(ctx.grant.is_set(AllowitRule::spent_cap));
     assert_eq!(
         preflight(&ctx, AllowitRule::spent_cap),
         Err(AllowitError::Unpriced)

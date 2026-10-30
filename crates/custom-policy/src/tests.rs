@@ -377,7 +377,7 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
     v.caps[0] = Some(-1);
     assert_eq!(u.run(&v).policy, Err(E::InvalidParameter as u32));
     checked += 4;
-    // An unset AllowitGrant field denies in the policy, the rule and preflight alike.
+    // An unset AllowitGrant field denies in the policy and rule, and is skipped only by preflight.
     for field in 0..8 {
         let mut v = base();
         match field {
@@ -390,9 +390,7 @@ fn same_source_has_identical_outcomes_on_host_and_soroban_backends() {
         let o = u.run(&v);
         assert_eq!(o.policy, Err(E::MissingGrant as u32));
         assert_eq!(o.rules[field], Err(E::MissingGrant as u32));
-        let mut preflight = all_preflight_ok();
-        preflight[field] = Err(E::MissingGrant as u32);
-        assert_eq!(o.preflight, preflight);
+        assert_eq!(o.preflight, all_preflight_ok());
         checked += 1;
     }
     assert_eq!(checked, 24);

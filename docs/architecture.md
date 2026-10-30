@@ -37,8 +37,8 @@ pub fn execute(ctx: &AllowitContext) -> allowit::Result {
 The function doc comment keeps the owner's original policy prompt. Each inline comment quotes the
 prompt clause that the next call implements.
 
-The standard contract runs only its leading canonical calls, supplied by the owner as `rules`.
-`scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes
+The standard contract runs only its leading canonical calls, supplied by the owner as `rules`, and
+skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes
 Rust comments, including nested block comments, and literals first, so they cannot add or hide calls.
 
 Policy source names `allowit` only as the path root `allowit::`. Any other occurrence of the
@@ -102,11 +102,9 @@ Any other statement ends it. Later statements run offchain or in CustomPolicy.
 The standard contract receives the exact owner-approved ordered prefix as `rules: Vec<AllowitRule>`, never
 caller selectors. `AllowitRule` is a typed enum whose variants are the canonical names. Soroban decodes
 vector elements when read, so owner configuration decodes every rule and allowlist element before
-storing it: an unknown name aborts and a malformed element is `InvalidGrant`. A prefix rule whose
-Grant field is unset is also `InvalidGrant`, in the contract and in the owner packet tooling, because
-the full policy denies it with `MissingGrant`. The contract runs each call through
-`allowit::preflight`, which makes the same unguarded call and discards its pass value, so no unset
-field skips onchain. Repeated rules read the same proposed
+storing it: an unknown name aborts and a malformed element is `InvalidGrant`. It runs each call through `allowit::preflight` as `if grant.<rule>.is_some() { allowit::<rule>(ctx, &grant.<rule>)?; }`
+and discards pass values. This preflight runner is the only place an unset field skips its rule.
+The offchain full policy still runs the unguarded call. Repeated rules read the same proposed
 history, so they cannot charge twice.
 
 Rule denials map to `PolicyDenied`. `MissingGrant` and `InvalidParameter` map to `InvalidGrant`.
