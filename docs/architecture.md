@@ -13,7 +13,7 @@ co-signer; it is not a shared checker contract or that contract's parent adminis
 All three implementations are built from the same custody core in `crates/policy-wallet`. The
 `policy_wallet!` macro attaches the complete owner and delegated-execution interface to a `Policy`
 implementation, so Simple, Common and Custom expose identical entrypoints and differ only in their
-`validate` and `check` logic.
+`Policy` logic.
 
 | Implementation | Delegated authorization | Local policy |
 | --- | --- | --- |

@@ -36,7 +36,7 @@ Pick **Simple** when your server already runs the whole policy and you want the 
 
 ### The canonical rules
 
-Common wallets enforce exactly the rules the owner lists, in that order, and nothing else. An empty list means no on-chain business checks, like Simple. Each rule reads one or two named values from the owner-signed **Grant** and may update the wallet's running **Spent** map.
+Common wallets enforce exactly the rules the owner lists, in that order, and nothing else. An empty list means no on-chain business checks, like Simple. Each rule reads one named value from the owner-signed **Grant** and may update the wallet's running **Spent** map.
 
 | Rule | Grant values it reads | What it does |
 | --- | --- | --- |
@@ -55,8 +55,8 @@ The rules live in `crates/rules` and are shared by the Common wallet, compiled C
 A wallet knows three addresses, and they must all be different.
 
 - **Owner.** Creates the wallet and signs every configuration change. The owner alone can `deploy_policy`, `set_pause`, `recover` funds and `invoke` any contract call through the wallet. None of these need the agent or the server.
-- **Agent.** The AI agent, or whatever acts for you. It co-signs `execute` and nothing else.
-- **Server.** An independent signer that co-signs `execute`. It is a second pair of eyes on every transfer, not a shared checker contract and not an administrator.
+- **Agent.** The AI agent, or whatever acts for you. It co-signs transfers, through `execute` or an x402 authorization, and nothing else.
+- **Server.** An independent signer that co-signs every transfer. It is a second pair of eyes on every transfer, not a shared checker contract and not an administrator.
 
 A separate **engine parent** contract can manage the code of a shared rule-checking engine. It holds no custody authority: it cannot touch a wallet's funds, configuration or signers. See [docs/engine-parent.md](docs/engine-parent.md).
 
@@ -65,7 +65,7 @@ A separate **engine parent** contract can manage the code of a shared rule-check
 
 ## How a transfer happens
 
-1. The agent builds an `ExecutionRequest`: the wallet's policy identity, a fresh operation id, the next nonce, the current deployment version, an expiry, and the exact SEP-41 transfer arguments (`token`, `from`, `to`, `amount`).
+1. The agent builds an `ExecutionRequest`: the wallet's policy identity, a fresh operation id, the wallet's current nonce and deployment version, an expiry, and the exact SEP-41 transfer arguments (`token`, `from`, `to`, `amount`).
 2. Agent and server both authorize `execute`.
 3. The wallet checks everything before it checks the policy: the installed module, entrypoint and argument schema; canonical argument encoding; the installed asset and the wallet as source; no replay of the operation id; not paused; nonce and deployment version current; not expired; positive amount; recipient is neither the wallet nor the issuer.
 4. The wallet runs its local policy (Simple, the selected Common rules, or the compiled Custom code) against the Grant and the current Spent.
@@ -132,12 +132,12 @@ recover(recipient, amount)                    owner
 invoke(contract, function, args, auth)        owner
 ```
 
-`PolicyConfig` names the `owner`, `agent`, `server`, `asset`, `policy_instance`, `source_digest`, ordered `rules`, `grant` and `x402_enabled`. The asset and the policy identity are fixed for the life of the wallet. Everything else changes through `deploy_policy`, which also accepts an optional new Wasm hash and must target exactly the next `deployment_version`. Pause, Spent and the execution nonce survive every deployment.
+`PolicyConfig` names the `owner`, `agent`, `server`, `asset`, `policy_instance`, `source_digest`, ordered `rules`, `grant` and `x402_enabled`. The asset and the policy identity are fixed for the life of the wallet. Everything else changes through `deploy_policy`, which also accepts an optional new Wasm hash. Both `deploy_policy` and `set_pause` must target exactly the next `deployment_version`. Pause, Spent and the execution nonce survive every deployment.
 
-`scripts/contract_admin.py` prepares unsigned transactions for `upload`, `deploy-parent`, `deploy-wallet`, `admin` and `read`. It simulates, assembles fees and authorization entries, and hands you XDR to review and sign with your own keys. It never signs, submits or retries. `scripts/wallet_admin.py` does the same for classic accounts (`inspect`, `verify-wallet`, `verify-admin`, `setup-wallet`, `shutdown-wallet`, `setup-admin`).
+`scripts/contract_admin.py` prepares unsigned transactions for `upload`, `deploy-parent`, `deploy-wallet` and `admin`. It simulates, assembles fees and authorization entries, and hands you XDR to review and sign with your own keys. Its `read` action runs a read-only simulation of `state`, `engine`, `policy_binding` or `policy_spent`. It never signs, submits or retries. `scripts/wallet_admin.py` prepares and verifies classic-account multisig (`inspect`, `verify-wallet`, `verify-admin`, `setup-wallet`, `shutdown-wallet`, `setup-admin`) and also never signs or submits. Both tools run from the virtual environment above.
 
 ```sh
-python scripts/contract_admin.py read --network testnet --contract "$WALLET" --source "$OWNER" --method policy_binding
+/tmp/allowit-admin/bin/python scripts/contract_admin.py read --network testnet --contract "$WALLET" --source "$OWNER" --method policy_binding
 ```
 
 The step-by-step guide, including Grant encoding and owner handoffs, is in [docs/admin.md](docs/admin.md). Release packets for mainnet are covered in [docs/mainnet.md](docs/mainnet.md).
@@ -185,8 +185,8 @@ scripts/build-contracts.sh
 cargo test --workspace --locked
 ```
 
-Keep contract code, build and API documentation and release inputs here. Planning, reviews and generated evidence live in the Allowit knowledge project, as [AGENTS.md](AGENTS.md) describes.
+Keep contract code, build and API documentation and release inputs here. [AGENTS.md](AGENTS.md) describes the repository scope.
 
 ## License
 
-This repository is published for review. Every crate declares `license = "UNLICENSED"`, so no open-source license is granted.
+The source is public, but every crate declares `license = "UNLICENSED"` and the repository has no license file, so no open-source license is granted.
