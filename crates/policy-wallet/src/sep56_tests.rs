@@ -3,7 +3,7 @@ use super::tests::*;
 use super::*;
 use soroban_sdk::{IntoVal, testutils::Address as _, vec};
 
-use allowit_sep56_test_vault::VaultClient;
+use allowit_sep56_test_vault::AllowitSep56TestVaultClient;
 const VAULT: &[u8] =
     include_bytes!("../../../target/wasm32v1-none/release/allowit_sep56_test_vault.wasm");
 
@@ -77,7 +77,10 @@ fn assert_unchanged(
     history: &AllowitAccountingHistory,
 ) {
     assert_eq!(f.balance(), 1000);
-    assert_eq!(VaultClient::new(&f.env, vault).balance(&f.wallet), 0);
+    assert_eq!(
+        AllowitSep56TestVaultClient::new(&f.env, vault).balance(&f.wallet),
+        0
+    );
     assert_eq!(f.client().state().nonce, before.nonce);
     assert_eq!(f.history(), *history);
     assert_eq!(f.client().deposit_receipt(op), None);
@@ -101,7 +104,10 @@ fn deposit_compiled_simple_and_common_wallets_bind_and_retain_actual_effects() {
         assert_eq!(receipt.amount, 50);
         assert_eq!(receipt.to, vault);
         assert_eq!(f.balance(), 950);
-        assert_eq!(VaultClient::new(&f.env, &vault).balance(&f.wallet), 50);
+        assert_eq!(
+            AllowitSep56TestVaultClient::new(&f.env, &vault).balance(&f.wallet),
+            50
+        );
         let deposited = f.client().deposit_receipt(&e.operation_id).unwrap();
         assert_eq!(deposited.assets, 50);
         assert_eq!(deposited.shares, 50);
@@ -259,7 +265,7 @@ fn deposit_vault_upgrade_cannot_hide_inconsistent_effects_and_rolls_back_all_usa
         .env
         .deployer()
         .upload_contract_wasm(Bytes::from_slice(&f.env, SIMPLE));
-    VaultClient::new(&f.env, &vault).set_upgrade(&hash);
+    AllowitSep56TestVaultClient::new(&f.env, &vault).set_upgrade(&hash);
     let e = request(&f, &vault, 50, 50);
     let before = f.client().state();
     let spent = f.history();

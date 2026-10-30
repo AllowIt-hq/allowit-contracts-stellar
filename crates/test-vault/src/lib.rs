@@ -4,15 +4,15 @@ use soroban_sdk::{
     Address, BytesN, ContractExecutable, Env, contract, contractevent, contractimpl, token,
 };
 #[contractevent(topics=["mint"])]
-pub struct ShareMint {
+pub struct AllowitShareMint {
     #[topic]
     pub to: Address,
     pub amount: i128,
 }
 #[contract]
-pub struct Vault;
+pub struct AllowitSep56TestVault;
 #[contractimpl]
-impl Vault {
+impl AllowitSep56TestVault {
     pub fn __constructor(env: Env, asset: Address, behavior: u32) {
         env.storage().instance().set(&0u32, &asset);
         env.storage().instance().set(&1u32, &behavior);
@@ -96,7 +96,7 @@ impl Vault {
         env.storage()
             .persistent()
             .set(&receiver, &(before + credit));
-        ShareMint {
+        AllowitShareMint {
             to: receiver.clone(),
             amount: credit,
         }
