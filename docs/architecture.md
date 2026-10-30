@@ -227,6 +227,11 @@ standard keys later operations could not decode, such as `calls` written as a `b
 `spent` or a later `day`, is `InvalidState`: the operation denies instead of locking the wallet.
 `post_flight` consumes the write buffer first, even when it fails.
 
+The server evaluates a policy with `allowit::evaluate(ctx, execute)`. It clears stale writes, runs
+`execute`, and runs `post_flight` on approval; a denial discards the policy's writes. So no write
+outlives its evaluation, also when the server reuses an `AllowitEnv`. Onchain, the wallet runs
+`post_flight` after its own policy check, and a denied transaction rolls the temporary buffer back.
+
 The server-only enrichment functions `price`, `fetch`, `internet_search`, `marketplace_search`,
 `systemone`, `request_screening` and `clear_systemone_context` exist only in the host backend.
 There they are stubs that return `Unsupported` until the server fills them. A Custom policy that

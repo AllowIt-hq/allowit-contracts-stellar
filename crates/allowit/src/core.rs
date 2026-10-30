@@ -450,6 +450,20 @@ pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
     Ok(state)
 }
 
+/// One policy evaluation, the server's entry point: clear stale writes, run `execute`, then
+/// `post_flight` on approval. A denial discards the policy's writes, so no write outlives it.
+pub fn evaluate(
+    ctx: &AllowitContext,
+    execute: impl FnOnce(&AllowitContext) -> Result,
+) -> Result<AllowitStateMap> {
+    take_writes(&ctx.env);
+    let run = execute(ctx);
+    if run.is_err() {
+        take_writes(&ctx.env);
+    }
+    run.and_then(|()| post_flight(ctx))
+}
+
 impl AllowitGrant {
     /// Check owner configuration before storing it. Negative caps are `InvalidParameter`.
     /// The struct enforces types. Unset fields are valid configuration.

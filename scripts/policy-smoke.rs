@@ -119,6 +119,26 @@ fn approval_continues_after_a_caught_rule_error_and_post_flight_applies_its_writ
         Err(AllowitError::DaySpentCapExceeded)
     );
 }
+/// Records a write, then denies.
+fn denying(c: &AllowitContext) -> allowit::Result {
+    allowit::set_state(c, "seen", 1u64)?;
+    Err(AllowitError::Expired)
+}
+#[test]
+fn approval_evaluate_keeps_no_write_of_a_denied_run_on_a_reused_env() {
+    let c = context();
+    // Run bare, a denied policy leaves its write in the shared host buffer.
+    assert_eq!(denying(&c), Err(AllowitError::Expired));
+    let stale = allowit::post_flight(&c).unwrap();
+    assert_eq!(stale.get("seen"), Some(&allowit::AllowitVal::U64(1)));
+    // `evaluate` clears the buffer on denial and before each run.
+    assert_eq!(allowit::evaluate(&c, denying), Err(AllowitError::Expired));
+    assert_eq!(allowit::post_flight(&c.clone()).unwrap().get("seen"), None);
+    let next = allowit::evaluate(&c.clone(), policy::execute).unwrap();
+    assert_eq!(next.get("seen"), None);
+    allowit::set_state(&c, "seen", 1u64).unwrap();
+    assert_eq!(allowit::evaluate(&c, policy::execute), Ok(next));
+}
 #[test]
 fn limits_boundary_denial_and_accounting() {
     let mut c = context();

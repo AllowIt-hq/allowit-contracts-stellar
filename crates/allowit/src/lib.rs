@@ -25,6 +25,7 @@
 //! After approval, the wallet and the server run the same `post_flight`: it rolls the UTC day
 //! over, counts the call, adds spent and gross amounts, marks unpriced operations, then applies
 //! the policy's own `set_state` writes, and denies a result whose standard keys do not decode. The
+//! server runs a policy through `evaluate`, which also discards the writes of a denied run. The
 //! standard contract runs the leading canonical calls,
 //! supplied by the owner as `rules`, through `preflight`, which skips unset fields.
 //!
@@ -210,8 +211,8 @@ pub mod host {
     /// Free-form policy state: standard and policy-defined keys.
     pub type AllowitStateMap = BTreeMap<String, AllowitVal>;
 
-    /// Host environment of one policy evaluation. It buffers the policy's `set_state` writes for
-    /// `post_flight`; clones share the buffer.
+    /// Host environment of policy evaluations. It buffers the policy's `set_state` writes for
+    /// `post_flight`; clones share the buffer. `evaluate` clears it before a run and on denial.
     #[derive(Clone, Debug)]
     pub struct AllowitEnv {
         writes: Arc<Mutex<AllowitStateMap>>,

@@ -616,3 +616,29 @@ fn post_flight_denies_policy_writes_that_leave_standard_state_undecodable() {
         assert_eq!(read::<i128>(&env, &next, "spent"), Ok(Some(0)));
     });
 }
+
+/// Records a write, then denies unless the grant sets a call cap.
+fn writer(ctx: &AllowitContext) -> Result {
+    set_state(ctx, "seen", 1u64)?;
+    call_cap(ctx, &ctx.grant.call_cap)?;
+    Ok(())
+}
+
+#[test]
+fn evaluate_discards_writes_of_a_denied_or_stale_run() {
+    let env = Env::default();
+    let id = env.register(Scope, ());
+    let mut ctx = fixture(&env);
+    env.as_contract(&id, || {
+        // A stale write from outside this evaluation does not reach its post-flight.
+        set_state(&ctx, "stale", 1u64).unwrap();
+        let next = evaluate(&ctx, writer).unwrap();
+        assert_eq!(read::<u64>(&env, &next, "stale"), Ok(None));
+        assert_eq!(read::<u64>(&env, &next, "seen"), Ok(Some(1)));
+        // A denial returns its error and leaves no write behind.
+        ctx.grant.call_cap = None;
+        assert_eq!(evaluate(&ctx, writer), Err(AllowitError::MissingGrant));
+        let next = post_flight(&ctx).unwrap();
+        assert_eq!(read::<u64>(&env, &next, "seen"), Ok(None));
+    });
+}
