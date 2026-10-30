@@ -4,7 +4,7 @@
 #[path = "../crates/custom-policy/policy/policy.rs"]
 mod policy;
 use allowit::prelude::*;
-use allowit::{DAY, AllowitError};
+use allowit::{AllowitError, DAY};
 
 const NOW: u64 = 3 * DAY + 10;
 fn context() -> AllowitContext {
@@ -65,7 +65,10 @@ fn approval_denies_unset_grant_fields() {
 fn limits_boundary_denial_and_accounting() {
     let mut c = context();
     c.request.amount = 11;
-    assert_eq!(policy::execute(&c), Err(AllowitError::TransactionCapExceeded));
+    assert_eq!(
+        policy::execute(&c),
+        Err(AllowitError::TransactionCapExceeded)
+    );
     let mut c = context();
     c.state.day_spent = 21;
     assert_eq!(policy::execute(&c), Err(AllowitError::DaySpentCapExceeded));

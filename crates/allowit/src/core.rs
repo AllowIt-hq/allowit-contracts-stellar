@@ -142,13 +142,20 @@ pub type Result<T = ()> = core::result::Result<T, AllowitError>;
 /// Names used by authored policy.
 pub mod prelude {
     pub use super::{
-        AllowitAccountingHistory, Address, AllowitContext, AllowitError, AllowitGrant, AllowitOperation, AllowitRequest, Result,
+        Address, AllowitAccountingHistory, AllowitContext, AllowitError, AllowitGrant,
+        AllowitOperation, AllowitRequest, Result,
     };
 }
 
 /// Check one accounting cap against only the facts it reads. `current` is false for daily
 /// values of another UTC day.
-fn accounting(cap: i128, used: i128, unpriced: bool, current: bool, exceeded: AllowitError) -> Result<i128> {
+fn accounting(
+    cap: i128,
+    used: i128,
+    unpriced: bool,
+    current: bool,
+    exceeded: AllowitError,
+) -> Result<i128> {
     if cap < 0 {
         return Err(AllowitError::InvalidParameter);
     }
@@ -184,7 +191,11 @@ pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128>
     if cap < 0 || ctx.request.amount <= 0 {
         return Err(AllowitError::InvalidParameter);
     }
-    left(cap, ctx.request.amount, AllowitError::TransactionCapExceeded)
+    left(
+        cap,
+        ctx.request.amount,
+        AllowitError::TransactionCapExceeded,
+    )
 }
 
 /// Bound cumulative irreversible expenses, including this operation.
@@ -193,7 +204,13 @@ pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128>
 pub fn spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
     let cap = cap.ok_or(AllowitError::MissingGrant)?;
     let s = &ctx.state;
-    accounting(cap, s.spent, s.unpriced, true, AllowitError::SpentCapExceeded)
+    accounting(
+        cap,
+        s.spent,
+        s.unpriced,
+        true,
+        AllowitError::SpentCapExceeded,
+    )
 }
 
 /// Bound irreversible expenses on the request's UTC day, including this operation.
