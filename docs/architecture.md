@@ -254,8 +254,8 @@ policy decides. Custom keys reach policy as `ctx.params.get("vendor_cap")` or as
 `let cap: i128 = allowit::param(ctx, "vendor_cap");`, and agent args as
 `let amount: i128 = allowit::arg(ctx, "amount");`. A typed read returns the type of its binding:
 `i128`, `u64`, `u32`, `bool`, `Address`, `String`, `Vec<AllowitValue>`, `Vec<Address>` or
-`AllowitValue`. It panics when the key is unset or the value has another type or range: the
-run denies and its writes are discarded.
+`AllowitValue`. It panics when the key is unset or the value has another type or range; see
+[Panics](#panics).
 
 The owner sets params at install and changes them with `deploy_policy`, without code redeployment.
 The canonical keys are `allowit::TRANSACTION_CAP`, `SPENT_CAP`, `DAY_SPENT_CAP`, `DAY_TOTAL_CAP`,
@@ -409,6 +409,68 @@ marker before it calls the token or the vault. Soroban transactions are atomic, 
 effect check rolls all of it back. Soroban also refuses a call into a contract that is already on
 the call stack, so a hostile vault cannot call `execute` or reach the x402 hook while the wallet's
 operation runs; the transaction fails and no state changes.
+
+## Custom calls, re-entry and panics
+
+Two rules hold on every rail:
+
+- A custom call never moves wallet funds. Only native operations debit the wallet, and the transfer
+  rules check each debit.
+- A policy never re-enters the wallet, also on a rail that does not block re-entry natively.
+
+On Stellar both rules follow from the wallet's authorization:
+
+- A custom call gets no nested authorization from the wallet, so a contract that it reaches cannot
+  spend for the wallet.
+- A nested `__check_auth` of the wallet during its own operation calls a contract that is already
+  on the call stack. The Soroban host refuses that re-entry, and the transaction fails.
+- The wallet holds no standing allowance. Each debit is one exact `transfer` authorization, and the
+  wallet never approves a spender. A test checks that no transfer, x402 transfer or deposit leaves
+  an allowance, also for a vault that tries to approve itself.
+
+`allowit::reentry_transfer` is the only exception. It exists only on rails that implement it.
+Stellar has none, so a policy that calls it does not compile. Where it exists, every condition
+applies:
+
+- only a Custom wallet has it, and the owner approves it at install;
+- it moves one exact amount, which the transfer rules check;
+- the wallet stores the policy state, nonce and replay marker before the transfer;
+- its authorization is one-shot;
+- no other re-entry occurs, and no allowance remains after it.
+
+A policy can check each op with its own params and args:
+
+```rust
+pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+    match allowit::operations(ctx, ctx.params.get(allowit::OPERATIONS))? {
+        "custom:CPOOL….swap" => {
+            // "at most 50 XLM per swap"
+            let amount: i128 = allowit::arg(ctx, "amount");
+            let cap: i128 = allowit::param(ctx, "swap_cap");
+            if amount > cap { panic!("swap above swap_cap"); }
+        }
+        "custom:CPOOL….claim" => { /* read claim args */ }
+        _ => {}
+    }
+    Ok(())
+}
+```
+
+An op that the `operations` param admits but that has no arm runs with no per-op checks.
+
+### Panics
+
+A rule returns `Err`. The policy may catch it and continue, and only a returned error denies. A
+panic is a hard stop: the run denies and its writes are discarded. `allowit::param` and
+`allowit::arg` panic with `MissingParam` for an unset key and with `InvalidParam` for a value of
+another type or range. `panic!`, `assert!`, `unreachable!` and integer overflow panic too.
+
+Onchain a panic aborts the wallet call, which rolls back every write. A failed typed read aborts
+with `panic_with_error` and its `AllowitError` code: 1 for `MissingParam` and 11 for
+`InvalidParam`. The wallet's own errors share that contract error space, where 1 is
+`InvalidState` and 11 is `Overflow`. On the host, `allowit::evaluate` catches the panic, discards
+the writes and returns the failed read's error, or `Panicked` for any other panic. The evaluator
+process keeps running.
 
 ## Source and configuration binding
 

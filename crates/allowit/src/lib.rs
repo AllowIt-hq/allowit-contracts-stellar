@@ -87,6 +87,18 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! A policy never re-enters the wallet. `reentry_transfer` exists only on rails that implement
+//! it; Stellar has none, so a policy that calls it does not compile:
+//!
+//! ```compile_fail,E0425
+//! use allowit::prelude::*;
+//! /// A policy that re-enters the wallet does not build on Stellar.
+//! pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+//!     allowit::reentry_transfer(ctx, 1)?;
+//!     Ok(())
+//! }
+//! ```
 #[cfg(feature = "std")]
 extern crate alloc;
 #[cfg(feature = "std")]

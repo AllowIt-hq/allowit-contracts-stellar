@@ -248,6 +248,55 @@ fn deposit_exact_nested_authorization_rejects_extra_debit_short_debit_and_allowa
     }
 }
 
+/// The wallet holds no token allowance for any of `spenders`.
+fn assert_no_allowance(f: &Fixture, spenders: &[&Address], step: &str) {
+    let token = token::Client::new(&f.env, &f.asset);
+    for spender in [
+        &f.recipient,
+        &f.agent,
+        &f.server,
+        &f.owner,
+        &f.asset,
+        &f.wallet,
+    ]
+    .into_iter()
+    .chain(spenders.iter().copied())
+    {
+        assert_eq!(token.allowance(&f.wallet, spender), 0, "{step}");
+    }
+}
+
+/// Custody authorizes one exact transfer per operation and never approves a spender, so no
+/// operation leaves a token allowance: not a transfer, an x402 transfer or a deposit, and not a
+/// deposit into a vault that tries to approve itself.
+#[test]
+fn no_operation_leaves_the_wallet_a_token_allowance() {
+    for wasm in [SIMPLE, COMMON, CUSTOM] {
+        let f = Fixture::new(wasm, false);
+        let honest = vault(&f, 0, None);
+        let approving = vault(&f, 5, None);
+        let vaults = [&honest, &approving];
+        assert_no_allowance(&f, &vaults, "before");
+        f.transfer(10);
+        assert_no_allowance(&f, &vaults, "transfer");
+        // Custom admits transfers only.
+        if wasm != CUSTOM {
+            allow_recipients(&f, &[&honest, &approving, &f.recipient]);
+            assert!(execute(&f, &request(&f, &honest, 50, 50)).is_ok());
+            assert_no_allowance(&f, &vaults, "deposit");
+            assert!(execute(&f, &request(&f, &approving, 50, 50)).is_err());
+            assert_no_allowance(&f, &vaults, "approving vault");
+        }
+        // The x402 hook authorizes the agent's SAC transfer with native signatures.
+        let x402 = Fixture::new(wasm, true);
+        x402.env
+            .set_auths(&[x402.host_entry(x402.execution(10), 10, 1)]);
+        token::Client::new(&x402.env, &x402.asset).transfer(&x402.wallet, &x402.recipient, &10);
+        assert_eq!(x402.client().state().nonce, 1);
+        assert_no_allowance(&x402, &[], "x402 transfer");
+    }
+}
+
 #[test]
 fn deposit_cannot_inherit_transfer_only_custom_source_schema() {
     let f = Fixture::new(CUSTOM, false);

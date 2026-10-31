@@ -403,7 +403,8 @@ impl Fixture {
             ),
         }
     }
-    fn host_entry(
+    /// A native authorization entry of the wallet for the x402 transfer of `execution`.
+    pub(super) fn host_entry(
         &self,
         execution: AllowitExecutionRequest,
         amount: i128,
