@@ -1,17 +1,20 @@
 // Shared types and rules, included once per backend. The including module supplies `Address`,
-// `AllowitEnv`, `Map`, `String`, `Symbol` and `Vec`, and the map primitives `lookup`, `insert`,
-// `count`, `text_len`, `each_value`, `each_item`, `record`, `take_writes` and `merge`. Field
-// types keep those names so Soroban contract specs name native types.
+// `AllowitEnv`, `Map`, `String`, `Symbol` and `Vec`, the type macros `value!`, `error!` and
+// `params!`, and the map primitives `lookup`, `insert`, `count`, `text_len`, `each_value`,
+// `each_item`, `record`, `take_writes` and `merge`. Field types keep those names so Soroban
+// contract specs name native types.
 
 /// UTC day length in seconds.
 pub const DAY: u64 = 86_400;
 
+/// The contract types, named at the crate root.
 pub use types::*;
 
 /// Contract types. Kept apart from `Result` so generated code sees the standard prelude.
 /// `AllowitRule` variants keep the snake-case names of their functions and param keys.
 #[allow(non_camel_case_types)]
 mod types {
+    /// Backend types that the contract types hold.
     use super::{Address, AllowitEnv, AllowitMap, Map, String, Symbol, Vec};
 
     value! {
@@ -31,14 +34,11 @@ mod types {
         }
     }
 
-    value! {
+    params! {
         /// Key => value params: the owner's constructor params in `ctx.params` and the agent's
         /// execution params in `ctx.request.args`. An absent key is unset.
         #[derive(Clone, Debug, Eq, PartialEq)]
-        pub struct AllowitParams(
-            /// The key => value map. Policy reads it only through `get`.
-            pub Map<Symbol, AllowitValue>,
-        );
+        AllowitParams(Map<Symbol, AllowitValue>)
     }
 
     value! {
@@ -173,6 +173,7 @@ pub type Result<T = ()> = core::result::Result<T, AllowitError>;
 
 /// Names used by authored policy.
 pub mod prelude {
+    /// The types that `use allowit::prelude::*` imports.
     pub use super::{
         Address, AllowitContext, AllowitError, AllowitOperation, AllowitRequest, AllowitValue,
         Result,
@@ -202,6 +203,9 @@ pub const EXPIRY: &str = "expiry";
 pub const MAX_PARAMS: u32 = 32;
 /// Most execution params that one request carries.
 pub const MAX_ARGS: u32 = 16;
+/// Most keys in one policy state: the seven standard keys and 32 policy keys. Nothing deletes a
+/// state key, so this bound keeps the wallet's state entry within its ledger entry size.
+pub const MAX_STATE_KEYS: u32 = 7 + 32;
 /// Most values nested in one value, such as the addresses of an allowlist.
 pub const MAX_ITEMS: u32 = 64;
 /// Longest text value, in bytes.
@@ -235,6 +239,7 @@ pub const RULES: [AllowitRule; 8] = [
     AllowitRule::expiry,
 ];
 
+/// Param keys of the canonical rules.
 impl AllowitRule {
     /// The canonical param key that the standard preflight reads for this rule: its own name.
     pub fn key(self) -> &'static str {
@@ -251,6 +256,7 @@ impl AllowitRule {
     }
 }
 
+/// Lookup of params and args by key: the only read that authored policy has.
 impl AllowitParams {
     /// The value of `key`, or `None` when it is unset. A key that no map can hold, such as one
     /// with a space, is unset. Values are owned because Soroban maps decode them on read.
@@ -263,13 +269,16 @@ impl AllowitParams {
 /// One `From` and `TryFrom` pair per scalar type.
 macro_rules! scalars {
     ($($t:ty => $variant:ident($from:expr, $into:expr)),*) => {$(
+        /// Wrap a scalar as its value variant.
         impl From<$t> for AllowitValue {
             /// The value holding this scalar.
             fn from(value: $t) -> Self {
                 AllowitValue::$variant($from(value))
             }
         }
+        /// Read a scalar from its value variant.
         impl TryFrom<AllowitValue> for $t {
+            /// A value of another variant or out of range.
             type Error = AllowitError;
             /// The scalar of a value of this type and range.
             fn try_from(value: AllowitValue) -> Result<$t> {
@@ -307,6 +316,7 @@ pub struct AllowitStandardState {
     pub day_unpriced: bool,
 }
 
+/// Decoding and encoding of the standard keys of a state map.
 impl AllowitStandardState {
     /// Decode the standard keys of `state`. A value of another type is `InvalidState`.
     pub fn read(state: &AllowitMap) -> Result<Self> {
@@ -676,9 +686,10 @@ fn decode(
 /// policy's buffered writes. It clears the write buffer first, even when it fails.
 ///
 /// A `Standard` wallet stores only the standard keys, so any policy write is `Unsupported`: the
-/// host and the chain then store the same state for every tier. A result that later operations
-/// could not decode, or whose totals leave no room for one more call or unit, is `InvalidState`,
-/// so a policy write cannot make every later standard update fail.
+/// host and the chain then store the same state for every tier. A result with more than
+/// `MAX_STATE_KEYS` keys, that later operations could not decode, or whose totals leave no room
+/// for one more call or unit, is `InvalidState`, so a policy write cannot make every later
+/// standard update fail.
 pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap> {
     let writes = take_writes(&ctx.env);
     if tier == AllowitTier::Standard && count(&writes) > 0 {
@@ -696,6 +707,9 @@ pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap
     let mut state = ctx.state.clone();
     s.write(&mut state)?;
     merge(&mut state, writes);
+    if count(&state) > MAX_STATE_KEYS {
+        return Err(AllowitError::InvalidState);
+    }
     // The next standard update adds one call and may add a unit to each total.
     let (s, (day_spent, day_total, _)) = decode(ctx, &state)?;
     if s.calls == u64::MAX || [s.spent, day_spent, day_total].contains(&i128::MAX) {
@@ -704,15 +718,17 @@ pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap
     Ok(state)
 }
 
-/// One policy evaluation, the server's entry point: clear stale writes, run `execute`, then
-/// `post_flight` for the wallet's tier on approval. A denial discards the policy's writes, so no
-/// write outlives it. The result is exactly the state the wallet stores.
+/// One policy evaluation, the server's entry point: clear stale writes, check the request's args
+/// as the wallet does, run `execute`, then `post_flight` for the wallet's tier on approval. Args
+/// that the wallet rejects are `InvalidParam`. A denial discards the policy's writes, so no write
+/// outlives it. The result is exactly the state the wallet stores.
 pub fn evaluate(
     ctx: &AllowitContext,
     execute: impl FnOnce(&AllowitContext) -> Result,
     tier: AllowitTier,
 ) -> Result<AllowitMap> {
     take_writes(&ctx.env);
+    check_args(&ctx.request.args.0)?;
     let run = execute(ctx);
     if run.is_err() {
         take_writes(&ctx.env);

@@ -168,14 +168,19 @@ fn params(env: &Env, universe: &[Address], v: &Vector) -> Map<Symbol, AllowitVal
         ],
     )
 }
-/// The agent's execution params of a vector.
+/// The agent's execution params of a vector, with its filler args.
 fn args(env: &Env, v: &Vector) -> Map<Symbol, AllowitValue> {
-    map(
+    let mut args = map(
         env,
         &[(vectors::INVOICE, v.invoice.then_some(AllowitValue::Int(1)))],
-    )
+    );
+    for i in 0..v.extra_args {
+        let key = Symbol::new(env, &vectors::arg_key(i));
+        args.set(key, AllowitValue::from(i as u64));
+    }
+    args
 }
-/// The current state map of a vector, with the catching policy's key when set.
+/// The current state map of a vector, with the catching policy's key when set and its filler keys.
 fn state_map(env: &Env, v: &Vector) -> Map<Symbol, AllowitValue> {
     let mut state = Map::new(env);
     let s = AllowitStandardState {
@@ -190,6 +195,10 @@ fn state_map(env: &Env, v: &Vector) -> Map<Symbol, AllowitValue> {
     s.write(&mut state).unwrap();
     if let Some(over) = v.over {
         state.set(Symbol::new(env, vectors::OVER), over.into());
+    }
+    for i in 0..v.extra_state {
+        let key = Symbol::new(env, &vectors::state_key(i));
+        state.set(key, AllowitValue::from(i as u64));
     }
     state
 }
@@ -305,7 +314,8 @@ fn sample_prefix() -> List<AllowitRule> {
 }
 
 /// Whether the kernel and owner configuration can produce the vector: a transfer of the installed
-/// asset whose expense bounds, when priced, attest principal plus gas.
+/// asset whose expense bounds, when priced, attest principal plus gas, with args that the kernel
+/// admits. The kernel rejects more args with `InvalidInvocation` before any policy runs.
 fn realizable(v: &Vector) -> bool {
     let cost = if v.priced {
         v.gas_units >= 0 && v.spent_units == v.amount + v.gas_units
@@ -313,6 +323,7 @@ fn realizable(v: &Vector) -> bool {
         v.spent_units == 0 && v.gas_units == 0
     };
     !v.deposit
+        && v.extra_args + usize::from(v.invoice) <= vectors::MAX_ARGS
         && v.asset == vectors::ASSET
         && v.amount > 0
         && v.expires_at > v.now
@@ -467,6 +478,11 @@ impl Wallet {
 
 #[test]
 fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
+    assert_eq!(vectors::MAX_ARGS, allowit::MAX_ARGS as usize);
+    assert_eq!(
+        vectors::MAX_POLICY_KEYS + 7,
+        allowit::MAX_STATE_KEYS as usize
+    );
     let all = vectors::vectors();
     let host = host_lines();
     assert_eq!(host.len(), all.len());
@@ -547,7 +563,7 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
             }
         }
     }
-    assert_eq!(realized, 37);
+    assert_eq!(realized, 40);
     // The deployed catching Wasm let these continue after a caught rule error and wrote its key.
     for name in ["over_day_spent_cap", "over_day_spent_cap_counted_once"] {
         assert!(caught.contains(&name), "{name} {caught:?}");

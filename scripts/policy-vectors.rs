@@ -19,6 +19,19 @@ pub const OVER: &str = "over_day_cap";
 pub const INVOICE_CAP: &str = "invoice_cap";
 /// Execution param key that makes the catching policy apply its invoice cap.
 pub const INVOICE: &str = "invoice";
+/// `allowit::MAX_ARGS`: most execution params of one request.
+pub const MAX_ARGS: usize = 16;
+/// `allowit::MAX_STATE_KEYS` minus the seven standard keys: most policy keys in one state.
+pub const MAX_POLICY_KEYS: usize = 32;
+
+/// Key of the `i`th filler execution param.
+pub fn arg_key(i: usize) -> String {
+    format!("arg_{i}")
+}
+/// Key of the `i`th filler policy state key.
+pub fn state_key(i: usize) -> String {
+    format!("key_{i}")
+}
 
 /// One rule input: params, current state before the operation, and request with its args.
 /// A `None` param is absent.
@@ -54,6 +67,10 @@ pub struct Vector {
     pub priced: bool,
     /// The agent's args carry the `invoice` execution param.
     pub invoice: bool,
+    /// Filler execution params `arg_<i>` = `Int(i)` beside `invoice`.
+    pub extra_args: usize,
+    /// Filler policy state keys `key_<i>` = `Int(i)` in the current state.
+    pub extra_state: usize,
 }
 
 /// A vector that passes every rule with headroom left. After it, spent and day_spent are 45 and
@@ -85,6 +102,8 @@ pub fn base() -> Vector {
         gas_units: 0,
         priced: true,
         invoice: false,
+        extra_args: 0,
+        extra_state: 0,
     }
 }
 
@@ -208,6 +227,19 @@ pub fn vectors() -> Vec<Vector> {
             v.invoice_cap = Some(39);
         }),
         edit("invoice_without_cap", |v| v.invoice = true),
+        // Args at their bound pass; one more denies in `evaluate` as in the wallet kernel.
+        edit("args_at_bound", |v| v.extra_args = MAX_ARGS),
+        edit("args_over_bound", |v| v.extra_args = MAX_ARGS + 1),
+        // The catching policy writes one new key: up to the state key bound it is stored, past
+        // it every backend denies with `InvalidState`.
+        edit("state_keys_at_bound", |v| {
+            v.caps[2] = Some(44);
+            v.extra_state = MAX_POLICY_KEYS - 1;
+        }),
+        edit("state_keys_over_bound", |v| {
+            v.caps[2] = Some(44);
+            v.extra_state = MAX_POLICY_KEYS;
+        }),
     ]
 }
 

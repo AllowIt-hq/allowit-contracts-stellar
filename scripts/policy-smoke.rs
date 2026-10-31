@@ -30,7 +30,16 @@ fn params(entries: Vec<(&str, Option<AllowitValue>)>) -> AllowitParams {
     let present = entries
         .into_iter()
         .filter_map(|(k, v)| Some((k.to_string(), v?)));
-    AllowitParams(present.collect())
+    AllowitParams::from(present.collect::<AllowitMap>())
+}
+/// Set or, with `None`, unset `key` in params or args, as the server rebuilds them.
+fn put(params: &mut AllowitParams, key: &str, value: Option<AllowitValue>) {
+    let mut map = AllowitMap::from(params.clone());
+    match value {
+        Some(value) => map.insert(key.to_string(), value),
+        None => map.remove(key),
+    };
+    *params = map.into();
 }
 /// A `List` of `Addr` values.
 fn list(items: Vec<Address>) -> AllowitValue {
@@ -113,16 +122,14 @@ fn approval_branch_policy_caps_deposits() {
 #[test]
 fn approval_denies_absent_params() {
     let mut c = context();
-    c.params.0.remove(allowit::TOKENS);
+    put(&mut c.params, allowit::TOKENS, None);
     assert_eq!(policy::execute(&c), Err(AllowitError::MissingParam));
     assert_eq!(allowit::preflight(&c, AllowitRule::tokens), Ok(()));
 }
 #[test]
 fn approval_continues_after_a_caught_rule_error_and_post_flight_applies_its_writes() {
     let mut c = context();
-    c.params
-        .0
-        .insert(allowit::DAY_SPENT_CAP.to_string(), AllowitValue::Int(19));
+    put(&mut c.params, allowit::DAY_SPENT_CAP, int(19));
     let next = allowit::evaluate(&c, catching::execute, AllowitTier::Custom).unwrap();
     let mut after = c.clone();
     after.state = next;
@@ -148,14 +155,9 @@ fn approval_continues_after_a_caught_rule_error_and_post_flight_applies_its_writ
 fn approval_reads_execution_params_and_custom_params() {
     let mut c = context();
     // The agent names an invoice; the owner's custom cap then bounds the payment.
-    c.request
-        .args
-        .0
-        .insert(vectors::INVOICE.to_string(), AllowitValue::Int(7));
+    put(&mut c.request.args, vectors::INVOICE, int(7));
     assert_eq!(catching::execute(&c), Err(AllowitError::MissingParam));
-    c.params
-        .0
-        .insert(vectors::INVOICE_CAP.to_string(), AllowitValue::Int(9));
+    put(&mut c.params, vectors::INVOICE_CAP, int(9));
     assert_eq!(
         catching::execute(&c),
         Err(AllowitError::TransactionCapExceeded)
@@ -164,7 +166,7 @@ fn approval_reads_execution_params_and_custom_params() {
         allowit::param(&c, vectors::INVOICE_CAP),
         Ok(AllowitValue::Int(9))
     );
-    c.request.args.0.clear();
+    put(&mut c.request.args, vectors::INVOICE, None);
     assert_eq!(catching::execute(&c), Ok(()));
 }
 /// Records a write, then denies.
@@ -197,6 +199,22 @@ fn approval_evaluate_keeps_no_write_of_a_denied_run_on_a_reused_env() {
     assert_eq!(allowit::evaluate(&c, policy::execute, custom), Ok(next));
 }
 #[test]
+fn limits_empty_keys_are_invalid_param_as_onchain() {
+    // A Soroban `Symbol` may be empty; no backend admits it as a params or args key.
+    let mut empty = AllowitMap::new();
+    empty.insert(String::new(), AllowitValue::Int(1));
+    let invalid = Err(AllowitError::InvalidParam);
+    assert_eq!(allowit::check_params(&empty, AllowitTier::Custom), invalid);
+    assert_eq!(allowit::check_args(&empty), invalid);
+    let mut c = context();
+    c.request.args = empty.into();
+    let custom = AllowitTier::Custom;
+    assert_eq!(
+        allowit::evaluate(&c, policy::execute, custom),
+        Err(AllowitError::InvalidParam)
+    );
+}
+#[test]
 fn limits_boundary_denial_and_accounting() {
     let mut c = context();
     c.request.amount = 11;
@@ -217,9 +235,10 @@ fn limits_boundary_denial_and_accounting() {
     edit(&mut c, |s| s.calls = 2);
     assert_eq!(policy::execute(&c), Err(AllowitError::CallCapExceeded));
     let mut c = context();
-    c.params.0.insert(
-        allowit::TRANSACTION_CAP.to_string(),
-        AllowitValue::Bool(true),
+    put(
+        &mut c.params,
+        allowit::TRANSACTION_CAP,
+        Some(AllowitValue::Bool(true)),
     );
     assert_eq!(policy::execute(&c), Err(AllowitError::InvalidParam));
 }
@@ -295,7 +314,20 @@ fn host_context(v: &Vector) -> AllowitContext {
     if let Some(over) = v.over {
         state.insert(vectors::OVER.to_string(), over.into());
     }
-    let invoice = v.invoice.then(|| AllowitValue::Int(1));
+    for i in 0..v.extra_state {
+        state.insert(vectors::state_key(i), AllowitValue::from(i as u64));
+    }
+    let mut args = params(vec![(
+        vectors::INVOICE,
+        v.invoice.then(|| AllowitValue::Int(1)),
+    )]);
+    for i in 0..v.extra_args {
+        put(
+            &mut args,
+            &vectors::arg_key(i),
+            Some(AllowitValue::from(i as u64)),
+        );
+    }
     AllowitContext {
         env,
         params: params(vec![
@@ -324,7 +356,7 @@ fn host_context(v: &Vector) -> AllowitContext {
             spent_units: v.spent_units,
             gas_units: v.gas_units,
             unpriced: !v.priced,
-            args: params(vec![(vectors::INVOICE, invoice)]),
+            args,
         },
     }
 }
@@ -399,4 +431,12 @@ fn vectors_print_host_outcomes() {
     assert_eq!(base.preflight, vec![Ok(()); 8]);
     assert_eq!(base.next, Ok("1/45/false/2/45/43/false/-".to_string()));
     assert_eq!(base.catching_standard, base.next);
+    let named = |name: &str| host_outcome(all.iter().find(|v| v.name == name).unwrap());
+    let (invalid_param, invalid_state) = (AllowitError::InvalidParam, AllowitError::InvalidState);
+    assert!(named("args_at_bound").next.is_ok());
+    assert_eq!(named("args_over_bound").next, Err(invalid_param as u32));
+    assert!(named("state_keys_at_bound").catching_next.is_ok());
+    let over = named("state_keys_over_bound");
+    assert_eq!(over.catching_next, Err(invalid_state as u32));
+    assert!(over.next.is_ok());
 }

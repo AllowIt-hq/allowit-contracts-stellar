@@ -570,6 +570,76 @@ fn custom_params_args_and_state_values_stay_within_their_bounds() {
     });
 }
 
+#[test]
+fn empty_keys_in_params_and_args_are_invalid_param_as_on_the_host() {
+    let env = Env::default();
+    let id = env.register(Scope, ());
+    let mut ctx = fixture(&env);
+    // A `Symbol` may be empty; the host's text keys reject it, so the chain rejects it too.
+    let empty = Map::from_array(&env, [(Symbol::new(&env, ""), AllowitValue::Int(1))]);
+    let invalid = Err(AllowitError::InvalidParam);
+    assert_eq!(check_params(&empty, AllowitTier::Custom), invalid);
+    assert_eq!(check_params(&empty, AllowitTier::Standard), invalid);
+    assert_eq!(check_args(&empty), invalid);
+    ctx.request.args = AllowitParams(empty);
+    env.as_contract(&id, || {
+        let run = evaluate(&ctx, |_| Ok(()), AllowitTier::Custom);
+        assert_eq!(run, Err(AllowitError::InvalidParam));
+    });
+}
+
+#[test]
+fn evaluate_checks_args_as_the_wallet_does_before_the_policy_runs() {
+    let env = Env::default();
+    let id = env.register(Scope, ());
+    let mut ctx = fixture(&env);
+    for i in 0..=MAX_ARGS {
+        let key = Symbol::new(&env, &std::format!("arg_{i}"));
+        ctx.request.args.0.set(key, AllowitValue::Bool(true));
+    }
+    env.as_contract(&id, || {
+        // The server cannot approve a request that the wallet kernel rejects.
+        let run = evaluate(&ctx, writer, AllowitTier::Custom);
+        assert_eq!(run, Err(AllowitError::InvalidParam));
+        assert_eq!(
+            read::<u64>(&post_flight(&ctx, AllowitTier::Custom).unwrap(), "seen"),
+            Ok(None)
+        );
+        ctx.request.args.0.remove(Symbol::new(&env, "arg_0"));
+        assert!(evaluate(&ctx, writer, AllowitTier::Custom).is_ok());
+    });
+}
+
+#[test]
+fn post_flight_bounds_the_number_of_state_keys() {
+    let env = Env::default();
+    let id = env.register(Scope, ());
+    let mut ctx = fixture(&env);
+    let custom = |c: &AllowitContext| post_flight(c, AllowitTier::Custom);
+    // The fixture state holds the seven standard keys; fill the policy keys up to one short.
+    for i in 0..MAX_STATE_KEYS - 8 {
+        let key = Symbol::new(&env, &std::format!("key_{i}"));
+        ctx.state.set(key, AllowitValue::Int(i.into()));
+    }
+    env.as_contract(&id, || {
+        // Replacing a key keeps the count; one new key reaches the bound; two pass it.
+        set_state(&ctx, "key_0", 9u64).unwrap();
+        set_state(&ctx, "last", 1u64).unwrap();
+        let full = custom(&ctx).unwrap();
+        assert_eq!(full.len(), MAX_STATE_KEYS);
+        set_state(&ctx, "last", 1u64).unwrap();
+        set_state(&ctx, "extra", 1u64).unwrap();
+        assert_eq!(custom(&ctx), Err(AllowitError::InvalidState));
+        // At the bound, operations that write no new key still pass.
+        let mut at = ctx.clone();
+        at.state = full;
+        set_state(&at, "last", 2u64).unwrap();
+        assert!(custom(&at).is_ok());
+        set_state(&at, "next", 1u64).unwrap();
+        assert_eq!(custom(&at), Err(AllowitError::InvalidState));
+    });
+}
+
 /// Catches a spending cap error, reads it and continues; propagates the daily cap error.
 fn catching(ctx: &AllowitContext) -> Result {
     if let Err(error) = spent_cap(ctx, ctx.params.get(SPENT_CAP)) {

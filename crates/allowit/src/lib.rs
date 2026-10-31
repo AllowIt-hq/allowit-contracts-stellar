@@ -29,11 +29,12 @@
 //!
 //! After approval, the wallet and the server run the same `post_flight`: it rolls the UTC day
 //! over, counts the call, adds spent and gross amounts, marks unpriced operations, then applies
-//! the policy's own `set_state` writes, and denies a result whose standard keys do not decode.
-//! Simple and Common run only the canonical prefix onchain and store only standard keys, so their
-//! `post_flight` denies any policy write with `Unsupported`, on the host as onchain. The server
-//! runs a policy through `evaluate`, which also discards the writes of a denied run. The standard
-//! contract runs the leading canonical calls, supplied by the owner as `rules`, through
+//! the policy's own `set_state` writes, and denies a result whose standard keys do not decode or
+//! that holds more than `MAX_STATE_KEYS` keys. Simple and Common run only the canonical prefix
+//! onchain and store only standard keys, so their `post_flight` denies any policy write with
+//! `Unsupported`, on the host as onchain. The server runs a policy through `evaluate`, which first
+//! checks the request's args as the wallet does and discards the writes of a denied run. The
+//! standard contract runs the leading canonical calls, supplied by the owner as `rules`, through
 //! `preflight`, which skips absent params.
 //!
 //! Portable authored code uses rule calls, `param`, `get_state` and `set_state`, typed scalar
@@ -109,6 +110,18 @@ pub mod soroban {
             $item
         };
     }
+    /// Make `AllowitParams` a Soroban contract type with a public map, which the wallet builds
+    /// from stored params and request args.
+    macro_rules! params {
+        ($(#[$meta:meta])* $name:ident($($map:tt)*)) => {
+            #[soroban_sdk::contracttype]
+            $(#[$meta])*
+            pub struct $name(
+                /// The key => value map.
+                pub $($map)*,
+            );
+        };
+    }
     include!("core.rs");
 
     /// Temporary-storage key of the running operation's policy writes. `post_flight` removes it,
@@ -142,11 +155,17 @@ pub mod soroban {
         text.len()
     }
 
-    /// Run `check` on each value of `map`. A value that does not decode is `InvalidParam`;
-    /// every `Symbol` key is valid.
+    /// Run `check` on each value of `map`. An empty key or a value that does not decode is
+    /// `InvalidParam`. A `Symbol` already holds at most 32 ASCII letters, digits or underscores,
+    /// so an empty key is the only one that the host rejects and a `Symbol` admits.
     fn each_value(map: &AllowitMap, mut check: impl FnMut(AllowitValue) -> Result) -> Result {
+        let empty = Symbol::new(map.env(), "");
         for entry in map.try_iter() {
-            check(entry.map_err(|_| AllowitError::InvalidParam)?.1)?;
+            let (key, value) = entry.map_err(|_| AllowitError::InvalidParam)?;
+            if key == empty {
+                return Err(AllowitError::InvalidParam);
+            }
+            check(value)?;
         }
         Ok(())
     }
@@ -255,7 +274,34 @@ pub mod host {
             $item
         };
     }
+    /// Keep the map of `AllowitParams` private to this crate, so the std-only compile of
+    /// authored policy rejects any read other than `get`. The server converts with `From`.
+    macro_rules! params {
+        ($(#[$meta:meta])* $name:ident($($map:tt)*)) => {
+            $(#[$meta])*
+            pub struct $name(
+                /// The key => value map.
+                pub(crate) $($map)*,
+            );
+        };
+    }
     include!("core.rs");
+
+    /// The server builds params and args from a key => value map.
+    impl From<AllowitMap> for AllowitParams {
+        /// Params holding `map`.
+        fn from(map: AllowitMap) -> Self {
+            Self(map)
+        }
+    }
+
+    /// The server reads back the key => value map of params or args.
+    impl From<AllowitParams> for AllowitMap {
+        /// The map of `params`.
+        fn from(params: AllowitParams) -> Self {
+            params.0
+        }
+    }
 
     /// The value of `key` in `map`, or `None` when it is absent or no map can hold the key.
     fn lookup(map: &AllowitMap, key: &str) -> Option<AllowitValue> {
