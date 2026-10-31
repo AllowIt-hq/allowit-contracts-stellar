@@ -1,0 +1,3 @@
+# Stellar public account IDs (G-addresses) of the classic multisig signers in a test fixture, not secrets.
+stellar/core/tests/fixtures/canonical-main-9682-native-signed.json:generic-api-key:741
+stellar/core/tests/fixtures/canonical-main-9682-native-signed.json:generic-api-key:745

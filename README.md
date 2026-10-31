@@ -13,7 +13,7 @@
 
 </div>
 
-**Go on. On your terms.** Allowit lets your AI agents spend and invest, within a policy you set. This repository holds the Soroban smart contracts that enforce that policy on Stellar: owner-controlled wallets that move funds only when the agent and an independent server both sign, and only when the owner's policy says yes.
+**Go on. On your terms.** Allowit lets your AI agents spend and invest, within a policy you set. This repository holds the Soroban smart contracts that enforce that policy on Stellar: owner-controlled wallets that move funds only when the agent and an independent server both sign, and only when the owner's policy says yes. It also holds `stellar/core`, the off-chain Rust rail crate (`allowit-stellar-wallet`) that the SDK engine composes to prepare, authorize and settle transfers through those wallets.
 
 ## Overview
 
@@ -187,6 +187,7 @@ crates/
   engine/                 Standalone shared rule engine contract
   engine-parent/          Upgrade parent for the shared engine
   test-vault/             SEP-56 vault for deposit tests
+stellar/core/             Stellar rail core (allowit-stellar-wallet) that the SDK engine composes; its own Cargo workspace
 scripts/                  Build, policy checks, smoke vectors, administration and release tooling
 docs/                     Architecture, engine parent, administration, mainnet
 ```
@@ -207,7 +208,7 @@ docs/                     Architecture, engine parent, administration, mainnet
 
 ## Contributing
 
-Pull requests run the portable policy checks and the chain-free policy smoke tests. The full Wasm build and `cargo test --workspace --locked` run on a schedule and on demand. Before you open a pull request:
+Pull requests run the portable policy checks and the chain-free policy smoke tests. A pull request that changes `stellar/core` also runs its format, test and clippy checks. The full Wasm build and `cargo test --workspace --locked` run on a schedule and on demand. Before you open a pull request:
 
 ```sh
 python3 scripts/check-policy-bindings.py
@@ -216,8 +217,16 @@ scripts/build-contracts.sh
 cargo test --workspace --locked
 ```
 
-Keep contract code, build and API documentation and release inputs here. [AGENTS.md](AGENTS.md) describes the repository scope.
+`stellar/core` is a separate Cargo workspace. Check it with `--manifest-path`:
+
+```sh
+cargo fmt --manifest-path stellar/core/Cargo.toml --check
+cargo test --locked --manifest-path stellar/core/Cargo.toml
+cargo clippy --locked --manifest-path stellar/core/Cargo.toml --all-targets -- -D warnings
+```
+
+Keep contract code, the `stellar/core` rail crate, build and API documentation and release inputs here. [AGENTS.md](AGENTS.md) describes the repository scope.
 
 ## License
 
-The source is public, but every crate declares `license = "UNLICENSED"` and the repository has no license file, so no open-source license is granted.
+The source is public, but every contract crate declares `license = "UNLICENSED"` and the repository has no license file, so no open-source license is granted for the contracts. `stellar/core` keeps the `license = "MIT"` declaration it had in the Allowit SDK.
