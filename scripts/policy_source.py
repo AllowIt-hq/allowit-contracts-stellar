@@ -357,7 +357,10 @@ def allowlisted(code):
         if name in STRUCT_FIELDS and after == ":" and tokens[i + 2:i + 3] != [":"]:
             i += 1  # A field of a server request struct expression.
             continue
-        if name[0].isupper():
+        # Every local function, also one whose capitalized name shadows a type such as `String`.
+        if name in local_fns and after != "(" and before != "fn":
+            reject("the function `{}` as a value, whose address differs between the backends".format(name))
+        elif name[0].isupper():
             if name not in TYPES and name not in defined:
                 reject("the name `{}`, which is not on the portable allowlist".format(name))
             if name in CONSTRUCTORS and after != "(":
@@ -368,8 +371,6 @@ def allowlisted(code):
             reject("the prelude function `{}`, which can observe a pointer width or layout".format(name))
         elif name not in local_names and name not in PRIMITIVES:
             reject("the name `{}`, which the file does not declare".format(name))
-        elif name in local_fns and after != "(" and before != "fn":
-            reject("the function `{}` as a value, whose address differs between the backends".format(name))
         i += 1
 
 

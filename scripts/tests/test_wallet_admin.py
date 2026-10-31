@@ -971,6 +971,24 @@ class ContractAdmin(unittest.TestCase):
                     policy.write_text(text.replace("#[allow(", "#[{}(".format(attribute)))
                     ca.host_compile(policy)
 
+    def test_policy_source_rejects_capitalized_local_function_values(self):
+        # Review probe: local functions named for types escape a lowercase-only guard, and the
+        # generic `min` avoids the pointer comparison lint, so the host stored probe=1 and release
+        # Wasm probe=2.
+        probe = ("fn String() -> u8 { 1 }\nfn Address() -> u8 { 2 }\n"
+                 + source("    let a = if ctx.request.now > 0u64 { String } else { Address };\n"
+                          "    let b = if ctx.request.now > 0u64 { Address } else { String };\n"
+                          "    let selected = core::cmp::min(a, b);\n"
+                          "    allowit::set_state(ctx, \"probe\", u64::from(selected()))?;\n",
+                          HEAD + CALL("recipients")))
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(probe)
+            # It passes the std-only compile, so only the gate rejects it.
+            ca.host_compile(policy)
+        with self.assertRaisesRegex(ValueError, "the function `String` as a value"):
+            ca.checked_code(probe)
+
     def test_policy_source_reads_params_and_args_only_through_their_context_fields(self):
         head = HEAD + CALL("recipients")
         # Review probes: a list bound to `args` or `params` takes a pointer-width index, so the
