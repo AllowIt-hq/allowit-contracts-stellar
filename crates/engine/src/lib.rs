@@ -1,325 +1,139 @@
 #![no_std]
-//! Shared engine ABI. Every rule delegates to the same canonical library used by bundled policy code.
-use allowit_wallet_protocol::{EngineError, EngineRequest, EngineResult, EngineState};
-use soroban_sdk::{Address, Env, String, Vec, contract, contractimpl};
+//! Shared stateless checker. Each method runs the canonical rule on its canonical param.
+//! It holds no custody, params or accounting. No policy wallet or tool here calls it.
+//! `AllowitContext` carries the contract `Env`, so it is not a contract value. Each method takes
+//! the other context fields and builds the context with its own `Env`.
+use allowit::{AllowitContext, AllowitError, AllowitParams, AllowitRequest, AllowitValue};
+use soroban_sdk::{Address, Env, Map, String, Symbol, contract, contractimpl, panic_with_error};
 #[contract]
-pub struct Engine;
-/// First explicitly numbered engine executable release, independent of parent administration.
-const ENGINE_VERSION: u32 = 1;
+pub struct AllowitEngine;
+/// Engine executable release, independent of parent administration. Version 3 takes the context
+/// fields `params` (the owner's key => value params), `state` (the free-form current policy state)
+/// and `request` as separate arguments, because the context carries the contract `Env`. It
+/// replaces the release 1 ABI, `(request: EngineRequest, state: EngineState)`; release 2 was never
+/// released.
+const ENGINE_VERSION: u32 = 3;
+/// Contract error code of the test fixture veto. It is outside `allowit::AllowitError`.
+pub const TEST_DENY: u32 = 1000;
+/// Test fixture veto: every rule aborts with `TEST_DENY`. Used only to prove reference upgrades
+/// change behavior.
+fn vetoed(env: &Env) {
+    if cfg!(feature = "test-deny") {
+        panic_with_error!(env, soroban_sdk::Error::from_contract_error(TEST_DENY));
+    }
+}
+/// Rule input with this contract's `Env`, after the test fixture veto.
+fn context(
+    env: Env,
+    params: Map<Symbol, AllowitValue>,
+    state: Map<Symbol, AllowitValue>,
+    request: AllowitRequest,
+) -> AllowitContext {
+    vetoed(&env);
+    AllowitContext {
+        env,
+        params: AllowitParams(params),
+        state,
+        request,
+    }
+}
 #[contractimpl]
-impl Engine {
-    /// Read the engine executable release without changing policy data or requiring authorization.
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// # Returns
-    /// Returns ENGINE_VERSION; this value adds no execution ordering fence.
+impl AllowitEngine {
+    /// Read the engine executable release without changing data or requiring authorization.
     pub fn engine_version(env: Env) -> u32 {
         let _ = env;
         ENGINE_VERSION
     }
-    /// Run the explicitly selected daily_cap rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Grant daily_limit; spent day/daily/daily_operation. UTC rollover and operation deduplication follow the canonical rule.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::daily_cap] for required types, missing values, errors and usage updates.
-    pub fn daily_cap(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::daily_cap(env, request, state)
-    }
-    /// Run the explicitly selected transaction_cap rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Grant per_transfer in native units. No usage fields change.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::transaction_cap] for required types, missing values, errors and usage updates.
+    /// Run `allowit::transaction_cap(&ctx, ctx.params.get(allowit::TRANSACTION_CAP))`; returns the headroom left for this operation.
     pub fn transaction_cap(
         env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::transaction_cap(env, request, state)
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<i128, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::transaction_cap(&ctx, ctx.params.get(allowit::TRANSACTION_CAP))
     }
-    /// Run the explicitly selected total_cap rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Grant total_limit; spent total/total_operation. The same operation is charged once.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::total_cap] for required types, missing values, errors and usage updates.
-    pub fn total_cap(
+    /// Run `allowit::spent_cap(&ctx, ctx.params.get(allowit::SPENT_CAP))`; returns the cumulative expense headroom.
+    pub fn spent_cap(
         env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::total_cap(env, request, state)
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<i128, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::spent_cap(&ctx, ctx.params.get(allowit::SPENT_CAP))
     }
-    /// Run the explicitly selected call_cap rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Grant max_calls U64; spent calls/call_operation. Repeated checks charge the same operation once.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::call_cap] for required types, missing values, errors and usage updates.
+    /// Run `allowit::day_spent_cap(&ctx, ctx.params.get(allowit::DAY_SPENT_CAP))`; returns the UTC-day expense headroom.
+    pub fn day_spent_cap(
+        env: Env,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<i128, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::day_spent_cap(&ctx, ctx.params.get(allowit::DAY_SPENT_CAP))
+    }
+    /// Run `allowit::day_total_cap(&ctx, ctx.params.get(allowit::DAY_TOTAL_CAP))`; returns the UTC-day gross headroom.
+    pub fn day_total_cap(
+        env: Env,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<i128, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::day_total_cap(&ctx, ctx.params.get(allowit::DAY_TOTAL_CAP))
+    }
+    /// Run `allowit::call_cap(&ctx, ctx.params.get(allowit::CALL_CAP))`; returns the operations left.
     pub fn call_cap(
         env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::call_cap(env, request, state)
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<u64, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::call_cap(&ctx, ctx.params.get(allowit::CALL_CAP))
     }
-    /// Run the explicitly selected recipient rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Grant recipients Vec<Address>; no usage fields change.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::recipient] for required types, missing values, errors and usage updates.
-    pub fn recipient(
+    /// Run `allowit::recipients(&ctx, ctx.params.get(allowit::RECIPIENTS))`; returns the matched recipient.
+    pub fn recipients(
         env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::recipient(env, request, state)
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<Address, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::recipients(&ctx, ctx.params.get(allowit::RECIPIENTS))
     }
-    /// Run the explicitly selected expiry rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Grant expires_at U64 ledger seconds; no usage fields change.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::expiry] for required types, missing values, errors and usage updates.
+    /// Run `allowit::tokens(&ctx, ctx.params.get(allowit::TOKENS))`; returns the matched asset.
+    pub fn tokens(
+        env: Env,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<Address, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::tokens(&ctx, ctx.params.get(allowit::TOKENS))
+    }
+    /// Run `allowit::expiry(&ctx, ctx.params.get(allowit::EXPIRY))`; returns the seconds left.
     pub fn expiry(
         env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::expiry(env, request, state)
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<u64, AllowitError> {
+        let ctx = context(env, params, state, request);
+        allowit::expiry(&ctx, ctx.params.get(allowit::EXPIRY))
     }
-    /// Run the explicitly selected token rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Grant token String; compares the authenticated label and seven-decimal profile. No usage fields change.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::token] for required types, missing values, errors and usage updates.
-    pub fn token(
+    /// Run `allowit::operations(&ctx, ctx.params.get(allowit::OPERATIONS))`; returns the request's op name.
+    pub fn operations(
         env: Env,
-        request: EngineRequest,
-        state: EngineState,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::token(env, request, state)
-    }
-    /// Run the explicitly selected cap_per_transaction rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: No Grant keys or usage counters are read; the explicit source limit is used.
-    /// - `limit`: Positive cap in native i128 asset base units.
-    /// - `token`: Expected authenticated SAC label.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::cap_per_transaction] for required types, missing values, errors and usage updates.
-    pub fn cap_per_transaction(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        limit: i128,
-        token: String,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::cap_per_transaction(env, request, state, limit, token)
-    }
-    /// Run the explicitly selected cap_per_day rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: Explicit cap; spent day/daily/daily_operation, shared with daily_cap. See the canonical UTC/deduplication contract.
-    /// - `limit`: Positive cap in native i128 asset base units.
-    /// - `token`: Expected authenticated SAC label.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::cap_per_day] for required types, missing values, errors and usage updates.
-    pub fn cap_per_day(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        limit: i128,
-        token: String,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::cap_per_day(env, request, state, limit, token)
-    }
-    /// Run the explicitly selected recipient_is rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: No Grant keys or usage fields are read or changed.
-    /// - `expected`: Exact expected native address or authenticated label.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::recipient_is] for required types, missing values, errors and usage updates.
-    pub fn recipient_is(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        expected: Address,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::recipient_is(env, request, state, expected)
-    }
-    /// Run the explicitly selected asset_label rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: No Grant keys or usage fields change; compares authenticated label and decimals.
-    /// - `expected`: Exact expected native address or authenticated label.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::asset_label] for required types, missing values, errors and usage updates.
-    pub fn asset_label(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        expected: String,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::asset_label(env, request, state, expected)
-    }
-    /// Run the explicitly selected actions rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: No Grant keys or usage fields change; this profile admits stellar::sep41_transfer only.
-    /// - `allowed`: Explicitly permitted action identifiers.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::actions] for required types, missing values, errors and usage updates.
-    pub fn actions(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        allowed: Vec<String>,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::actions(env, request, state, allowed)
-    }
-    /// Run the explicitly selected amount_at_most rule.
-    ///
-    /// # Parameters
-    /// - `env`: Host-provided environment, omitted from serialized arguments.
-    /// - `request`: Exact custody-authenticated proposal and operation identity.
-    /// - `state`: No Grant keys or usage fields change. A valid exceeded bound is false; invalid token/parameters are errors.
-    /// - `limit`: Nonnegative bound in native i128 asset base units.
-    /// - `token`: Expected authenticated SAC label.
-    ///
-    /// # Returns
-    /// Returns data only. See [allowit_policy_rules::amount_at_most] for required types, missing values, errors and usage updates.
-    pub fn amount_at_most(
-        env: Env,
-        request: EngineRequest,
-        state: EngineState,
-        limit: i128,
-        token: String,
-    ) -> core::result::Result<EngineResult, EngineError> {
-        if cfg!(feature = "test-deny") {
-            return Ok(EngineResult {
-                approval: false,
-                spent: state.spent,
-            });
-        }
-        allowit_policy_rules::amount_at_most(env, request, state, limit, token)
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<String, AllowitError> {
+        let ctx = context(env.clone(), params, state, request);
+        let op = allowit::operations(&ctx, ctx.params.get(allowit::OPERATIONS))?;
+        Ok(String::from_str(&env, op))
     }
 }
 #[cfg(test)]

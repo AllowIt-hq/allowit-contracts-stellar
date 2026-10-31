@@ -10,8 +10,9 @@ crate-type = ["rlib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 allowit-wallet-protocol = { path = "../protocol" }
-allowit-policy-rules = { path = "../rules" }
+allowit = { path = "../allowit" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 ed25519-dalek = "=2.2.0"
+allowit-sep56-test-vault = { path = "../test-vault" }

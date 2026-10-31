@@ -2,11 +2,11 @@
 
 `mainnet_release.py` prepares bounded, unsigned Stellar release packets. It never signs or broadcasts. Keep plans, authorization requests and packets in a private directory. Do not place keys or seeds in them. Python and CLI versions follow [administration](admin.md).
 
-The tool pins contract source `b5a5d4b13e9162dc9034df85442ea2251f65a845`, compiler source `9e57f935807da615bc1258f6b4b72fc40be64386`, every build input and the exact engine, parent and CommonPolicyEngine Wasm hashes. The smoke wallet explicitly selects recipient, transaction, daily, total, call and expiry rules. Its source digest identifies the literal six-rule policy in the tool. The separate parent manages a shared checker; it has no custody authority over this wallet.
+The tool pins one reviewed contract source revision, every build input and the exact engine, parent and `AllowitCommonPolicyEngine` Wasm hashes. The previous pins (`b5a5d4b13e9162dc9034df85442ea2251f65a845`) store custody layout 1, so the tool rejects every plan until a reviewed release of layout 4 is pinned. The smoke wallet selects the `recipients`, `transaction_cap`, `day_total_cap`, `spent_cap`, `call_cap` and `expiry` prefix, with the same-named canonical params. The wallet `source_digest` is the standard prefix digest derived from the wallet artifact hash. The plan's `policy_source_digest` identifies the literal six-call source in the tool; executions carry it as `source_hash`. Each execution signs conservative XLM expense ceilings: the full execute fee cap is gas, and spent units are payment plus gas. The separate parent manages a shared checker; it has no custody authority over this wallet.
 
 ## Plan and accounts
 
-Build the pinned contracts with `scripts/build-contracts.sh`. Write the manifest with `python scripts/artifacts.py --output /PRIVATE/manifest.json`. A later tooling revision is admitted only when every contract build input still matches the pinned source. Copy [the plan template](../scripts/mainnet-plan.example.json), replace its placeholders and select a future grant expiry. Artifact paths can be absolute or relative to the plan.
+Build the pinned contracts with `scripts/build-contracts.sh`. Write the manifest with `python scripts/artifacts.py --output /PRIVATE/manifest.json`. A later tooling revision is admitted only when every contract build input still matches the pinned source. Copy [the plan template](../scripts/mainnet-plan.example.json), replace its placeholders and select a future `expiry` param. Artifact paths can be absolute or relative to the plan.
 
 Use separate owner, agent, server and recipient accounts. Owner, agent and server each require only their native master key. The parent administrator requires three distinct weight-one Ed25519 members and thresholds 2/2/2. The server co-signer is separate from the parent-managed checker. The tool checks these authority profiles and does not change them.
 
@@ -23,7 +23,7 @@ python scripts/mainnet_release.py preflight --plan /PRIVATE/plan.json --allow-ma
 
 Obtain approval before exporting private Wasm or transaction arguments to a public RPC. Use `--allow-payload-export` only after that approval. It permits preparation, not signing or payment.
 
-Stages are `upload-engine`, `upload-parent`, `upload-wallet`, `deploy-parent`, `deploy-wallet`, `fund`, and `execute`. Each requires successful settlement of previous original packets. The parent constructor creates its checker. The Common wallet constructor receives the owner, agent, server, immutable XLM asset, source identity, selected rules and Grant. It disables x402 for this direct-transfer smoke plan.
+Stages are `upload-engine`, `upload-parent`, `upload-wallet`, `deploy-parent`, `deploy-wallet`, `fund`, and `execute`. Each requires successful settlement of previous original packets. The parent constructor creates its checker. The Common wallet constructor receives the owner, agent, server, immutable XLM asset, source identity, selected rules and params. The `deploy-wallet` stage binds that packet to the Common tier and the release's smoke policy source, as `contract_admin.py --tier common --policy-source` does, so it needs `rustc`. It disables x402 for this direct-transfer smoke plan.
 
 ```sh
 python scripts/mainnet_release.py prepare --plan /PRIVATE/plan.json --allow-mainnet --allow-payload-export --stage upload-engine --output /PRIVATE/packets-PLAN_DIGEST/upload-engine.json
@@ -51,6 +51,6 @@ Completion verifies the server signature, current signer profiles, original tran
 
 After funding, use `simulate-e2e` with the parent, wallet and a nonzero operation ID. It checks a positive receipt, forbidden recipient, excessive amount, stale deployment version and expiry. After execution, a fresh operation ID plus `--replay-id ORIGINAL_HEX` checks replay rejection. These record-mode simulations do not establish actual signatures or settlement; completion separately enforces the server signature.
 
-`settle` queries the original transaction hash. Missing or uncertain results stay unresolved. Success requires the exact receipt and a charged fee within the original bid and stage cap. Funding checks the wallet's exact balance increase. Execution checks wallet and recipient balances plus Common call and total counters. Concurrent owner activity can prevent exact comparison and requires reconciliation. Use a new status-output filename for each observation.
+`settle` queries the original transaction hash. Missing or uncertain results stay unresolved. Success requires the exact receipt and a charged fee within the original bid and stage cap. Funding checks the wallet's exact balance increase. Execution checks wallet and recipient balances plus the standard policy state keys `calls` and `spent` (payment plus gas ceiling). Concurrent owner activity can prevent exact comparison and requires reconciliation. Use a new status-output filename for each observation.
 
 Read simulations do not renew TTL. Follow [administration](admin.md) for submitted lifetime maintenance and restoration. Network deployment and live settlement require separate operator authorization.

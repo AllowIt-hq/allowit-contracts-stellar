@@ -18,7 +18,7 @@ if missing:
 source_files = [ROOT / name for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")]
 source_files += sorted((ROOT / "crates").rglob("*.rs"))
 source_files += sorted((ROOT / "crates").rglob("Cargo.toml"))
-source_files += [ROOT / "scripts" / name for name in ("policy-codegen.json", "build-contracts.sh", "check-policy-bindings.py", "verify-generated-policies.py")]
+source_files += [ROOT / "scripts" / name for name in ("build-contracts.sh", "check-policy-bindings.py", "policy_source.py")]
 manifest = {
     "schema": 2,
     "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),

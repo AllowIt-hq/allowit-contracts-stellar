@@ -21,13 +21,14 @@ WASM = Path(__file__).resolve().parents[2] / "target/wasm32v1-none/release/allow
 
 @unittest.skipUnless(CLI and WASM.exists(), "Build policy wallet Wasm and set STELLAR_BIN to test CLI encoding")
 class RealCliEncoding(unittest.TestCase):
-    def test_generic_grant_exact_native_encoding(self):
+    def test_params_exact_native_encoding(self):
         code = WASM.read_bytes()
         digest = hashlib.sha256(code).digest()
         account = Keypair.from_raw_ed25519_seed(bytes([1]) * 32).public_key
         contract = StrKey.encode_contract(bytes([2]) * 32)
         recipient = Keypair.from_raw_ed25519_seed(bytes([3]) * 32).public_key
-        grant = {"per_transfer": scval.to_int128(10).to_xdr(), "custom_bytes": scval.to_bytes(b"preserved").to_xdr(), "max_calls": scval.to_uint64(0).to_xdr(), "unrelated": scval.to_bool(True).to_xdr()}
+        big = 2**127 - 1
+        params = {"transaction_cap": big, "spent_cap": 0, "call_cap": 0, "expiry": 2**64 - 1, "recipients": [recipient, contract], "tokens": []}
         methods = []
         class Rpc(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -67,27 +68,37 @@ class RealCliEncoding(unittest.TestCase):
         worker.start()
         try:
             with tempfile.TemporaryDirectory() as config:
+                policy = Path(config) / "policy.rs"
+                policy.write_text("use allowit::prelude::*;\npub fn execute(ctx: &AllowitContext) -> allowit::Result {\n"
+                                  "    allowit::transaction_cap(ctx, ctx.params.get(allowit::TRANSACTION_CAP))?;\n    Ok(())\n}\n")
                 cmd = [CLI, "--config-dir", config, "contract", "invoke", "--id", contract, "--source-account", account, "--rpc-url", f"http://127.0.0.1:{server.server_port}", "--network-passphrase", Network.TESTNET_NETWORK_PASSPHRASE, "--build-only", "--", "deploy_policy"]
-                result = subprocess.run(cmd + ca.serialize({"deployment": {"deployment_version": 1, "owner": account, "agent": recipient, "server": Keypair.from_raw_ed25519_seed(bytes([4]) * 32).public_key, "source_digest": "22" * 32, "rules": ["transaction_cap"], "grant": grant, "x402_enabled": False, "wasm_hash": None}}), check=True, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(cmd + ca.serialize({"deployment": {"deployment_version": 1, "owner": account, "agent": recipient, "server": Keypair.from_raw_ed25519_seed(bytes([4]) * 32).public_key, "source_digest": "22" * 32, "rules": ["transaction_cap"], "params": params, "x402_enabled": False, "wasm_hash": None}}), check=True, capture_output=True, text=True, timeout=30)
                 tx = TransactionEnvelope.from_xdr(result.stdout.strip(), Network.TESTNET_NETWORK_PASSPHRASE)
                 self.assertEqual(tx.signatures, [])
                 args = tx.transaction.operations[0].host_function.invoke_contract.args
                 packet = {entry.key.sym.sc_symbol.decode(): entry.val for entry in args[0].map.sc_map}
                 self.assertEqual(packet["deployment_version"].u64.uint64, 1)
-                values = {entry.key.str.sc_string.decode(): entry.val for entry in packet["grant"].map.sc_map}
-                self.assertEqual(values["per_transfer"].type, xdr.SCValType.SCV_I128)
-                self.assertEqual(values["per_transfer"].i128.lo.uint64, 10)
-                self.assertEqual(values["max_calls"].u64.uint64, 0)
-                for name, encoded in grant.items():
-                    self.assertEqual(values[name].to_xdr(), encoded)
+                # Vec<AllowitRule>: each unit enum variant encodes as a one-symbol vector.
+                self.assertEqual(packet["rules"], scval.to_vec([scval.to_vec([scval.to_symbol("transaction_cap")])]))
+                # Map<Symbol, AllowitValue>: only present keys; each value is a variant vector.
+                values = {entry.key.sym.sc_symbol.decode(): entry.val for entry in packet["params"].map.sc_map}
+                self.assertEqual(list(values), sorted(params))
+                variant = lambda name, value: scval.to_vec([scval.to_symbol(name), value])
+                self.assertEqual(values["transaction_cap"], variant("Int", scval.to_int128(big)))
+                self.assertEqual(values["spent_cap"], variant("Int", scval.to_int128(0)))
+                self.assertEqual(values["call_cap"], variant("Int", scval.to_int128(0)))
+                self.assertEqual(values["expiry"], variant("Int", scval.to_int128(2**64 - 1)))
+                addresses = [variant("Addr", scval.to_address(a)) for a in (recipient, contract)]
+                self.assertEqual(values["recipients"], variant("List", scval.to_vec(addresses)))
+                self.assertEqual(values["tokens"], variant("List", scval.to_vec([])))
                 for action, wasm in (("deploy-parent", WASM.with_name("allowit_engine_parent.wasm")), ("deploy-wallet", WASM)):
                     with self.subTest(action=action):
                         expected = hashlib.sha256(wasm.read_bytes()).hexdigest()
                         options = SimpleNamespace(action=action, network="testnet", allow_mainnet=False, source=account,
-                            wasm=str(wasm), wasm_hash=expected, engine_wasm="11" * 32,
+                            wasm=str(wasm), wasm_hash=expected, engine_wasm="11" * 32, tier="common", policy_source=str(policy),
                             owner=account, config=json.dumps({"owner": account, "agent": recipient,
                                 "server": Keypair.from_raw_ed25519_seed(bytes([4]) * 32).public_key, "asset": contract,
-                                "source_digest": "22" * 32, "rules": ["transaction_cap"], "grant": grant, "x402_enabled": False, "policy_instance": "11" * 32}))
+                                "source_digest": "22" * 32, "rules": ["transaction_cap"], "params": params, "x402_enabled": False, "policy_instance": "11" * 32}))
                         prepared = ca.command(options)
                         self.assertIn("--wasm", prepared)
                         self.assertNotIn("--wasm-hash", prepared)

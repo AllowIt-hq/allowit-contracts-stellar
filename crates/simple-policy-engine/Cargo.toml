@@ -10,7 +10,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 allowit-wallet-protocol = { path = "../protocol" }
-allowit-policy-rules = { path = "../rules" }
 allowit-policy-wallet = { path = "../policy-wallet" }
 
 [dev-dependencies]
