@@ -30,10 +30,11 @@
 //! After approval, the wallet and the server run the same `post_flight`: it rolls the UTC day
 //! over, counts the call, adds spent and gross amounts, marks unpriced operations, then applies
 //! the policy's own `set_state` writes, and denies a result whose standard keys do not decode or
-//! that holds more than `MAX_STATE_KEYS` keys. Simple and Common run only the canonical prefix
-//! onchain and store only standard keys, so their `post_flight` denies any policy write with
-//! `Unsupported`, on the host as onchain. The server runs a policy through `evaluate`, which first
-//! checks the request's args as the wallet does and discards the writes of a denied run. The
+//! that holds more than `MAX_STATE_KEYS` keys or `MAX_STATE_BYTES` encoded bytes. Simple and
+//! Common run only the canonical prefix onchain and store only standard keys, so their
+//! `post_flight` denies any policy write with `Unsupported`, on the host as onchain. The server
+//! runs a policy through `evaluate`, which first checks the request's args and, for a standard
+//! wallet, its params as the wallet does, and discards the writes of a denied run. The
 //! standard contract runs the leading canonical calls, supplied by the owner as `rules`, through
 //! `preflight`, which skips absent params.
 //!

@@ -200,8 +200,9 @@ Every contract then returns the shared post-flight result. Each vector holds the
 before the operation. The test seeds each Wasm with the vector's params, args and that state, and
 checks that each success stores exactly the post-flight state that the host computed. Both backends
 also agree that the standard post-flight denies the catching policy's write with `Unsupported`,
-that a write past `MAX_STATE_KEYS` is `InvalidState`, and that `evaluate` denies more than 16 args
-with `InvalidParam`.
+that a write past `MAX_STATE_KEYS` keys or `MAX_STATE_BYTES` bytes is `InvalidState`, that
+`evaluate` denies more than 16 args with `InvalidParam`, and that a standard `evaluate` rejects a
+custom param with `InvalidParam`.
 Separate tests check that every tier stores exactly the state that the server's `evaluate`
 returned, and that execution params reach the Custom policy, fail authorization when changed after
 signing, reject beyond their bounds and leave the standard tiers unaffected. Vectors that the
@@ -257,6 +258,13 @@ each with the type its rule decodes: a nonnegative `Int` cap, an `Int` in the `u
 32 keys, whose meaning its policy defines. Every value holds at most 64 nested values, and every
 text at most 256 bytes. Nothing checks that a rule reads its own key.
 
+Params, args and state also have byte budgets: `MAX_PARAM_BYTES`, `MAX_ARG_BYTES` and
+`MAX_STATE_BYTES`, 16 KiB each. Both backends count a map's encoded size the same way: 40 bytes per
+key, 80 per value and each text padded to four bytes. This count is at least the XDR size. The
+wallet stores params and policy state in its one instance entry, so the two budgets keep that
+entry far below the network's contract data entry limit, 64 KiB in current settings. Every
+standard params map fits its budget.
+
 The agent supplies execution params per call in `AllowitExecutionRequest.args`, at most 16 keys
 with the same key and value bounds. An empty key, which a Soroban `Symbol` can hold, is
 `InvalidParam` in params and args on both backends. The agent and server authorize the whole request, so a changed arg
@@ -266,7 +274,7 @@ Canonical rules and the standard contract ignore them; Custom and offchain polic
 
 The state map holds the standard keys `spent`, `day_spent`, `day_total`, `calls`, `day`,
 `unpriced` and `day_unpriced`, and any keys the policy defines, at most `allowit::MAX_STATE_KEYS`
-(39) keys in all: the seven standard keys and 32 policy keys. `AllowitStandardState` decodes the
+(39) keys and `MAX_STATE_BYTES` in all: the seven standard keys and 32 policy keys. `AllowitStandardState` decodes the
 standard keys in one place; an absent key is zero or false, and a value of another type or range,
 such as a negative `calls`, is `InvalidState`. Policy code reads a key with
 `allowit::get_state::<V>(ctx, key)`, which sees the state before this operation and decodes the
@@ -284,16 +292,21 @@ replace a standard key: owner-signed code is trusted, and no key is reserved. A 
 standard keys later operations could not decode, such as `calls` written as a `bool`, a negative
 `spent` or a later `day`, is `InvalidState`. So is a merged state with `calls` at `u64::MAX`, or
 with `spent`, `day_spent` or `day_total` at `i128::MAX`: the next standard update would overflow
-before any repair write applies. So is a merged state with more than `MAX_STATE_KEYS` keys: no call
-deletes a state key and `deploy_policy` keeps the state, so unbounded keys would grow the wallet's
-state entry past the ledger entry size. The operation denies instead, so no policy write makes
-every later standard update fail; operations that write no new key still pass at the bound.
+before any repair write applies. So is a merged state with more than `MAX_STATE_KEYS` keys or
+`MAX_STATE_BYTES` bytes: no call deletes a state key and `deploy_policy` keeps the state, so
+unbounded writes would grow the wallet's entry past the network limit, and the host would approve
+a state that the chain cannot store. The operation denies instead, so no policy write makes every
+later standard update fail; operations that write no new key and grow no value still pass at the
+bound.
 `post_flight` consumes the write buffer first, even when it fails.
 
 The server evaluates a policy with `allowit::evaluate(ctx, execute, tier)`. It clears stale
-writes, checks `request.args` with `allowit::check_args` as the wallet kernel does (`InvalidParam`
-for args that the wallet rejects), runs `execute`, and runs `post_flight` on approval; a denial
-discards the policy's writes.
+writes, checks `request.args` with `allowit::check_args` as the wallet kernel does, and, for
+`AllowitTier::Standard`, checks the params with `allowit::check_params` as the standard contract
+does on every admission. Args or params that the wallet rejects are `InvalidParam`. A standard
+wallet can hold a custom param after a code change from Custom, because the new code validates the
+kept params only at its next admission. `evaluate` then runs `execute`, and runs `post_flight` on
+approval; a denial discards the policy's writes.
 So no write outlives its evaluation, also when the server reuses an `AllowitEnv`. Onchain, the
 wallet runs `post_flight` after its own policy check, and a denied transaction rolls the temporary
 buffer back.
@@ -305,7 +318,8 @@ prefix onchain, which never writes, so they store only the standard keys. Their
 host as onchain: the server never approves an operation whose state the chain would drop. For every
 tier, the state that `evaluate` returns is exactly the state the wallet stores, and the wallet's
 `policy_state` alone is the server's next `ctx.state`. `scripts/contract_admin.py` rejects a Simple
-or Common packet whose source calls `allowit::set_state`; such a policy needs Custom.
+or Common packet whose source calls `allowit::set_state`, also through the raw identifier
+`allowit::r#set_state`; such a policy needs Custom.
 
 The server-only enrichment functions exist only in the host backend. Each takes the context and an
 owner-written request and returns its passing constraint:

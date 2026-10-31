@@ -198,18 +198,33 @@ pub const TOKENS: &str = "tokens";
 /// Canonical param key of `expiry`: `Int` in the `u64` range.
 pub const EXPIRY: &str = "expiry";
 
-// Bounds of params, args and state values.
+// Bounds of params, args and state values. The byte budgets bound a map's encoded size by
+// `KEY_BYTES` per key plus `VALUE_BYTES` per value plus each text padded to four bytes, which is
+// at least its XDR size. The wallet stores params and policy state in its one instance entry; the
+// two budgets with its other fields stay far below the network's contract data entry limit,
+// 64 KiB in current settings.
 /// Most params that a Custom wallet stores.
 pub const MAX_PARAMS: u32 = 32;
 /// Most execution params that one request carries.
 pub const MAX_ARGS: u32 = 16;
 /// Most keys in one policy state: the seven standard keys and 32 policy keys. Nothing deletes a
-/// state key, so this bound keeps the wallet's state entry within its ledger entry size.
+/// state key.
 pub const MAX_STATE_KEYS: u32 = 7 + 32;
 /// Most values nested in one value, such as the addresses of an allowlist.
 pub const MAX_ITEMS: u32 = 64;
 /// Longest text value, in bytes.
 pub const MAX_TEXT: u32 = 256;
+/// Encoded-size bound of one map key: a 32-byte `Symbol` with its tag and length.
+pub const KEY_BYTES: u32 = 40;
+/// Encoded-size bound of one value besides its text: the variant tag and the largest scalar, an
+/// account `Addr`.
+pub const VALUE_BYTES: u32 = 80;
+/// Most encoded bytes of stored params. Every standard params map fits.
+pub const MAX_PARAM_BYTES: u32 = 16 * 1024;
+/// Most encoded bytes of one request's args.
+pub const MAX_ARG_BYTES: u32 = 16 * 1024;
+/// Most encoded bytes of one policy state.
+pub const MAX_STATE_BYTES: u32 = 16 * 1024;
 
 // Standard state keys. `post_flight` writes them; Custom policy writes apply after them.
 /// Standard key: lifetime irreversible expenses.
@@ -360,43 +375,62 @@ pub(crate) fn read<V: TryFrom<AllowitValue>>(state: &AllowitMap, key: &str) -> R
 }
 
 /// Check a value's bounds: at most `MAX_ITEMS` values nested in it and `MAX_TEXT` bytes per
-/// text. A larger or undecodable value is `InvalidParam`.
-pub fn check_value(value: &AllowitValue) -> Result {
+/// text. Returns its encoded-size bound in bytes. A larger or undecodable value is `InvalidParam`.
+pub fn check_value(value: &AllowitValue) -> Result<u32> {
     nested(value, &mut 0)
 }
 
-/// Count the values nested in `value` into `total`, checking every bound on the way.
-fn nested(value: &AllowitValue, total: &mut u32) -> Result {
+/// Count the values nested in `value` into `total`, checking every bound on the way, and return
+/// its encoded-size bound.
+fn nested(value: &AllowitValue, total: &mut u32) -> Result<u32> {
     match value {
-        AllowitValue::Str(text) if text_len(text) > MAX_TEXT => Err(AllowitError::InvalidParam),
-        AllowitValue::List(items) => each_item(items, |item| {
-            *total += 1;
-            if *total > MAX_ITEMS {
-                return Err(AllowitError::InvalidParam);
-            }
-            nested(&item, total)
-        }),
-        _ => Ok(()),
+        AllowitValue::Str(text) => match text_len(text) {
+            len if len > MAX_TEXT => Err(AllowitError::InvalidParam),
+            len => Ok(VALUE_BYTES + len.div_ceil(4) * 4),
+        },
+        AllowitValue::List(items) => {
+            let mut bytes = VALUE_BYTES;
+            each_item(items, |item| {
+                *total += 1;
+                if *total > MAX_ITEMS {
+                    return Err(AllowitError::InvalidParam);
+                }
+                bytes += nested(&item, total)?;
+                Ok(())
+            })?;
+            Ok(bytes)
+        }
+        _ => Ok(VALUE_BYTES),
     }
 }
 
-/// Check a key => value map: at most `max` entries, valid keys and bounded values.
-fn check_map(map: &AllowitMap, max: u32) -> Result {
+/// Check a key => value map: at most `max` entries, valid keys, bounded values and at most
+/// `max_bytes` encoded bytes.
+fn check_map(map: &AllowitMap, max: u32, max_bytes: u32) -> Result {
     if count(map) > max {
         return Err(AllowitError::InvalidParam);
     }
-    each_value(map, |value| check_value(&value))
+    let mut bytes = 0;
+    each_value(map, |value| {
+        bytes += KEY_BYTES + check_value(&value)?;
+        Ok(())
+    })?;
+    if bytes > max_bytes {
+        return Err(AllowitError::InvalidParam);
+    }
+    Ok(())
 }
 
 /// Check owner params before storing them. A standard wallet admits only the canonical keys,
 /// each with the type its rule decodes; Custom admits up to `MAX_PARAMS` keys with bounded
-/// values, which its policy defines. A rejected map is `InvalidParam`.
+/// values, which its policy defines. Both stay within `MAX_PARAM_BYTES`. A rejected map is
+/// `InvalidParam`.
 pub fn check_params(params: &AllowitMap, tier: AllowitTier) -> Result {
     // Decode and bound every value first, so no later lookup meets an undecodable one.
     if tier == AllowitTier::Custom {
-        return check_map(params, MAX_PARAMS);
+        return check_map(params, MAX_PARAMS, MAX_PARAM_BYTES);
     }
-    check_map(params, RULES.len() as u32)?;
+    check_map(params, RULES.len() as u32, MAX_PARAM_BYTES)?;
     let mut canonical = 0;
     for rule in RULES {
         if let Some(value) = lookup(params, rule.key()) {
@@ -421,9 +455,10 @@ fn canonical_value(rule: AllowitRule, value: AllowitValue) -> Result {
     }
 }
 
-/// Check the agent's execution params: at most `MAX_ARGS` keys with bounded values.
+/// Check the agent's execution params: at most `MAX_ARGS` keys with bounded values, within
+/// `MAX_ARG_BYTES`.
 pub fn check_args(args: &AllowitMap) -> Result {
-    check_map(args, MAX_ARGS)
+    check_map(args, MAX_ARGS, MAX_ARG_BYTES)
 }
 
 /// The integer of a set param: unset is `MissingParam`; another type or a value outside `T` is
@@ -687,9 +722,9 @@ fn decode(
 ///
 /// A `Standard` wallet stores only the standard keys, so any policy write is `Unsupported`: the
 /// host and the chain then store the same state for every tier. A result with more than
-/// `MAX_STATE_KEYS` keys, that later operations could not decode, or whose totals leave no room
-/// for one more call or unit, is `InvalidState`, so a policy write cannot make every later
-/// standard update fail.
+/// `MAX_STATE_KEYS` keys or `MAX_STATE_BYTES` encoded bytes, that later operations could not
+/// decode, or whose totals leave no room for one more call or unit, is `InvalidState`, so a
+/// policy write cannot make every later standard update fail or outgrow the wallet's entry.
 pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap> {
     let writes = take_writes(&ctx.env);
     if tier == AllowitTier::Standard && count(&writes) > 0 {
@@ -707,9 +742,7 @@ pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap
     let mut state = ctx.state.clone();
     s.write(&mut state)?;
     merge(&mut state, writes);
-    if count(&state) > MAX_STATE_KEYS {
-        return Err(AllowitError::InvalidState);
-    }
+    check_map(&state, MAX_STATE_KEYS, MAX_STATE_BYTES).map_err(|_| AllowitError::InvalidState)?;
     // The next standard update adds one call and may add a unit to each total.
     let (s, (day_spent, day_total, _)) = decode(ctx, &state)?;
     if s.calls == u64::MAX || [s.spent, day_spent, day_total].contains(&i128::MAX) {
@@ -719,9 +752,10 @@ pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap
 }
 
 /// One policy evaluation, the server's entry point: clear stale writes, check the request's args
-/// as the wallet does, run `execute`, then `post_flight` for the wallet's tier on approval. Args
-/// that the wallet rejects are `InvalidParam`. A denial discards the policy's writes, so no write
-/// outlives it. The result is exactly the state the wallet stores.
+/// and, for a `Standard` wallet, its params as the wallet does, run `execute`, then `post_flight`
+/// for the wallet's tier on approval. Args or params that the wallet rejects are `InvalidParam`.
+/// A denial discards the policy's writes, so no write outlives it. The result is exactly the
+/// state the wallet stores.
 pub fn evaluate(
     ctx: &AllowitContext,
     execute: impl FnOnce(&AllowitContext) -> Result,
@@ -729,6 +763,11 @@ pub fn evaluate(
 ) -> Result<AllowitMap> {
     take_writes(&ctx.env);
     check_args(&ctx.request.args.0)?;
+    // A standard wallet checks its stored params on every admission: a code change from Custom
+    // keeps params that only the next admission validates.
+    if tier == AllowitTier::Standard {
+        check_params(&ctx.params.0, tier)?;
+    }
     let run = execute(ctx);
     if run.is_err() {
         take_writes(&ctx.env);

@@ -17,8 +17,9 @@
 //! Kernel violations reject identically in every contract.
 //!
 //! Policy writes: Custom stores them; the standard tiers run only the canonical prefix onchain,
-//! so the host's standard post-flight denies them. The server's evaluation therefore equals the
-//! stored state for every tier.
+//! so the host's standard post-flight denies them. The host's standard evaluation also rejects a
+//! custom param, as the standard contract does on admission. The server's evaluation therefore
+//! equals the stored state for every tier.
 extern crate std;
 use super::tests::{CATCHING, COMMON, CUSTOM, Fixture, SIMPLE};
 use super::*;
@@ -200,6 +201,14 @@ fn state_map(env: &Env, v: &Vector) -> Map<Symbol, AllowitValue> {
         let key = Symbol::new(env, &vectors::state_key(i));
         state.set(key, AllowitValue::from(i as u64));
     }
+    if !v.blob.is_empty() {
+        let mut texts = Vec::new(env);
+        for n in &v.blob {
+            let text = soroban_sdk::String::from_str(env, &"x".repeat(*n));
+            texts.push_back(AllowitValue::Str(text));
+        }
+        state.set(Symbol::new(env, vectors::BLOB), AllowitValue::List(texts));
+    }
     state
 }
 /// A state map as `vectors::state_line`.
@@ -249,10 +258,17 @@ fn soroban_outcome(env: &Env, contract: &Address, universe: &[Address], v: &Vect
         let p = |key| c.params.get(key);
         let code = |e: AllowitError| e as u32;
         let index = |a: Address| format!("@{}", universe.iter().position(|x| *x == a).unwrap());
-        let evaluate = |tier| {
-            allowit::evaluate(&c, catching::execute, tier)
+        let run = |execute: &dyn Fn(&AllowitContext) -> allowit::Result, tier| {
+            allowit::evaluate(&c, execute, tier)
                 .map(|state| line(env, &state))
                 .map_err(code)
+        };
+        let evaluate = |tier| run(&catching::execute, tier);
+        // The Common wallet's policy with the full canonical prefix.
+        let prefix = |c: &AllowitContext| {
+            RULES
+                .into_iter()
+                .try_for_each(|rule| allowit::preflight(c, rule))
         };
         let rules: List<Result<Text, u32>> = [
             allowit::transaction_cap(&c, p(allowit::TRANSACTION_CAP)).map(|v| v.to_string()),
@@ -277,9 +293,9 @@ fn soroban_outcome(env: &Env, contract: &Address, universe: &[Address], v: &Vect
                 .map(|rule| allowit::preflight(&c, rule).map_err(code))
                 .collect(),
             // The bare catching run above may have buffered a write; `evaluate` clears it first.
-            next: allowit::evaluate(&c, |_| Ok(()), AllowitTier::Standard)
-                .map(|state| line(env, &state))
-                .map_err(code),
+            next: run(&|_| Ok(()), AllowitTier::Custom),
+            common: run(&prefix, AllowitTier::Standard),
+            simple: run(&|_| Ok(()), AllowitTier::Standard),
             catching_next: evaluate(AllowitTier::Custom),
             catching_standard: evaluate(AllowitTier::Standard),
         }
@@ -483,6 +499,7 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
         vectors::MAX_POLICY_KEYS + 7,
         allowit::MAX_STATE_KEYS as usize
     );
+    assert_eq!(vectors::MAX_STATE_BYTES, allowit::MAX_STATE_BYTES as usize);
     let all = vectors::vectors();
     let host = host_lines();
     assert_eq!(host.len(), all.len());
@@ -507,29 +524,34 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
             .iter()
             .map(|rule| outcome.preflight[RULES.iter().position(|r| r == rule).unwrap()])
             .find(Result::is_err);
-        // The standard contract admits only canonical params, also after a direct seed.
+        // A standard evaluation admits only canonical params, as the standard contract does
+        // after a direct seed, then runs the prefix and the plain post-flight.
         let custom_param = v
             .invoice_cap
             .map_or(Ok(()), |_| Err(AllowitError::InvalidParam as u32));
+        let common = custom_param
+            .and(first_prefix_error.unwrap_or(Ok(())))
+            .and(next);
+        assert_eq!(outcome.common.clone().map(|_| ()), common, "{}", v.name);
+        let simple = custom_param.and(next);
+        assert_eq!(outcome.simple.clone().map(|_| ()), simple, "{}", v.name);
         let expected = |tier: Tier| {
             match tier {
                 Tier::Custom => outcome.policy.and(next),
-                Tier::Common => custom_param
-                    .and(first_prefix_error.unwrap_or(Ok(())))
-                    .and(next),
-                Tier::Simple => custom_param.and(next),
+                Tier::Common => outcome.common.clone().map(|_| ()),
+                Tier::Simple => outcome.simple.clone().map(|_| ()),
                 Tier::Catching => outcome.catching_next.clone().map(|_| ()),
             }
             .map_err(wallet_error)
         };
-        // A standard post-flight denies the catching policy's write and otherwise equals the
-        // plain post-flight, which the standard tiers store.
+        // A standard evaluation rejects a custom param, denies the catching policy's write and
+        // otherwise equals the plain post-flight, which the standard tiers store.
         let wrote = outcome.catching_next != outcome.catching.and(outcome.next.clone());
-        let standard = if wrote {
+        let standard = custom_param.map(|()| Text::new()).and(if wrote {
             Err(AllowitError::Unsupported as u32)
         } else {
             outcome.catching.and(outcome.next.clone())
-        };
+        });
         assert_eq!(outcome.catching_standard, standard, "{}", v.name);
         let unset = v.caps.contains(&None)
             || v.call_cap.is_none()
@@ -563,7 +585,7 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
             }
         }
     }
-    assert_eq!(realized, 40);
+    assert_eq!(realized, 43);
     // The deployed catching Wasm let these continue after a caught rule error and wrote its key.
     for name in ["over_day_spent_cap", "over_day_spent_cap_counted_once"] {
         assert!(caught.contains(&name), "{name} {caught:?}");

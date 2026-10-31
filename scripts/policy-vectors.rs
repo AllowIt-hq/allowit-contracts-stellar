@@ -23,6 +23,10 @@ pub const INVOICE: &str = "invoice";
 pub const MAX_ARGS: usize = 16;
 /// `allowit::MAX_STATE_KEYS` minus the seven standard keys: most policy keys in one state.
 pub const MAX_POLICY_KEYS: usize = 32;
+/// `allowit::MAX_STATE_BYTES`: most encoded bytes of one policy state.
+pub const MAX_STATE_BYTES: usize = 16 * 1024;
+/// State key of the filler texts of a vector.
+pub const BLOB: &str = "blob";
 
 /// Key of the `i`th filler execution param.
 pub fn arg_key(i: usize) -> String {
@@ -71,6 +75,8 @@ pub struct Vector {
     pub extra_args: usize,
     /// Filler policy state keys `key_<i>` = `Int(i)` in the current state.
     pub extra_state: usize,
+    /// Byte lengths of the filler texts in the state's `blob` list; empty leaves `blob` unset.
+    pub blob: Vec<usize>,
 }
 
 /// A vector that passes every rule with headroom left. After it, spent and day_spent are 45 and
@@ -104,6 +110,7 @@ pub fn base() -> Vector {
         invoice: false,
         extra_args: 0,
         extra_state: 0,
+        blob: Vec::new(),
     }
 }
 
@@ -227,6 +234,15 @@ pub fn vectors() -> Vec<Vector> {
             v.invoice_cap = Some(39);
         }),
         edit("invoice_without_cap", |v| v.invoice = true),
+        // A custom param beside fewer than eight canonical params: the standard tiers reject it.
+        edit("invoice_cap_beside_few_params", |v| {
+            v.caps = [Some(100), None, None, None];
+            v.call_cap = None;
+            v.recipients = None;
+            v.tokens = None;
+            v.expiry = None;
+            v.invoice_cap = Some(39);
+        }),
         // Args at their bound pass; one more denies in `evaluate` as in the wallet kernel.
         edit("args_at_bound", |v| v.extra_args = MAX_ARGS),
         edit("args_over_bound", |v| v.extra_args = MAX_ARGS + 1),
@@ -240,7 +256,25 @@ pub fn vectors() -> Vec<Vector> {
             v.caps[2] = Some(44);
             v.extra_state = MAX_POLICY_KEYS;
         }),
+        // The state's encoded size: the seven standard keys take 7 * 120 bytes, the catching
+        // policy's key 120 and `blob` 40 + 80 + 45 * (80 + 256) + 80 + 104, exactly
+        // `MAX_STATE_BYTES`. Four more bytes deny with `InvalidState` on every backend.
+        edit("state_bytes_at_bound", |v| {
+            v.caps[2] = Some(44);
+            v.blob = blob(104);
+        }),
+        edit("state_bytes_over_bound", |v| {
+            v.caps[2] = Some(44);
+            v.blob = blob(105);
+        }),
     ]
+}
+
+/// Filler text lengths: 45 texts of 256 bytes and one of `last` bytes.
+fn blob(last: usize) -> Vec<usize> {
+    let mut lengths = vec![256; 45];
+    lengths.push(last);
+    lengths
 }
 
 /// Text of one result, identical on both backends: `ok:<value>` or `err:<code>`.
@@ -269,7 +303,8 @@ pub fn state_line(
 
 /// Every outcome a policy author can observe on one vector: the sample, branch and catching
 /// policies, each rule, the standard preflight runner, the post-flight state without policy
-/// writes, and the catching policy's evaluation for a Custom and a standard wallet.
+/// writes, the Common and Simple evaluations, and the catching policy's evaluation for a Custom
+/// and a standard wallet.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
     pub policy: Result<(), u32>,
@@ -279,8 +314,12 @@ pub struct Outcome {
     pub rules: Vec<Result<String, u32>>,
     /// Preflight results in canonical key order.
     pub preflight: Vec<Result<(), u32>>,
-    /// `post_flight` with no policy writes, as `state_line`; the same for every tier.
+    /// `evaluate` with no policy writes for a Custom wallet, as `state_line`.
     pub next: Result<String, u32>,
+    /// `evaluate` of every canonical preflight for a standard wallet: Common with the full prefix.
+    pub common: Result<String, u32>,
+    /// `evaluate` with no policy for a standard wallet: Simple.
+    pub simple: Result<String, u32>,
     /// `evaluate` of the catching policy for a Custom wallet, which stores its key.
     pub catching_next: Result<String, u32>,
     /// `evaluate` of the catching policy for a standard wallet, which denies any write.
@@ -293,13 +332,15 @@ impl Outcome {
         let list = |items: Vec<String>| items.join(",");
         let unit = |r: &Result<(), u32>| show(r.map(|()| "()"));
         format!(
-            "vector {name} policy={} branch={} catching={} rules={} preflight={} next={} catching_next={} catching_standard={}",
+            "vector {name} policy={} branch={} catching={} rules={} preflight={} next={} common={} simple={} catching_next={} catching_standard={}",
             unit(&self.policy),
             unit(&self.branch),
             unit(&self.catching),
             list(self.rules.iter().cloned().map(show).collect()),
             list(self.preflight.iter().map(unit).collect()),
             show(self.next.clone()),
+            show(self.common.clone()),
+            show(self.simple.clone()),
             show(self.catching_next.clone()),
             show(self.catching_standard.clone()),
         )

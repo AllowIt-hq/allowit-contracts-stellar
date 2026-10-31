@@ -317,6 +317,10 @@ fn host_context(v: &Vector) -> AllowitContext {
     for i in 0..v.extra_state {
         state.insert(vectors::state_key(i), AllowitValue::from(i as u64));
     }
+    if !v.blob.is_empty() {
+        let texts = v.blob.iter().map(|n| AllowitValue::Str("x".repeat(*n)));
+        state.insert(vectors::BLOB.to_string(), AllowitValue::List(texts.collect()));
+    }
     let mut args = params(vec![(
         vectors::INVOICE,
         v.invoice.then(|| AllowitValue::Int(1)),
@@ -377,6 +381,11 @@ fn line(c: &AllowitContext, state: AllowitMap) -> String {
         over,
     )
 }
+/// The Common wallet's policy with the full canonical prefix: every preflight in key order.
+fn preflight(c: &AllowitContext) -> allowit::Result {
+    RULES.into_iter().try_for_each(|rule| allowit::preflight(c, rule))
+}
+/// Every outcome of one vector on the host backend.
 fn host_outcome(v: &Vector) -> Outcome {
     let c = host_context(v);
     let p = |key| c.params.get(key);
@@ -385,11 +394,12 @@ fn host_outcome(v: &Vector) -> Outcome {
         let i = (0..vectors::ADDRESSES).position(|i| address(i) == a);
         format!("@{}", i.unwrap())
     };
-    let evaluate = |tier| {
-        allowit::evaluate(&c, catching::execute, tier)
+    let run = |execute: &dyn Fn(&AllowitContext) -> allowit::Result, tier| {
+        allowit::evaluate(&c, execute, tier)
             .map(|state| line(&c, state))
             .map_err(code)
     };
+    let evaluate = |tier| run(&catching::execute, tier);
     Outcome {
         policy: policy::execute(&c).map_err(code),
         branch: branch::execute(&c).map_err(code),
@@ -412,9 +422,9 @@ fn host_outcome(v: &Vector) -> Outcome {
             .map(|rule| allowit::preflight(&c, rule).map_err(code))
             .collect(),
         // The bare catching run above may have buffered a write; `evaluate` clears it first.
-        next: allowit::evaluate(&c, |_| Ok(()), AllowitTier::Standard)
-            .map(|state| line(&c, state))
-            .map_err(code),
+        next: run(&|_| Ok(()), AllowitTier::Custom),
+        common: run(&preflight, AllowitTier::Standard),
+        simple: run(&|_| Ok(()), AllowitTier::Standard),
         catching_next: evaluate(AllowitTier::Custom),
         catching_standard: evaluate(AllowitTier::Standard),
     }
@@ -431,6 +441,7 @@ fn vectors_print_host_outcomes() {
     assert_eq!(base.preflight, vec![Ok(()); 8]);
     assert_eq!(base.next, Ok("1/45/false/2/45/43/false/-".to_string()));
     assert_eq!(base.catching_standard, base.next);
+    assert_eq!((&base.common, &base.simple), (&base.next, &base.next));
     let named = |name: &str| host_outcome(all.iter().find(|v| v.name == name).unwrap());
     let (invalid_param, invalid_state) = (AllowitError::InvalidParam, AllowitError::InvalidState);
     assert!(named("args_at_bound").next.is_ok());
@@ -439,4 +450,13 @@ fn vectors_print_host_outcomes() {
     let over = named("state_keys_over_bound");
     assert_eq!(over.catching_next, Err(invalid_state as u32));
     assert!(over.next.is_ok());
+    assert!(named("state_bytes_at_bound").catching_next.is_ok());
+    let over = named("state_bytes_over_bound");
+    assert_eq!(over.catching_next, Err(invalid_state as u32));
+    assert!(over.next.is_ok());
+    // A standard wallet rejects a custom param, also beside few canonical ones.
+    let few = named("invoice_cap_beside_few_params");
+    assert!(few.next.is_ok());
+    assert_eq!(few.simple, Err(invalid_param as u32));
+    assert_eq!(few.catching_standard, Err(invalid_param as u32));
 }

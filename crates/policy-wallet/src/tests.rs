@@ -597,6 +597,78 @@ fn common_skips_absent_params_and_rejects_unknown_names_keys_and_values() {
     );
 }
 #[test]
+fn standard_tiers_reject_a_custom_key_beside_few_canonical_keys() {
+    for wasm in [COMMON, SIMPLE, CUSTOM] {
+        let f = Fixture::new(wasm, false);
+        let mut p = f.deployment();
+        p.params = Map::new(&f.env);
+        set_param(&mut p.params, TRANSACTION_CAP, Some(AllowitValue::Int(1)));
+        set_param(&mut p.params, "vendor_cap", Some(AllowitValue::Int(5)));
+        f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+        let result = f.client().try_deploy_policy(&p);
+        if wasm == CUSTOM {
+            assert_eq!(result, Ok(Ok(())));
+            assert_eq!(f.client().state().params, p.params);
+        } else {
+            assert_eq!(result, Err(Ok(AllowitWalletError::InvalidParam)));
+            assert_eq!(f.client().state().deployment_version, 0);
+        }
+    }
+}
+/// Fill `map` toward `budget` encoded bytes with a `fill` list of texts, as `allowit` counts them.
+fn fill(env: &Env, map: &mut Map<Symbol, AllowitValue>, budget: u32) {
+    let size = |map: &Map<Symbol, AllowitValue>| {
+        map.values()
+            .iter()
+            .map(|value| allowit::KEY_BYTES + allowit::check_value(&value).unwrap())
+            .sum::<u32>()
+    };
+    let mut left = budget - size(map) - allowit::KEY_BYTES - allowit::VALUE_BYTES;
+    let mut texts = Vec::new(env);
+    while left >= allowit::VALUE_BYTES {
+        let n = (left - allowit::VALUE_BYTES).min(allowit::MAX_TEXT);
+        texts.push_back(AllowitValue::Str(String::from_str(
+            env,
+            &"x".repeat(n as usize),
+        )));
+        left -= allowit::VALUE_BYTES + n.div_ceil(4) * 4;
+    }
+    map.set(Symbol::new(env, "fill"), AllowitValue::List(texts));
+    assert!(size(map) <= budget && size(map) + allowit::VALUE_BYTES > budget);
+}
+#[test]
+fn wallet_entry_holds_params_and_state_at_their_byte_budgets() {
+    let f = Fixture::new(CUSTOM, false);
+    let mut p = f.deployment();
+    fill(&f.env, &mut p.params, allowit::MAX_PARAM_BYTES);
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+    f.client().deploy_policy(&p);
+    // One more text passes the byte budget and rejects.
+    let mut over = f.deployment();
+    let text = AllowitValue::Str(String::from_str(&f.env, "xxxx"));
+    set_param(&mut over.params, "extra", Some(text));
+    f.auth(
+        &[&f.owner],
+        "deploy_policy",
+        (over.clone(),).into_val(&f.env),
+    );
+    assert_eq!(
+        f.client().try_deploy_policy(&over),
+        Err(Ok(AllowitWalletError::InvalidParam))
+    );
+    // The first operation writes the standard keys; then fill the state to its budget.
+    f.transfer(10);
+    f.env.as_contract(&f.wallet, || {
+        let mut s = state(&f.env).unwrap();
+        fill(&f.env, &mut s.policy_state, allowit::MAX_STATE_BYTES);
+        store(&f.env, &s);
+    });
+    f.transfer(10);
+    assert_eq!(f.history().calls, 2);
+    // Full params and state leave the wallet's entry far below the 64 KiB entry limit.
+    assert!(f.client().state().to_xdr(&f.env).len() < 40 * 1024);
+}
+#[test]
 fn custom_policy_denies_an_absent_param_that_common_preflight_skips() {
     for wasm in [COMMON, CUSTOM] {
         let f = Fixture::new(wasm, false);

@@ -502,6 +502,90 @@ fn standard_params_admit_only_canonical_keys_with_their_types() {
         // Custom admits any bounded key and value; its policy defines them.
         assert_eq!(check_params(&params, AllowitTier::Custom), Ok(()), "{key}");
     }
+    // A custom key beside fewer than eight canonical keys passes the count check and still
+    // rejects.
+    let mut few = Map::new(&env);
+    few.set(Symbol::new(&env, TRANSACTION_CAP), AllowitValue::Int(1));
+    few.set(Symbol::new(&env, "vendor_cap"), AllowitValue::Int(5));
+    assert_eq!(standard(&few), Err(AllowitError::InvalidParam));
+    assert_eq!(check_params(&few, AllowitTier::Custom), Ok(()));
+}
+
+/// A list of texts of the given byte lengths.
+fn texts(env: &Env, lengths: &[usize]) -> AllowitValue {
+    let mut out = soroban_sdk::Vec::new(env);
+    for n in lengths {
+        out.push_back(AllowitValue::Str(String::from_str(env, &"x".repeat(*n))));
+    }
+    AllowitValue::List(out)
+}
+
+#[test]
+fn encoded_size_bounds_cover_the_xdr_of_every_value() {
+    let env = Env::default();
+    let account = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    let addresses = [Address::generate(&env), Address::from_str(&env, account)];
+    let mut values = std::vec![
+        AllowitValue::Int(i128::MIN),
+        AllowitValue::Int(i128::MAX),
+        AllowitValue::Bool(true),
+        texts(&env, &[MAX_TEXT as usize; MAX_ITEMS as usize]),
+        AllowitValue::List(vec![&env, texts(&env, &[1, 2, 3]), AllowitValue::Int(0)]),
+    ];
+    values.extend(addresses.iter().cloned().map(AllowitValue::Addr));
+    values.extend((0..=MAX_TEXT as usize).map(|n| texts(&env, &[n])));
+    // A map adds a 12-byte header and, per entry, its key, each at most 32 bytes here.
+    let (mut map, mut total) = (Map::new(&env), 12);
+    for (i, value) in values.iter().enumerate() {
+        let bound = check_value(value).unwrap();
+        assert!(value.clone().to_xdr(&env).len() <= bound, "{i}");
+        map.set(Symbol::new(&env, &std::format!("{i:0>32}")), value.clone());
+        total += KEY_BYTES + bound;
+    }
+    assert!(map.to_xdr(&env).len() <= total);
+}
+
+#[test]
+fn params_args_and_state_stay_within_their_byte_budgets() {
+    let env = Env::default();
+    let id = env.register(Scope, ());
+    let mut ctx = fixture(&env);
+    // 40 + 80 + 48 * (80 + 256) for `a`, and 40 + 80 + 16 for `b`: exactly 16 KiB.
+    let budget = |last: usize| {
+        let mut map = Map::new(&env);
+        map.set(Symbol::new(&env, "a"), texts(&env, &[256; 48]));
+        let b = AllowitValue::Str(String::from_str(&env, &"x".repeat(last)));
+        map.set(Symbol::new(&env, "b"), b);
+        map
+    };
+    let invalid = Err(AllowitError::InvalidParam);
+    assert_eq!(MAX_PARAM_BYTES, 16 * 1024);
+    assert_eq!(MAX_ARG_BYTES, 16 * 1024);
+    assert_eq!(check_params(&budget(16), AllowitTier::Custom), Ok(()));
+    assert_eq!(check_params(&budget(17), AllowitTier::Custom), invalid);
+    assert_eq!(check_args(&budget(16)), Ok(()));
+    assert_eq!(check_args(&budget(17)), invalid);
+    // The largest standard params map fits.
+    let mut standard = ctx.params.0.clone();
+    let full: std::vec::Vec<Address> = (0..MAX_ITEMS).map(|_| Address::generate(&env)).collect();
+    let full = list(&env, &full.iter().collect::<std::vec::Vec<_>>());
+    standard.set(Symbol::new(&env, RECIPIENTS), full.clone());
+    standard.set(Symbol::new(&env, TOKENS), full);
+    assert_eq!(standard.len(), 8);
+    assert_eq!(check_params(&standard, AllowitTier::Standard), Ok(()));
+    // The seven standard keys take 7 * 120 bytes, `blob` 40 + 80 + 45 * 336 and `tail` 40 + 80
+    // + 184: exactly 16 KiB.
+    assert_eq!(MAX_STATE_BYTES, 16 * 1024);
+    ctx.state
+        .set(Symbol::new(&env, "blob"), texts(&env, &[256; 45]));
+    let tail = |n: usize| AllowitValue::Str(String::from_str(&env, &"x".repeat(n)));
+    env.as_contract(&id, || {
+        let custom = |c: &AllowitContext| post_flight(c, AllowitTier::Custom);
+        set_state(&ctx, "tail", tail(184)).unwrap();
+        assert!(custom(&ctx).is_ok());
+        set_state(&ctx, "tail", tail(185)).unwrap();
+        assert_eq!(custom(&ctx), Err(AllowitError::InvalidState));
+    });
 }
 
 #[test]
@@ -537,17 +621,18 @@ fn custom_params_args_and_state_values_stay_within_their_bounds() {
         out
     };
     let text = |n: usize| AllowitValue::Str(String::from_str(&env, &"x".repeat(n)));
-    assert_eq!(check_value(&AllowitValue::List(items(MAX_ITEMS))), Ok(()));
+    let fits = |value: &AllowitValue| check_value(value).map(drop);
+    assert_eq!(fits(&AllowitValue::List(items(MAX_ITEMS))), Ok(()));
     let over = AllowitValue::List(items(MAX_ITEMS + 1));
-    assert_eq!(check_value(&over), Err(AllowitError::InvalidParam));
+    assert_eq!(fits(&over), Err(AllowitError::InvalidParam));
     let inner = AllowitValue::List(items(MAX_ITEMS - 1));
     let nested = AllowitValue::List(vec![&env, inner.clone()]);
-    assert_eq!(check_value(&nested), Ok(()));
+    assert_eq!(fits(&nested), Ok(()));
     let nested = AllowitValue::List(vec![&env, inner, AllowitValue::Int(0)]);
-    assert_eq!(check_value(&nested), Err(AllowitError::InvalidParam));
-    assert_eq!(check_value(&text(MAX_TEXT as usize)), Ok(()));
+    assert_eq!(fits(&nested), Err(AllowitError::InvalidParam));
+    assert_eq!(fits(&text(MAX_TEXT as usize)), Ok(()));
     let long = text(MAX_TEXT as usize + 1);
-    assert_eq!(check_value(&long), Err(AllowitError::InvalidParam));
+    assert_eq!(fits(&long), Err(AllowitError::InvalidParam));
     let mut params = Map::new(&env);
     params.set(Symbol::new(&env, "memo"), long.clone());
     assert_eq!(custom(&params), Err(AllowitError::InvalidParam));
@@ -607,6 +692,23 @@ fn evaluate_checks_args_as_the_wallet_does_before_the_policy_runs() {
         );
         ctx.request.args.0.remove(Symbol::new(&env, "arg_0"));
         assert!(evaluate(&ctx, writer, AllowitTier::Custom).is_ok());
+    });
+}
+
+#[test]
+fn evaluate_checks_standard_params_as_the_wallet_does() {
+    let env = Env::default();
+    let id = env.register(Scope, ());
+    let mut ctx = fixture(&env);
+    ctx.params.0.remove(Symbol::new(&env, EXPIRY));
+    ctx.params
+        .0
+        .set(Symbol::new(&env, "vendor_cap"), AllowitValue::Int(5));
+    env.as_contract(&id, || {
+        // A standard wallet that kept a Custom param after a code change rejects it on admission.
+        let run = evaluate(&ctx, |_| Ok(()), AllowitTier::Standard);
+        assert_eq!(run, Err(AllowitError::InvalidParam));
+        assert!(evaluate(&ctx, |_| Ok(()), AllowitTier::Custom).is_ok());
     });
 }
 
