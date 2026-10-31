@@ -216,6 +216,15 @@ class ContractAdmin(unittest.TestCase):
                         {"x": 2**127}, {"k" + str(i): i for i in range(33)}):
             with self.subTest(params=invalid), self.assertRaises((ValueError, TypeError)):
                 ca.params(invalid, "custom")
+        # Params encode in at most 16 KiB, counted as the wallet counts them: 40 bytes per key, 80
+        # per value and each text padded to four bytes. 40 + 80 + 48 * 336 + 40 + 80 + 16 is 16 KiB.
+        texts = ["x" * 256] * 48
+        self.assertIn("b", ca.params({"a": texts, "b": "x" * 16}, "custom"))
+        with self.assertRaisesRegex(ValueError, "16384 bytes"):
+            ca.params({"a": texts, "b": "x" * 17}, "custom")
+        # The largest standard params fit.
+        full = {key: 0 for key in ca.PARAM_KEYS} | {"recipients": [KEYS[1]] * 64, "tokens": [KEYS[2]] * 64}
+        self.assertEqual(len(ca.params(full, "common")), 8)
         # The count error names the limit of the tier.
         for tier, limit in (("common", 8), ("simple", 8), ("custom", 32)):
             with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "at most {} keys".format(limit)):
@@ -510,11 +519,14 @@ class ContractAdmin(unittest.TestCase):
                 ca.policy_rules(packet, "common", None)
             # Simple and Common store only standard state: a policy that writes state needs Custom.
             writer = source(CALL("recipients") + "    allowit::set_state(ctx, \"seen\", 1u64)?;\n")
-            policy.write_text(writer)
-            for tier in ("common", "simple"):
-                rules = ["recipients"] if tier == "common" else []
-                with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "set_state"):
-                    ca.policy_rules({"rules": rules, "source_digest": "22" * 32}, tier, str(policy))
+            # A raw identifier names the same function and compiles on the host.
+            raw = source(CALL("recipients") + "    allowit::r#set_state(ctx, \"seen\", 1u64)?;\n")
+            for body in (raw, writer):
+                policy.write_text(body)
+                for tier in ("common", "simple"):
+                    rules = ["recipients"] if tier == "common" else []
+                    with self.subTest(tier=tier, source=body), self.assertRaisesRegex(ValueError, "set_state"):
+                        ca.policy_rules({"rules": rules, "source_digest": "22" * 32}, tier, str(policy))
             writer_digest = hashlib.sha256(writer.encode()).hexdigest()
             self.assertEqual(ca.policy_rules({"rules": [], "source_digest": writer_digest}, "custom", str(policy))["rules"], [])
             # Simple and Common admit only canonical params; Custom admits its own keys.

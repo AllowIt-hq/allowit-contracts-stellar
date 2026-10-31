@@ -23,7 +23,7 @@ python scripts/mainnet_release.py preflight --plan /PRIVATE/plan.json --allow-ma
 
 Obtain approval before exporting private Wasm or transaction arguments to a public RPC. Use `--allow-payload-export` only after that approval. It permits preparation, not signing or payment.
 
-Stages are `upload-engine`, `upload-parent`, `upload-wallet`, `deploy-parent`, `deploy-wallet`, `fund`, and `execute`. Each requires successful settlement of previous original packets. The parent constructor creates its checker. The Common wallet constructor receives the owner, agent, server, immutable XLM asset, source identity, selected rules and params. It disables x402 for this direct-transfer smoke plan.
+Stages are `upload-engine`, `upload-parent`, `upload-wallet`, `deploy-parent`, `deploy-wallet`, `fund`, and `execute`. Each requires successful settlement of previous original packets. The parent constructor creates its checker. The Common wallet constructor receives the owner, agent, server, immutable XLM asset, source identity, selected rules and params. The `deploy-wallet` stage binds that packet to the Common tier and the release's smoke policy source, as `contract_admin.py --tier common --policy-source` does, so it needs `rustc`. It disables x402 for this direct-transfer smoke plan.
 
 ```sh
 python scripts/mainnet_release.py prepare --plan /PRIVATE/plan.json --allow-mainnet --allow-payload-export --stage upload-engine --output /PRIVATE/packets-PLAN_DIGEST/upload-engine.json

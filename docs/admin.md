@@ -80,12 +80,15 @@ Params JSON is an object of key => value, at most 32 keys of 1 to 32 ASCII lette
 underscores. An absent key is unset. The tool infers each value's `AllowitValue` type: an integer is
 `Int`, a boolean `Bool`, a G or C address `Addr`, other text `Str` and a list `List`. A one-key
 object such as `{"Str": "GA..."}` names the type explicitly. A value holds at most 64 nested values,
-and a text at most 256 bytes. Simple and Common admit only the canonical keys `transaction_cap`,
+and a text at most 256 bytes. All params encode in at most 16 KiB, counted as the wallet counts
+them: 40 bytes per key, 80 per value and each text padded to four bytes. Every standard params map
+fits. Simple and Common admit only the canonical keys `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`
 (unsigned 64-bit integers), `recipients` and `tokens` (address lists). Custom admits its policy's
-own keys, such as `vendor_cap`. A Custom policy state holds at most 39 keys: the seven standard keys
-and 32 policy keys. No call deletes a state key, and `deploy_policy` keeps the state, so a policy
-that writes a new key past that bound denies every operation that writes it. The standard
+own keys, such as `vendor_cap`. A Custom policy state holds at most 39 keys, the seven standard keys
+and 32 policy keys, and 16 KiB counted the same way. No call deletes a state key, and
+`deploy_policy` keeps the state, so a policy write past either bound denies every operation that
+makes it. The standard
 preflight skips an absent selected rule; full policy code denies it. The tool accepts such a packet and prints a warning.
 Legacy names such as `per_transfer`, `daily_limit` or `max_calls` reject on the standard tiers.
 Negative caps reject at standard configuration. Code changes defer the new tier validation to

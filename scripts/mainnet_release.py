@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
@@ -483,8 +484,12 @@ def prepare(plan, base, stage, parent=None, wallet=None, operation_id=None):
         require_settled(plan, base, dependency, parent if dependency == "deploy-parent" else wallet if dependency == "deploy-wallet" else None)
     if stage.startswith("upload-") or stage in ("deploy-parent", "deploy-wallet"):
         name = stage.removeprefix("upload-").removeprefix("deploy-")
-        options = SimpleNamespace(action="upload" if stage.startswith("upload-") else stage, network=network, allow_mainnet=True, source=source, wasm=artifact_path(plan, base, name), wasm_hash=plan["artifacts"][name]["sha256"], owner=plan["admin"] if stage=="deploy-parent" else plan["owner"], engine_wasm=plan["artifacts"]["engine"]["sha256"], config=json.dumps(wallet_config(plan)))
-        raw = ca.cli_run(ca.command(options))
+        # The wallet packet binds the Common tier and the smoke policy source it was derived from.
+        with tempfile.TemporaryDirectory(prefix="allowit-release-") as tmp:
+            policy = Path(tmp) / "policy.rs"
+            policy.write_bytes(SMOKE_SOURCE)
+            options = SimpleNamespace(action="upload" if stage.startswith("upload-") else stage, network=network, allow_mainnet=True, source=source, wasm=artifact_path(plan, base, name), wasm_hash=plan["artifacts"][name]["sha256"], owner=plan["admin"] if stage=="deploy-parent" else plan["owner"], engine_wasm=plan["artifacts"]["engine"]["sha256"], config=json.dumps(wallet_config(plan)), tier="common", policy_source=str(policy))
+            raw = ca.cli_run(ca.command(options))
         assembled = ca.prepare_xdr(raw, source, network, max_fee=cap, expected_wasm=options.wasm_hash if stage.startswith("deploy-") else None)
     else:
         if not wallet or not parent:

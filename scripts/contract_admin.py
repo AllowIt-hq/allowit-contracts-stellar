@@ -154,11 +154,14 @@ def wallet_layout(state):
 
 CAPS = {"transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap"}
 LISTS = {"recipients", "tokens"}
-# Bounds that the wallet contract enforces: `allowit::MAX_PARAMS`, `MAX_ITEMS` and `MAX_TEXT`.
-# A Custom policy state also holds at most `allowit::MAX_STATE_KEYS` (39) keys: the seven standard
-# keys and 32 policy keys. No call deletes a state key, and a redeployed policy keeps the state,
-# so a policy that writes a new key past that bound denies every operation that writes it.
+# Bounds that the wallet contract enforces: `allowit::MAX_PARAMS`, `MAX_ITEMS`, `MAX_TEXT` and
+# `MAX_PARAM_BYTES`. A value's encoded size counts `VALUE_BYTES` per value plus each text padded to
+# four bytes, and each key `KEY_BYTES`. A Custom policy state also holds at most
+# `allowit::MAX_STATE_KEYS` (39) keys and `MAX_STATE_BYTES` (16 KiB). No call deletes a state key,
+# and a redeployed policy keeps the state, so a policy write past either bound denies every
+# operation that makes it.
 MAX_PARAMS, MAX_ITEMS, MAX_TEXT = 32, 64, 256
+KEY_BYTES, VALUE_BYTES, MAX_PARAM_BYTES = 40, 80, 16 * 1024
 VALUE_TYPES = ("Int", "Bool", "Str", "Addr", "List")
 PARAM_KEY = re.compile(r"[A-Za-z0-9_]{1,32}")
 
@@ -172,9 +175,10 @@ def is_address(item):
 
 
 def param_value(item, count):
-    """Return the pinned CLI spec JSON of one AllowitValue and count its nested values in count[0].
-    An integer is Int, a boolean Bool, a G or C address Addr, other text Str and a list List. A
-    one-key object such as {"Str": "GA..."} names the type explicitly."""
+    """Return the pinned CLI spec JSON of one AllowitValue, count its nested values in count[0] and
+    add its encoded size to count[1]. An integer is Int, a boolean Bool, a G or C address Addr,
+    other text Str and a list List. A one-key object such as {"Str": "GA..."} names the type
+    explicitly."""
     if isinstance(item, dict):
         if len(item) != 1 or next(iter(item)) not in VALUE_TYPES:
             raise ValueError("A typed param value is one key of " + ", ".join(VALUE_TYPES))
@@ -182,11 +186,13 @@ def param_value(item, count):
     else:
         kind = ("Bool" if type(item) is bool else "Int" if type(item) is int else "List" if isinstance(item, list)
                 else "Addr" if is_address(item) else "Str" if isinstance(item, str) else None)
+    count[1] += VALUE_BYTES
     if kind == "Int" and type(item) is int and -2**127 <= item < 2**127:
         return {"Int": str(item)}  # i128 as a decimal string avoids float decoding.
     if kind == "Bool" and type(item) is bool or kind == "Addr" and is_address(item):
         return {kind: item}
     if kind == "Str" and isinstance(item, str) and len(item.encode()) <= MAX_TEXT:
+        count[1] += (len(item.encode()) + 3) // 4 * 4
         return {"Str": item}
     if kind == "List" and isinstance(item, list):
         count[0] += len(item)
@@ -200,16 +206,21 @@ def params(value, tier=None):
     """Validate owner params and return their pinned CLI spec JSON, a key => AllowitValue object.
     Keys are 1 to 32 ASCII letters, digits or underscores, at most 32 of them. Simple and Common
     admit only the 8 canonical keys, each with its rule's type: nonnegative caps, unsigned 64-bit
-    `call_cap` and `expiry`, and address lists. An absent key is unset."""
+    `call_cap` and `expiry`, and address lists. All params encode in at most MAX_PARAM_BYTES. An
+    absent key is unset."""
     standard = tier in ("simple", "common")
     limit = len(PARAM_KEYS) if standard else MAX_PARAMS
     if not isinstance(value, dict) or len(value) > limit:
         raise ValueError("Params must be an object of at most {} keys".format(limit))
-    result = {}
+    result, size = {}, 0
     for key, item in value.items():
         if not PARAM_KEY.fullmatch(key):
             raise ValueError("Param keys are 1 to 32 ASCII letters, digits or underscores")
-        encoded = result[key] = param_value(item, [0])
+        count = [0, 0]
+        encoded = result[key] = param_value(item, count)
+        size += KEY_BYTES + count[1]
+        if size > MAX_PARAM_BYTES:
+            raise ValueError("Params encode in at most {} bytes".format(MAX_PARAM_BYTES))
         if not standard:
             continue
         if key not in PARAM_KEYS:

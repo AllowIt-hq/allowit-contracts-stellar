@@ -82,6 +82,22 @@ class ReleaseTests(unittest.TestCase):
         plan=copy.deepcopy(self.plan);plan['params']['day_total_cap']=10009999
         with self.assertRaisesRegex(ValueError,'daily capacity'): release.smoke_params(plan)
 
+    def test_deploy_wallet_prepare_binds_the_common_tier_and_smoke_source(self):
+        # The release builds the owner packet with the Common tier and the smoke policy source;
+        # without them the packet check refuses the stage before any CLI call.
+        class Built(Exception):
+            pass
+        calls=[]
+        def cli(args,input_data=None):
+            calls.append(args)
+            raise Built
+        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release.ca,'cli_run',side_effect=cli):
+            with self.assertRaises(Built):
+                release.prepare(self.plan,self.base,'deploy-wallet')
+        self.assertEqual(calls[0][:2],['contract','deploy'])
+        config=json.loads(calls[0][calls[0].index('--config')+1])
+        self.assertEqual(config['rules'],release.RULES)
+
     def test_reject_fee_aggregate(self):
         self.plan['total_fee_cap_stroops']=100
         with self.assertRaisesRegex(ValueError,'aggregate'): self.load()

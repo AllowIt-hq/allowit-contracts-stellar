@@ -141,8 +141,8 @@ NUMBER = re.compile(r"(?:0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|[0-9][0-9_]*)(?:" + 
 CONTEXT_STRUCT = re.compile(r"\bAllowitContext\s*\{")
 # A tuple field of params or args, which is the backend map.
 MAP_FIELD = re.compile(r"\.\s*(?:params|args)\s*\.\s*\d")
-# A call of the only write that standard wallets cannot store.
-SET_STATE = re.compile(r"\ballowit\s*::\s*set_state\b")
+# A call of the only write that standard wallets cannot store, also through a raw identifier.
+SET_STATE = re.compile(r"\ballowit\s*::\s*(?:r#)?set_state\b")
 # A format placeholder or brace escape in a string literal's value. Only `{}`, `{:?}`, `{{` and
 # `}}` pass: a width or precision count, such as `{:1$}`, `{:.*}` or `{:a$}`, is a `usize`, so it
 # would infer an unsuffixed binding as `usize` without naming the type.
