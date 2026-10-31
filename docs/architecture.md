@@ -110,11 +110,12 @@ Beside the allowlist, the tooling rejects:
   Linked into the offchain evaluator, it could run before `main`, while the Soroban compile rejects it.
 - A macro message that is not one string literal. The message is optional; the format arguments
   after it are ordinary checked code.
-- A string literal whose value holds a brace other than the placeholders `{}` and `{:?}` and the
+- A macro message whose value holds a brace other than the placeholders `{}` and `{:?}` and the
   escapes `{{` and `}}`. The allowed macros read their message as a format string, and a width or
   precision count, such as `{:1$}`, `{:.*}` or `{:a$}`, is a `usize`: it makes an unsuffixed
   binding a `usize` without naming the type. The check decodes escapes first, so `\x7b` and
-  `\u{7b}` cannot spell a brace.
+  `\u{7b}` cannot spell a brace. Other string literals are data, such as a JSON body, and can hold
+  any brace.
 - Every attribute other than `allow`, `expect`, `warn`, `deny`, `forbid`, `inline`, `cold` and
   `must_use`, for example `track_caller`, `doc` or `cfg`.
 - The map inside `params` and `args`, such as `ctx.params.0`, and the name `AllowitParams`. Soroban

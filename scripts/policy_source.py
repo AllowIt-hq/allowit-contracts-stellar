@@ -52,7 +52,8 @@ MACRO_NAMES = re.compile(r"\b(?:include|include_str|include_bytes|env|option_env
 MACROS = frozenset(("assert", "assert_eq", "assert_ne", "panic", "matches", "unreachable"))
 MACRO_CALL = re.compile(r"(?:r#)?\b([A-Za-z_]\w*)\s*!(?!=)")
 # The argument index of each allowed macro's optional message. A message must be one string literal,
-# whose placeholders `plain_braces` checks; the format arguments after it are ordinary code.
+# whose placeholders `plain_braces` checks; the format arguments after it are ordinary code. Other
+# string literals are data, not format strings, so their braces are not checked.
 MESSAGE = {"panic": 0, "unreachable": 0, "assert": 1, "assert_eq": 2, "assert_ne": 2}
 # Attributes that authored code may use. Every other attribute rejects, such as `path`, `cfg`,
 # `unsafe(...)`, `link_section`, `export_name`, `track_caller` or `doc`.
@@ -178,7 +179,7 @@ def unescape(match):
 
 
 def plain_braces(value):
-    """Reject a string literal value with a brace other than `{}`, `{:?}`, `{{` or `}}`. The allowed
+    """Reject a macro message value with a brace other than `{}`, `{:?}`, `{{` or `}}`. The allowed
     macros read their message as a format string, whose width and precision counts are `usize`."""
     for brace in BRACE.finditer(value):
         if brace[0] not in PLACEHOLDERS:
@@ -386,9 +387,10 @@ def macro_args(tokens, i):
     return groups
 
 
-def portable(code):
-    """Raise ValueError for macros, attributes, context patterns, backend map access and indexing
-    that could behave differently in `AllowitCustomPolicy` and on the host, then apply the allowlist."""
+def portable(code, strings):
+    """Raise ValueError for macros, attributes, context patterns, backend map access, message
+    placeholders and indexing that could behave differently in `AllowitCustomPolicy` and on the host,
+    then apply the allowlist. `strings` maps the offset of each string literal's `0` to its value."""
     for found in MACRO_CALL.finditer(code):
         if found[1] not in RUST_KEYWORDS and found[1] not in MACROS:
             reject("macro `{}!`; only {} are allowed".format(found[1], ", ".join(m + "!" for m in sorted(MACROS))))
@@ -403,15 +405,19 @@ def portable(code):
             reject("a struct expression or pattern of `AllowitContext`")
     if MAP_FIELD.search(code):
         reject("the map inside params or args; read them with `.get(key)`")
-    tokens = TOKEN.findall(code)
+    spans = list(TOKEN.finditer(code))
+    tokens = [span[0] for span in spans]
     # Literals are `0` here: a present message must be exactly one of them.
     for k in range(len(tokens) - 2):
         name = tokens[k].removeprefix("r#")
         if name in MESSAGE and tokens[k + 1] == "!" and tokens[k + 2] in OPEN:
-            args = macro_args(tokens, k + 2)
-            message = args[MESSAGE[name]] if len(args) > MESSAGE[name] else []
+            args, index = macro_args(tokens, k + 2), MESSAGE[name]
+            message = args[index] if len(args) > index else []
             if message not in ([], ["0"]):
                 reject("a `{}!` message that is not one string literal".format(name))
+            if message:
+                # The message token follows the earlier argument groups and their commas.
+                plain_braces(strings.get(spans[k + 3 + sum(len(group) + 1 for group in args[:index])].start(), ""))
     for before, token in zip(tokens, tokens[1:]):
         if token == "[" and (before in (")", "]", "?") or before[:1].isdigit()
                              or IDENT.fullmatch(before) and before not in RUST_KEYWORDS):
@@ -420,10 +426,10 @@ def portable(code):
 
 
 def rust_code(source):
-    """Return source with comments blanked and literals replaced by `0`, so only code remains.
-    Block comments nest as in Rust. An unterminated comment or literal is rejected, and so is a
-    string whose value holds a format placeholder other than `{}` or `{:?}`."""
-    out, i, n = [], 0, len(source)
+    """Return source with comments blanked and literals replaced by `0`, so only code remains, and
+    a map from the offset of each string literal's `0` to its value. Block comments nest as in Rust.
+    An unterminated comment or literal is rejected."""
+    out, strings, i, n = [], {}, 0, len(source)  # One character per item, so len(out) is an offset.
     while i < n:
         if source.startswith("//", i):
             end = source.find("\n", i)
@@ -442,22 +448,22 @@ def rust_code(source):
             end = source.find('"' + raw[1], raw.end())
             if end < 0:
                 raise ValueError("Policy source has an unterminated raw string")
-            plain_braces(source[raw.end():end])
+            strings[len(out) + 1] = source[raw.end():end]
             i = end + 1 + len(raw[1])
-            out.append(" 0 ")
+            out.extend(" 0 ")
         elif literal := STRING.match(source, i):
-            plain_braces(ESCAPE.sub(unescape, literal[0][literal[0].index('"') + 1:-1]))
+            strings[len(out) + 1] = ESCAPE.sub(unescape, literal[0][literal[0].index('"') + 1:-1])
             i = literal.end()
-            out.append(" 0 ")
+            out.extend(" 0 ")
         elif literal := CHAR.match(source, i):
             i = literal.end()
-            out.append(" 0 ")
+            out.extend(" 0 ")
         elif source[i] == '"' or source.startswith(('b"', 'c"'), i):
             raise ValueError("Policy source has an unterminated string")
         else:
             out.append(source[i])
             i += 1
-    return "".join(out)
+    return "".join(out), strings
 
 
 def checked_code(source):
@@ -465,7 +471,7 @@ def checked_code(source):
     crate. Reject inner attributes and doc comments, which the including module cannot accept."""
     if re.search(r"^\s*(//!|/\*!|#\s*!\s*\[)", source, re.M):
         raise ValueError("Policy source must not use inner attributes or inner doc comments")
-    code = rust_code(source)
+    code, strings = rust_code(source)
     for found in ALLOWIT_NAME.finditer(code):
         before, after = code[:found.start()].rstrip(), code[found.end():].lstrip()
         if not after.startswith("::") or before.endswith("::"):
@@ -481,7 +487,7 @@ def checked_code(source):
     for pattern, name in OUTSIDE:
         if pattern.search(code):
             raise ValueError("Policy source must be one self-contained file; it uses " + name)
-    portable(code)
+    portable(code, strings)
     return code
 
 

@@ -500,14 +500,13 @@ class ContractAdmin(unittest.TestCase):
         raw = 'const R: &str = r#"*/ /* "quoted" "#;\nconst B: &[u8] = b"//";\n'
         self.assertEqual(ca.standard_prefix(helper + raw + source(call("expiry") + "    let s = \"/*\";\n" + call("tokens"))), ["expiry"])
         self.assertEqual(ca.standard_prefix(helper + source("    // \" /*\n" + call("expiry"))), ["expiry"])
-        # A header inside a literal is not code. With the real header in prelude form, none matches;
-        # a literal that holds a brace other than a plain placeholder rejects first.
+        # A header inside a literal is not code. With the real header in prelude form, none matches.
         fake = 'const S: &str = "pub fn execute(ctx: &AllowitContext) -> allowit::Result { ' + call("spent_cap").strip() + '";\n'
         for invalid in (fake + source(call("recipients"), HEAD.replace("allowit::Result {", "Result {")),
                         fake.replace('"', "r#\"", 1).replace('";', '"#;') + source("", HEAD.replace("allowit::Result {", "Result {")),
                         "/* pub fn execute(ctx: &AllowitContext) -> allowit::Result {\n" + call("spent_cap") + "*/\npub fn r#execute(ctx: &AllowitContext) -> Result {\n    Ok(())\n}\n",
                         source(call("expiry")) + "pub use execute as r#execute;\n"):
-            with self.subTest(source=invalid), self.assertRaisesRegex(ValueError, "execute|format placeholder"):
+            with self.subTest(source=invalid), self.assertRaisesRegex(ValueError, "execute"):
                 ca.standard_prefix(invalid)
         for unterminated in ("/* /* */", 'const S: &str = "', 'const R: &str = r#"x"'):
             with self.subTest(source=unterminated), self.assertRaisesRegex(ValueError, "unterminated"):
@@ -950,6 +949,23 @@ class ContractAdmin(unittest.TestCase):
         ) + formats
         for body in probes:
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
+                ca.standard_prefix(source(body, head))
+
+    def test_policy_source_checks_placeholders_only_in_macro_messages(self):
+        head = HEAD + CALL("recipients")
+        # Data strings are not format strings: JSON bodies and braces in values pass the gate.
+        data = ('    let payload = r#"{"amount":1}"#;\n    let body = "{\\"to\\":{x}}";\n'
+                '    if payload == body { panic!("{} {:?} {{}}", "{x}", r"{:1$}"); }\n'
+                '    assert!(true, "{}", "{y}");\n    assert_eq!(1u8, 1u8, "{:?}", "{0}");\n')
+        self.assertEqual(ca.standard_prefix(source(data, head)), ["recipients"])
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(source(data, head))
+            ca.host_compile(policy)
+        # A message placeholder other than `{}` or `{:?}` still rejects, at every message position.
+        for body in ('    panic!("{x}");\n', '    unreachable!(r#"{x}"#);\n', '    assert!(true, "{0}");\n',
+                     '    assert_eq!(1u8, 1u8, "{x}");\n', '    assert_ne!(1u8, 2u8, "\\x7bx\\x7d");\n'):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "format placeholder"):
                 ca.standard_prefix(source(body, head))
 
     def test_policy_source_rejects_raw_function_values_and_lowered_pointer_lints(self):
