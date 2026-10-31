@@ -16,6 +16,7 @@ use soroban_sdk::{
     xdr::{FromXdr, ToXdr},
 };
 mod persistent;
+/// Instance-storage key of the custody State.
 const STATE_KEY: u32 = 0;
 /// Version 3: free-form `policy_state` map. Version 2 stored a typed accounting history struct and
 /// version 1 an untyped Grant map. No layout migrates implicitly: the owner recovers funds.
@@ -58,6 +59,7 @@ pub struct AllowitPolicyDeployment {
     pub wasm_hash: Option<BytesN<32>>,
 }
 
+/// Stored custody State: owner configuration, policy state, nonce and pause.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllowitState {
@@ -81,6 +83,7 @@ pub struct AllowitState {
     pub paused: bool,
 }
 
+/// x402 signature: the signed execution request and the agent and server signatures over it.
 #[contracttype]
 #[derive(Clone)]
 pub struct AllowitPolicyAuthorization {
@@ -89,6 +92,7 @@ pub struct AllowitPolicyAuthorization {
     pub server_signature: BytesN<64>,
 }
 
+/// Wallet error codes. Rule denials collapse to `PolicyDenied`.
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -111,6 +115,7 @@ pub enum AllowitWalletError {
     Replay = 19,
 }
 
+/// Persistent keys: the replay marker of an operation and its deposit receipt.
 #[contracttype]
 #[derive(Clone)]
 enum Key {
@@ -120,6 +125,7 @@ enum Key {
 
 /// Compile-time policy mixin. No runtime fallback or system-controlled executable reference exists.
 pub trait AllowitPolicy {
+    /// Implementation kind in bindings and the standard prefix digest.
     const KIND: &'static str;
     /// Fixed standard implementations bind only their owner-approved initial preflight prefix.
     const STANDARD_PREFIX: bool = false;
@@ -1138,18 +1144,22 @@ impl From<allowit::AllowitError> for AllowitWalletError {
 #[macro_export]
 macro_rules! policy_wallet {
     ($name:ident, $policy:ty) => {
+        /// Policy wallet contract of one compiled policy.
         #[soroban_sdk::contract]
         pub struct $name;
         #[soroban_sdk::contractimpl]
         impl $name {
+            /// Initialize custody from an owner-signed configuration.
             pub fn __constructor(env: soroban_sdk::Env, config: $crate::AllowitPolicyConfig) {
                 $crate::construct::<$policy>(&env, config).unwrap();
             }
+            /// Read the custody State.
             pub fn state(
                 env: soroban_sdk::Env,
             ) -> Result<$crate::AllowitState, $crate::AllowitWalletError> {
                 $crate::state(&env)
             }
+            /// Read the current free-form policy state: standard and policy-defined keys.
             pub fn policy_state(
                 env: soroban_sdk::Env,
             ) -> Result<
@@ -1158,12 +1168,14 @@ macro_rules! policy_wallet {
             > {
                 $crate::policy_state(&env)
             }
+            /// Read the installed binding for the default argument schema.
             pub fn policy_binding(
                 env: soroban_sdk::Env,
             ) -> Result<allowit_wallet_protocol::AllowitPolicyBinding, $crate::AllowitWalletError>
             {
                 $crate::policy_binding::<$policy>(&env)
             }
+            /// Read the binding of one argument schema, if the installed policy admits it.
             pub fn policy_binding_for(
                 env: soroban_sdk::Env,
                 argument_schema_digest: soroban_sdk::BytesN<32>,
@@ -1171,6 +1183,7 @@ macro_rules! policy_wallet {
             {
                 $crate::policy_binding_for::<$policy>(&env, argument_schema_digest)
             }
+            /// Read the retained share credit of a successful deposit operation.
             pub fn deposit_receipt(
                 env: soroban_sdk::Env,
                 operation_id: soroban_sdk::BytesN<32>,
@@ -1180,6 +1193,7 @@ macro_rules! policy_wallet {
             > {
                 $crate::deposit_receipt(&env, operation_id)
             }
+            /// Run one agent- and server-authorized native operation under the installed policy.
             pub fn execute(
                 env: soroban_sdk::Env,
                 execution: allowit_wallet_protocol::AllowitExecutionRequest,
@@ -1187,12 +1201,14 @@ macro_rules! policy_wallet {
             {
                 $crate::execute::<$policy>(&env, execution)
             }
+            /// Apply a complete owner update at the next deployment version.
             pub fn deploy_policy(
                 env: soroban_sdk::Env,
                 deployment: $crate::AllowitPolicyDeployment,
             ) -> Result<(), $crate::AllowitWalletError> {
                 $crate::deploy_policy::<$policy>(&env, deployment)
             }
+            /// Pause or resume delegated execution at the next deployment version.
             pub fn set_pause(
                 env: soroban_sdk::Env,
                 paused: bool,
@@ -1200,6 +1216,7 @@ macro_rules! policy_wallet {
             ) -> Result<(), $crate::AllowitWalletError> {
                 $crate::set_pause(&env, paused, deployment_version)
             }
+            /// Owner recovery of funds under any readable layout.
             pub fn recover(
                 env: soroban_sdk::Env,
                 recipient: soroban_sdk::Address,
@@ -1207,6 +1224,7 @@ macro_rules! policy_wallet {
             ) -> Result<(), $crate::AllowitWalletError> {
                 $crate::recover(&env, recipient, amount)
             }
+            /// Owner-signed passthrough call with explicit nested authorization.
             pub fn invoke(
                 env: soroban_sdk::Env,
                 contract: soroban_sdk::Address,
@@ -1221,6 +1239,7 @@ macro_rules! policy_wallet {
         impl soroban_sdk::auth::CustomAccountInterface for $name {
             type Signature = $crate::AllowitPolicyAuthorization;
             type Error = $crate::AllowitWalletError;
+            /// x402: admit one token transfer that the agent and server signed.
             fn __check_auth(
                 env: soroban_sdk::Env,
                 signature_payload: soroban_sdk::crypto::Hash<32>,

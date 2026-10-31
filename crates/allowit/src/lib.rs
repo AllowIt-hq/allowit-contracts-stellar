@@ -92,12 +92,14 @@ pub mod soroban {
     use soroban_sdk::{Env as AllowitEnv, IntoVal, Map, Symbol, TryFromVal, Val, Vec};
     /// Free-form policy state: standard and policy-defined keys.
     pub type AllowitStateMap = Map<Symbol, Val>;
+    /// Make a `core.rs` value type a Soroban contract type.
     macro_rules! value {
         ($item:item) => {
             #[soroban_sdk::contracttype]
             $item
         };
     }
+    /// Make the `core.rs` error enum a Soroban contract error.
     macro_rules! error {
         ($item:item) => {
             #[soroban_sdk::contracterror]
@@ -262,11 +264,13 @@ pub mod host {
     }
     values!(i128 => I128, u64 => U64, bool => Bool);
 
+    /// Keep a `core.rs` value type a plain Rust type.
     macro_rules! value {
         ($item:item) => {
             $item
         };
     }
+    /// Keep the `core.rs` error enum a plain Rust enum.
     macro_rules! error {
         ($item:item) => {
             $item

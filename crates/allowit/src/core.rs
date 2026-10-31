@@ -138,13 +138,20 @@ pub mod prelude {
     };
 }
 
-/// Standard state keys. `post_flight` writes them; policy writes apply after them.
+// Standard state keys. `post_flight` writes them; policy writes apply after them.
+/// Standard key: lifetime irreversible expenses.
 pub const SPENT: &str = "spent";
+/// Standard key: irreversible expenses on `day`.
 pub const DAY_SPENT: &str = "day_spent";
+/// Standard key: gross amounts plus separate attributable gas on `day`.
 pub const DAY_TOTAL: &str = "day_total";
+/// Standard key: successful operations.
 pub const CALLS: &str = "calls";
+/// Standard key: UTC day of the daily values.
 pub const DAY_KEY: &str = "day";
+/// Standard key: a lifetime operation lacked price facts.
 pub const UNPRICED: &str = "unpriced";
+/// Standard key: an operation on `day` lacked price facts.
 pub const DAY_UNPRICED: &str = "day_unpriced";
 
 /// Standard values of a state map. An absent key reads as zero or false.
