@@ -457,13 +457,14 @@ class ContractAdmin(unittest.TestCase):
         raw = 'const R: &str = r#"*/ /* "quoted" "#;\nconst B: &[u8] = b"//";\n'
         self.assertEqual(ca.standard_prefix(helper + raw + source(call("expiry") + "    let s = \"/*\";\n" + call("tokens"))), ["expiry"])
         self.assertEqual(ca.standard_prefix(helper + source("    // \" /*\n" + call("expiry"))), ["expiry"])
-        # A header inside a literal is not code. With the real header in prelude form, none matches.
+        # A header inside a literal is not code. With the real header in prelude form, none matches;
+        # a literal that holds a brace other than a plain placeholder rejects first.
         fake = 'const S: &str = "pub fn execute(ctx: &AllowitContext) -> allowit::Result { ' + call("spent_cap").strip() + '";\n'
         for invalid in (fake + source(call("recipients"), HEAD.replace("allowit::Result {", "Result {")),
                         fake.replace('"', "r#\"", 1).replace('";', '"#;') + source("", HEAD.replace("allowit::Result {", "Result {")),
                         "/* pub fn execute(ctx: &AllowitContext) -> allowit::Result {\n" + call("spent_cap") + "*/\npub fn r#execute(ctx: &AllowitContext) -> Result {\n    Ok(())\n}\n",
                         source(call("expiry")) + "pub use execute as r#execute;\n"):
-            with self.subTest(source=invalid), self.assertRaisesRegex(ValueError, "execute"):
+            with self.subTest(source=invalid), self.assertRaisesRegex(ValueError, "execute|format placeholder"):
                 ca.standard_prefix(invalid)
         for unterminated in ("/* /* */", 'const S: &str = "', 'const R: &str = r#"x"'):
             with self.subTest(source=unterminated), self.assertRaisesRegex(ValueError, "unterminated"):
@@ -785,7 +786,8 @@ class ContractAdmin(unittest.TestCase):
                    "fn i(c: &AllowitContext) -> u64 { let held = &c.env; let _ = held; let mut n = 0u64; for x in 0..3u64 { n = n.max(x + c.request.now); } n }\n"
                    "fn j(c: &AllowitContext) -> allowit::Result<u64> { let n: Option<u64> = allowit::get_state(c, \"seen\")?; "
                    "allowit::set_state(c, \"seen\", n.unwrap_or(0).saturating_add(1))?; Ok(n.unwrap_or(0)) }\n"
-                   "fn k(c: &AllowitContext) -> bool { c.request.spent_units.checked_add(c.request.gas_units).is_some() && !c.request.unpriced }\n")
+                   "fn k(c: &AllowitContext) -> bool { c.request.spent_units.checked_add(c.request.gas_units).is_some() && !c.request.unpriced }\n"
+                   "fn m(c: &AllowitContext) { let n = 1u8; assert!(n > 0u8, \"{{n}} {} left, {:?} \\\\x7b\", n, c.request.now); panic!(\"plain\") }\n")
         self.assertEqual(ca.standard_prefix(allowed + source("", head)), ["recipients"])
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
@@ -798,11 +800,26 @@ class ContractAdmin(unittest.TestCase):
         # The review probe: a 64-bit host skips the cap that a 32-bit contract enforces.
         probe = ("    let wide = core::num::NonZeroUsize::MAX.ilog2() == 63;\n    if !wide {\n"
                  "        allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n    }\n")
+        # A format width or precision count is `usize`, so it infers `a: usize` without naming it.
+        cap = "    let wide = a.checked_mul(a).is_some();\n    if !wide {\n        allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n    }\n"
+        guard = "    let a = 65_536;\n    if ctx.request.amount < 0i128 {{ {} }}\n".format
+        formats = (
+            guard('panic!("{:1$}", 0u8, a);') + cap,
+            guard('assert!(false, "{:.*}", a, 0u8);') + cap,
+            guard('assert!(false, "{:a$}", 0u8);') + cap,
+            guard('unreachable!("{:>a$}", 0u8);') + cap,
+            guard('panic!(r"{:.a$}", 0u8);') + cap,
+            # Escapes spell the braces without writing them.
+            guard('panic!("\\x7b:1$\\x7d", 0u8, a);') + cap,
+            guard('panic!("\\u{7b}:1$\\u{7d}", 0u8, a);') + cap,
+        )
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
-            policy.write_text(source(probe, head))
-            # It passes the std-only compile, so only the allowlist rejects it.
-            ca.host_compile(policy)
+            for body in (probe,) + formats:
+                with self.subTest(compiles=body):
+                    policy.write_text(source(body, head))
+                    # Each passes the std-only compile, so only the allowlist rejects it.
+                    ca.host_compile(policy)
         probes = (
             probe,
             "    let _ = core::num::NonZeroIsize::MAX.ilog10();\n",
@@ -829,7 +846,7 @@ class ContractAdmin(unittest.TestCase):
             "    let _ = <u64>::MAX.leading_zeros();\n",
             "    let _ = Option::<u64>::None;\n",
             "    let _ = ctx.state.clone();\n",
-        )
+        ) + formats
         for body in probes:
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
                 ca.standard_prefix(source(body, head))

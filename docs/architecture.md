@@ -100,6 +100,11 @@ Beside the allowlist, the tooling rejects:
 - Every macro other than `assert!`, `assert_eq!`, `assert_ne!`, `panic!`, `matches!` and
   `unreachable!`. `core::arch::global_asm!` is safe code without `unsafe` that emits native code.
   Linked into the offchain evaluator, it could run before `main`, while the Soroban compile rejects it.
+- A string literal whose value holds a brace other than the placeholders `{}` and `{:?}` and the
+  escapes `{{` and `}}`. The allowed macros read their message as a format string, and a width or
+  precision count, such as `{:1$}`, `{:.*}` or `{:a$}`, is a `usize`: it makes an unsuffixed
+  binding a `usize` without naming the type. The check decodes escapes first, so `\x7b` and
+  `\u{7b}` cannot spell a brace.
 - Every attribute other than `allow`, `expect`, `warn`, `deny`, `forbid`, `inline`, `cold` and
   `must_use`, for example `track_caller`, `doc` or `cfg`.
 - List access other than through the list rules. `recipients` and `tokens` may appear only in the
@@ -133,9 +138,11 @@ compiles:
   the branch source. Build the reviewed custom Wasm from the owner source before deployment.
 
 The allowlist is lexical: a name passes by spelling. A listed method name therefore also passes on
-an unlisted receiver type. The listed names take and return no pointer-width value on every type
-that portable code can produce, because no listed path, type or method yields a `usize`, slice,
-iterator or pointer. Extend the allowlist only with names that keep that property.
+an unlisted receiver type. No listed path, type or method takes or returns a `usize`, slice,
+iterator or pointer on a type that portable code can produce. A name is not the only way to reach a
+`usize`: Rust also infers one from a format width or precision count, which the placeholder check
+above rejects, and from an index, which rejects too. Extend the allowlist, the macros and the
+placeholders only with forms that keep this property.
 
 Integer overflow must behave the same: it panics, so the operation denies. The contract release
 profile sets `overflow-checks = true`. The offchain server must build with `overflow-checks = true`

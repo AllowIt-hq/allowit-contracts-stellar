@@ -128,6 +128,14 @@ LIST_NAME = re.compile(r"\b(?:recipients|tokens)\b")
 # A struct expression or pattern of the types that hold the lists and the environment. A return
 # type followed by a block is no struct expression.
 LIST_STRUCT = re.compile(r"\bAllowit(?:Grant|Context)\s*\{")
+# A format placeholder or brace escape in a string literal's value. Only `{}`, `{:?}`, `{{` and
+# `}}` pass: a width or precision count, such as `{:1$}`, `{:.*}` or `{:a$}`, is a `usize`, so it
+# would infer an unsuffixed binding as `usize` without naming the type.
+BRACE = re.compile(r"\{\{|\}\}|\{[^{}]*\}?|\}")
+PLACEHOLDERS = frozenset(("{{", "}}", "{}", "{:?}"))
+# One escape of a non-raw string literal: a byte, a Unicode scalar, a line continuation or a character.
+ESCAPE = re.compile(r"\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F_]{1,8})\}|\n\s*|([\s\S]))")
+SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0"}
 TOKEN = re.compile(r"r#[A-Za-z_]\w*|[A-Za-z_]\w*|::|=>|->|\|\||\$\w*|'\w+|\d\w*|\S")
 IDENT = re.compile(r"(?:r#)?[A-Za-z_]\w*")
 # Tokens that end an operand. `|` and `||` are an operator or a pattern alternative only after one;
@@ -138,6 +146,21 @@ OPEN, CLOSE = frozenset("([{"), frozenset(")]}")
 
 def reject(what):
     raise ValueError("Policy source must be one self-contained, portable file; it uses " + what)
+
+
+def unescape(match):
+    """Return the character that one string escape denotes."""
+    if match[1] or match[2]:
+        return chr(int((match[1] or match[2]).replace("_", ""), 16))
+    return SIMPLE_ESCAPES.get(match[3], match[3] or "")
+
+
+def plain_braces(value):
+    """Reject a string literal value with a brace other than `{}`, `{:?}`, `{{` or `}}`. The allowed
+    macros read their message as a format string, whose width and precision counts are `usize`."""
+    for brace in BRACE.finditer(value):
+        if brace[0] not in PLACEHOLDERS:
+            reject("the format placeholder `{}`; only `{{}}` and `{{:?}}` are portable".format(brace[0]))
 
 
 def uses(tokens, i):
@@ -351,7 +374,8 @@ def portable(code):
 
 def rust_code(source):
     """Return source with comments blanked and literals replaced by `0`, so only code remains.
-    Block comments nest as in Rust. An unterminated comment or literal is rejected."""
+    Block comments nest as in Rust. An unterminated comment or literal is rejected, and so is a
+    string whose value holds a format placeholder other than `{}` or `{:?}`."""
     out, i, n = [], 0, len(source)
     while i < n:
         if source.startswith("//", i):
@@ -371,9 +395,14 @@ def rust_code(source):
             end = source.find('"' + raw[1], raw.end())
             if end < 0:
                 raise ValueError("Policy source has an unterminated raw string")
+            plain_braces(source[raw.end():end])
             i = end + 1 + len(raw[1])
             out.append(" 0 ")
-        elif literal := STRING.match(source, i) or CHAR.match(source, i):
+        elif literal := STRING.match(source, i):
+            plain_braces(ESCAPE.sub(unescape, literal[0][literal[0].index('"') + 1:-1]))
+            i = literal.end()
+            out.append(" 0 ")
+        elif literal := CHAR.match(source, i):
             i = literal.end()
             out.append(" 0 ")
         elif source[i] == '"' or source.startswith(('b"', 'c"'), i):
