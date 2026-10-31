@@ -319,7 +319,10 @@ fn host_context(v: &Vector) -> AllowitContext {
     }
     if !v.blob.is_empty() {
         let texts = v.blob.iter().map(|n| AllowitValue::Str("x".repeat(*n)));
-        state.insert(vectors::BLOB.to_string(), AllowitValue::List(texts.collect()));
+        state.insert(
+            vectors::BLOB.to_string(),
+            AllowitValue::List(texts.collect()),
+        );
     }
     let mut args = params(vec![(
         vectors::INVOICE,
@@ -383,7 +386,9 @@ fn line(c: &AllowitContext, state: AllowitMap) -> String {
 }
 /// The Common wallet's policy with the full canonical prefix: every preflight in key order.
 fn preflight(c: &AllowitContext) -> allowit::Result {
-    RULES.into_iter().try_for_each(|rule| allowit::preflight(c, rule))
+    RULES
+        .into_iter()
+        .try_for_each(|rule| allowit::preflight(c, rule))
 }
 /// Every outcome of one vector on the host backend.
 fn host_outcome(v: &Vector) -> Outcome {
@@ -432,6 +437,7 @@ fn host_outcome(v: &Vector) -> Outcome {
 /// Print the host outcome of every shared vector for the contract portability test.
 #[test]
 fn vectors_print_host_outcomes() {
+    assert_eq!(vectors::MAX_STATE_BYTES, allowit::MAX_STATE_BYTES as usize);
     let all = vectors::vectors();
     for v in &all {
         println!("{}", host_outcome(v).line(v.name));
