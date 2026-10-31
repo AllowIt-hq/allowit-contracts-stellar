@@ -117,8 +117,11 @@ Beside the allowlist, the tooling rejects:
   `must_use`, for example `track_caller`, `doc` or `cfg`.
 - The map inside `params` and `args`, such as `ctx.params.0`, and the name `AllowitParams`. Soroban
   maps key by `Symbol` and decode values on read, and heap maps have other methods, so params and
-  args are read only with `.get(key)`. `get` passes only on `params` and `args`: on a list or a
-  string it would take a pointer-width index on the host. A struct expression or pattern of
+  args are read only with `.get(key)`. The host backend keeps that map private, so the std-only
+  compile also rejects `.0` on a clone or a binding, such as `ctx.params.clone().0`. `get` passes
+  only on the field access `.params` or `.args`, such as `ctx.params.get` or
+  `ctx.request.args.get`, and the file may not declare `params` or `args` as a binding or function
+  name: on a list or a string, `get` would take a pointer-width index on the host. A struct expression or pattern of
   `AllowitContext`, which would reach `state`, and struct update syntax `..` reject. Soroban and
   heap vectors have different methods with the same names, for example `append` drains its argument
   only on the host, so a list from `AllowitValue::List` admits only comparison, `clone`, matching
@@ -196,12 +199,14 @@ The portability test, `crates/policy-wallet/src/portability_tests.rs`, runs one 
 Every contract then returns the shared post-flight result. Each vector holds the current state
 before the operation. The test seeds each Wasm with the vector's params, args and that state, and
 checks that each success stores exactly the post-flight state that the host computed. Both backends
-also agree that the standard post-flight denies the catching policy's write with `Unsupported`.
+also agree that the standard post-flight denies the catching policy's write with `Unsupported`,
+that a write past `MAX_STATE_KEYS` is `InvalidState`, and that `evaluate` denies more than 16 args
+with `InvalidParam`.
 Separate tests check that every tier stores exactly the state that the server's `evaluate`
 returned, and that execution params reach the Custom policy, fail authorization when changed after
 signing, reject beyond their bounds and leave the standard tiers unaffected. Vectors that the
-kernel cannot produce, such as a deposit into the transfer-only custom contract or a negative cap,
-run only on the two backends. Kernel violations
+kernel cannot produce, such as a deposit into the transfer-only custom contract, a negative cap or
+more than 16 args, run only on the two backends. Kernel violations
 (another asset, payment to the wallet, request expiry, stale nonce, replay and pause) reject with the
 same kernel error in every contract.
 
@@ -231,8 +236,8 @@ computes it:
 Params, state and args share one value type, `AllowitValue`: `Int(i128)`, `Bool(bool)`,
 `Str(String)`, `Addr(Address)` and `List(Vec<AllowitValue>)`. Onchain a map is
 `Map<Symbol, AllowitValue>`, on the host `BTreeMap<String, AllowitValue>`. `params` and
-`request.args` are `AllowitParams`, which wraps that map and offers only
-`get(key) -> Option<AllowitValue>`. Values are owned on both backends, because Soroban maps decode
+`request.args` are `AllowitParams`, which wraps that map and offers authored policy only
+`get(key) -> Option<AllowitValue>`. The host map is private; the server converts with `From`. Values are owned on both backends, because Soroban maps decode
 them on read; a borrowed host value would bind differently in a `match`. A key that no map can
 hold, such as one with a space, is unset on both backends.
 
@@ -253,13 +258,15 @@ each with the type its rule decodes: a nonnegative `Int` cap, an `Int` in the `u
 text at most 256 bytes. Nothing checks that a rule reads its own key.
 
 The agent supplies execution params per call in `AllowitExecutionRequest.args`, at most 16 keys
-with the same value bounds. The agent and server authorize the whole request, so a changed arg
+with the same key and value bounds. An empty key, which a Soroban `Symbol` can hold, is
+`InvalidParam` in params and args on both backends. The agent and server authorize the whole request, so a changed arg
 fails authorization. The wallet passes them to policy as `ctx.request.args` and never stores them.
 Canonical rules and the standard contract ignore them; Custom and offchain policy read them with
 `ctx.request.args.get("key")`.
 
 The state map holds the standard keys `spent`, `day_spent`, `day_total`, `calls`, `day`,
-`unpriced` and `day_unpriced`, and any keys the policy defines. `AllowitStandardState` decodes the
+`unpriced` and `day_unpriced`, and any keys the policy defines, at most `allowit::MAX_STATE_KEYS`
+(39) keys in all: the seven standard keys and 32 policy keys. `AllowitStandardState` decodes the
 standard keys in one place; an absent key is zero or false, and a value of another type or range,
 such as a negative `calls`, is `InvalidState`. Policy code reads a key with
 `allowit::get_state::<V>(ctx, key)`, which sees the state before this operation and decodes the
@@ -277,12 +284,16 @@ replace a standard key: owner-signed code is trusted, and no key is reserved. A 
 standard keys later operations could not decode, such as `calls` written as a `bool`, a negative
 `spent` or a later `day`, is `InvalidState`. So is a merged state with `calls` at `u64::MAX`, or
 with `spent`, `day_spent` or `day_total` at `i128::MAX`: the next standard update would overflow
-before any repair write applies. The operation denies instead, so no policy write makes every later
-standard update fail.
+before any repair write applies. So is a merged state with more than `MAX_STATE_KEYS` keys: no call
+deletes a state key and `deploy_policy` keeps the state, so unbounded keys would grow the wallet's
+state entry past the ledger entry size. The operation denies instead, so no policy write makes
+every later standard update fail; operations that write no new key still pass at the bound.
 `post_flight` consumes the write buffer first, even when it fails.
 
 The server evaluates a policy with `allowit::evaluate(ctx, execute, tier)`. It clears stale
-writes, runs `execute`, and runs `post_flight` on approval; a denial discards the policy's writes.
+writes, checks `request.args` with `allowit::check_args` as the wallet kernel does (`InvalidParam`
+for args that the wallet rejects), runs `execute`, and runs `post_flight` on approval; a denial
+discards the policy's writes.
 So no write outlives its evaluation, also when the server reuses an `AllowitEnv`. Onchain, the
 wallet runs `post_flight` after its own policy check, and a denied transaction rolls the temporary
 buffer back.

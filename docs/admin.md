@@ -83,8 +83,10 @@ object such as `{"Str": "GA..."}` names the type explicitly. A value holds at mo
 and a text at most 256 bytes. Simple and Common admit only the canonical keys `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`
 (unsigned 64-bit integers), `recipients` and `tokens` (address lists). Custom admits its policy's
-own keys, such as `vendor_cap`. The standard preflight skips an absent selected rule; full policy
-code denies it. The tool accepts such a packet and prints a warning.
+own keys, such as `vendor_cap`. A Custom policy state holds at most 39 keys: the seven standard keys
+and 32 policy keys. No call deletes a state key, and `deploy_policy` keeps the state, so a policy
+that writes a new key past that bound denies every operation that writes it. The standard
+preflight skips an absent selected rule; full policy code denies it. The tool accepts such a packet and prints a warning.
 Legacy names such as `per_transfer`, `daily_limit` or `max_calls` reject on the standard tiers.
 Negative caps reject at standard configuration. Code changes defer the new tier validation to
 delegated admission.
