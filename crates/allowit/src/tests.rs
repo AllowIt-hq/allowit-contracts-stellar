@@ -595,12 +595,18 @@ fn post_flight_denies_policy_writes_that_leave_standard_state_undecodable() {
     let ctx = fixture(&env);
     env.as_contract(&id, || {
         type Write = fn(&AllowitContext) -> Result;
-        let writes: [Write; 5] = [
+        let writes: [Write; 9] = [
             |c| set_state(c, "calls", true),
             |c| set_state(c, "spent", -1i128),
             |c| set_state(c, "day_total", -1i128),
             |c| set_state(c, "day", c.request.now / DAY + 1),
             |c| set_state(c, "unpriced", 1u64),
+            // Totals with no room for the next call or a positive amount overflow every later
+            // standard update before a repair write applies.
+            |c| set_state(c, "calls", u64::MAX),
+            |c| set_state(c, "spent", i128::MAX),
+            |c| set_state(c, "day_spent", i128::MAX),
+            |c| set_state(c, "day_total", i128::MAX),
         ];
         for write in writes {
             write(&ctx).unwrap();
@@ -614,6 +620,11 @@ fn post_flight_denies_policy_writes_that_leave_standard_state_undecodable() {
         let next = post_flight(&ctx).unwrap();
         assert_eq!(read::<u64>(&env, &next, "day"), Ok(Some(0)));
         assert_eq!(read::<i128>(&env, &next, "spent"), Ok(Some(0)));
+        // The highest totals that leave room for one more call and one more unit still apply.
+        set_state(&ctx, "calls", u64::MAX - 1).unwrap();
+        set_state(&ctx, "spent", i128::MAX - 1).unwrap();
+        let next = post_flight(&ctx).unwrap();
+        assert_eq!(read::<u64>(&env, &next, "calls"), Ok(Some(u64::MAX - 1)));
     });
 }
 

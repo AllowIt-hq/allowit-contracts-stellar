@@ -224,7 +224,10 @@ server run the same function. It rolls the UTC day over, adds one call, adds `sp
 `day_unpriced` for a request without expense bounds. It then applies the policy's writes, which may
 replace a standard key: owner-signed code is trusted, and no key is reserved. A merged state whose
 standard keys later operations could not decode, such as `calls` written as a `bool`, a negative
-`spent` or a later `day`, is `InvalidState`: the operation denies instead of locking the wallet.
+`spent` or a later `day`, is `InvalidState`. So is a merged state with `calls` at `u64::MAX`, or
+with `spent`, `day_spent` or `day_total` at `i128::MAX`: the next standard update would overflow
+before any repair write applies. The operation denies instead, so no policy write makes every later
+standard update fail.
 `post_flight` consumes the write buffer first, even when it fails.
 
 The server evaluates a policy with `allowit::evaluate(ctx, execute)`. It clears stale writes, runs

@@ -431,7 +431,8 @@ fn decode(
 /// State after an approved operation, computed by the wallet and the server alike: roll the UTC
 /// day over, count the call, add spent and gross amounts, mark an unpriced request, then apply the
 /// policy's buffered writes. It clears the write buffer first, even when it fails. A result that
-/// later operations could not decode is `InvalidState`, so a policy write cannot lock the wallet.
+/// later operations could not decode, or whose totals leave no room for one more call or unit, is
+/// `InvalidState`, so a policy write cannot make every later standard update fail.
 pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
     let writes = take_writes(&ctx.env);
     let (mut s, (day_spent, day_total, day_unpriced)) = decode(ctx, &ctx.state)?;
@@ -446,7 +447,11 @@ pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
     let mut state = ctx.state.clone();
     s.write(&ctx.env, &mut state)?;
     merge(&mut state, writes);
-    decode(ctx, &state)?;
+    // The next standard update adds one call and may add a unit to each total.
+    let (s, (day_spent, day_total, _)) = decode(ctx, &state)?;
+    if s.calls == u64::MAX || [s.spent, day_spent, day_total].contains(&i128::MAX) {
+        return Err(AllowitError::InvalidState);
+    }
     Ok(state)
 }
 
