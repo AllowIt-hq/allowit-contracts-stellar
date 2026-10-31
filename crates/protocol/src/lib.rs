@@ -1,8 +1,8 @@
 #![no_std]
-use soroban_sdk::{Address, Bytes, BytesN, Symbol, contractevent, contracttype};
+use soroban_sdk::{Address, Bytes, BytesN, Map, Symbol, contractevent, contracttype};
 
-/// Typed owner Grant that rules read.
-pub use allowit::AllowitGrant;
+/// The one value type of owner params, execution params and policy state.
+pub use allowit::AllowitValue;
 
 /// Native transfer-profile argument encoding, fixed independently of policy source.
 pub const ARGUMENT_SCHEMA_DESCRIPTOR: &[u8] = b"allowit.stellar.sep41_transfer.v1:ScValMap(amount:i128,from:Address,to:Address,token:Address)";
@@ -139,6 +139,10 @@ pub struct AllowitExecutionRequest {
     pub invocation: AllowitPolicyInvocation,
     /// Optional canonical XDR of `AllowitExpenseBounds`, bounded by MAX_EXPENSE_BYTES. New cost rules require Some.
     pub expense: Option<Bytes>,
+    /// The agent's execution params of this call, at most `allowit::MAX_ARGS` keys with bounded
+    /// values. Agent and server sign them with the request; the wallet never stores them, and
+    /// only authored policy reads them, as `ctx.request.args`.
+    pub args: Map<Symbol, AllowitValue>,
 }
 
 #[contracttype]

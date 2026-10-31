@@ -16,11 +16,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWIT = ROOT / "crates/allowit/src"
 
-# Typed Grant fields, which are also the canonical rule names.
-GRANT_FIELDS = ("transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap", "call_cap", "recipients", "tokens", "expiry")
+# Canonical param keys, which are also the canonical rule names. `allowit::<KEY>` names each key.
+PARAM_KEYS = ("transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap", "call_cap", "recipients", "tokens", "expiry")
 
-# One prefix statement after whitespace removal: `allowit::<rule>(ctx,&ctx.grant.<rule>)?`. rustfmt may add a comma.
-PREFIX_CALL = re.compile(r"allowit::([a-z_]+)\(ctx,&ctx\.grant\.([a-z_]+),?\)\?")
+# One prefix statement after whitespace removal: `allowit::<rule>(ctx,ctx.params.get(allowit::<RULE>))?`.
+# rustfmt may add commas.
+PREFIX_CALL = re.compile(r"allowit::([a-z_]+)\(ctx,ctx\.params\.get\(allowit::([A-Z_]+),?\),?\)\?")
 EXECUTE = re.compile(r"\bpub\s+fn\s+execute\s*\(\s*ctx\s*:\s*&\s*AllowitContext\s*\)\s*->\s*allowit\s*::\s*Result(?:\s*<\s*\(\s*\)\s*>)?\s*\{")
 
 # Rust literals that can hide code from a plain scan: raw, byte, C and plain strings, then char
@@ -77,19 +78,29 @@ ALLOWED_KEYWORDS = frozenset((
 INTEGERS = tuple(sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 128))
 # Primitive types whose width or representation differs between the backends.
 NOT_PORTABLE = frozenset(("usize", "isize", "f16", "f32", "f64", "f128"))
-ERRORS = ("MissingGrant", "TransactionCapExceeded", "SpentCapExceeded", "DaySpentCapExceeded", "DayTotalCapExceeded",
-          "CallCapExceeded", "RecipientNotAllowed", "TokenNotAllowed", "Expired", "Unpriced", "InvalidParameter",
+ERRORS = ("MissingParam", "TransactionCapExceeded", "SpentCapExceeded", "DaySpentCapExceeded", "DayTotalCapExceeded",
+          "CallCapExceeded", "RecipientNotAllowed", "TokenNotAllowed", "Expired", "Unpriced", "InvalidParam",
           "InvalidState", "Overflow", "Unsupported")
-ENUMS = {"AllowitOperation": ("sep41_transfer", "sep56_deposit"), "AllowitError": ERRORS, "AllowitRule": GRANT_FIELDS}
-# Server-only enrichment: allowed offchain; a Custom contract that calls one does not compile.
+VALUES = ("Int", "Bool", "Str", "Addr", "List")
+ENUMS = {"AllowitOperation": ("sep41_transfer", "sep56_deposit"), "AllowitError": ERRORS, "AllowitRule": PARAM_KEYS,
+         "AllowitValue": VALUES}
+# Server-only enrichment: allowed offchain; a Custom contract that calls one does not compile. Each
+# takes a request struct whose fields `STRUCT_FIELDS` lists.
 SERVER_FUNCTIONS = ("price", "fetch", "internet_search", "marketplace_search", "systemone", "request_screening",
                     "clear_systemone_context")
-ALLOWIT_FUNCTIONS = GRANT_FIELDS + ("get_state", "set_state") + SERVER_FUNCTIONS
-ALLOWIT_TYPES = ("AllowitContext", "AllowitError", "AllowitGrant", "AllowitOperation", "AllowitRequest", "AllowitRule",
-                 "Address", "Result", "DAY")
+SERVER_TYPES = ("AllowitPrice", "AllowitFetch", "AllowitInternetSearch", "AllowitMarketplaceSearch",
+                "AllowitRequestScreening", "AllowitSystemOne")
+STRUCT_FIELDS = frozenset(("from", "to", "amount", "price", "slip", "method", "url", "data", "pubkey", "query", "id",
+                           "deny_below", "allow_above"))
+ALLOWIT_FUNCTIONS = PARAM_KEYS + ("param", "get_state", "set_state") + SERVER_FUNCTIONS
+# `AllowitParams` is absent on purpose: naming it would reach the backend map, whose keys and
+# methods differ. Params and args are read only with `.get(key)`.
+ALLOWIT_TYPES = ("AllowitContext", "AllowitError", "AllowitOperation", "AllowitRequest", "AllowitRule", "AllowitValue",
+                 "Address", "Result", "DAY") + tuple(key.upper() for key in PARAM_KEYS) + SERVER_TYPES
 TYPES = frozenset(ALLOWIT_TYPES + ("Option", "Some", "None", "Ok", "Err"))
 # Tuple constructors, which coerce to function pointers unless called.
-CONSTRUCTORS = frozenset(("Some", "Ok", "Err", "Option::Some", "Result::Ok", "Result::Err"))
+CONSTRUCTORS = frozenset(("Some", "Ok", "Err", "Option::Some", "Result::Ok", "Result::Err")
+                         + tuple(prefix + "AllowitValue::" + v for v in VALUES for prefix in ("", "allowit::")))
 # Undeclared lowercase names that are types with one width and representation on both backends.
 PRIMITIVES = frozenset(INTEGERS + ("bool", "char", "str", "_"))
 # Prelude functions; the layout ones observe pointer widths and backend type sizes. Never local names.
@@ -104,9 +115,12 @@ PATHS = FUNCTION_PATHS | frozenset(
     + ["Option::Some", "Option::None", "Result::Ok", "Result::Err"]
     + [t + "::" + c for t in INTEGERS for c in ("MAX", "MIN")]
     + ["core::cmp::Ordering"] + ["core::cmp::Ordering::" + o for o in ("Less", "Equal", "Greater")])
-# Context, Grant and request fields. `ctx.state` is read only through `allowit::get_state`.
-FIELDS = frozenset(("env", "grant", "request") + GRANT_FIELDS + (
-    "operation", "asset", "recipient", "amount", "now", "expires_at", "spent_units", "gas_units", "unpriced"))
+# Context and request fields. `ctx.state` is read only through `allowit::get_state`.
+FIELDS = frozenset(("env", "params", "request", "operation", "asset", "recipient", "amount", "now", "expires_at",
+                    "spent_units", "gas_units", "unpriced", "args"))
+# Methods allowed only on one receiver field: `get` reads params and args by key. On a list or a
+# string it would take a pointer-width index on the host.
+FIELD_METHODS = {"get": ("params", "args")}
 # Methods of `Option`, `Result`, fixed-width integers, `bool` and `Ordering` that take and return
 # no pointer-width value and no backend list.
 METHODS = frozenset((
@@ -116,18 +130,15 @@ METHODS = frozenset((
     "checked_add", "checked_sub", "checked_mul", "checked_div", "checked_rem", "checked_neg", "checked_abs",
     "checked_pow", "saturating_add", "saturating_sub", "saturating_mul", "saturating_pow", "pow", "abs", "abs_diff",
     "unsigned_abs", "signum", "is_positive", "is_negative", "div_euclid", "rem_euclid",
-    "is_lt", "is_le", "is_gt", "is_ge", "is_eq", "is_ne", "reverse", "then_some"))
+    "is_lt", "is_le", "is_gt", "is_ge", "is_eq", "is_ne", "reverse", "then_some")) | frozenset(FIELD_METHODS)
 NUMBER = re.compile(r"(?:0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|[0-9][0-9_]*)(?:" + "|".join(INTEGERS) + r")?")
-# Lists are read only through their rules, in exactly this form. Any other use of `recipients` or
-# `tokens`, such as a method call on a list, a write, a destructuring pattern or a bare call after
-# `use allowit::recipients`, rejects.
-LIST_CALL = re.compile(r"\ballowit\s*::\s*(recipients|tokens)\s*\(\s*&?\s*[A-Za-z_]\w*\s*,\s*&\s*[A-Za-z_]\w*\s*\."
-                       r"\s*grant\s*\.\s*(recipients|tokens)\s*,?\s*\)")
-LIST_VARIANT = re.compile(r"\bAllowitRule\s*::\s*(recipients|tokens)\b")
-LIST_NAME = re.compile(r"\b(?:recipients|tokens)\b")
-# A struct expression or pattern of the types that hold the lists and the environment. A return
+# A struct expression or pattern of the context, which would reach `state` past `get_state`. A return
 # type followed by a block is no struct expression.
-LIST_STRUCT = re.compile(r"\bAllowit(?:Grant|Context)\s*\{")
+CONTEXT_STRUCT = re.compile(r"\bAllowitContext\s*\{")
+# A tuple field of params or args, which is the backend map.
+MAP_FIELD = re.compile(r"\.\s*(?:params|args)\s*\.\s*\d")
+# A call of the only write that standard wallets cannot store.
+SET_STATE = re.compile(r"\ballowit\s*::\s*set_state\b")
 # A format placeholder or brace escape in a string literal's value. Only `{}`, `{:?}`, `{{` and
 # `}}` pass: a width or precision count, such as `{:1$}`, `{:.*}` or `{:a$}`, is a `usize`, so it
 # would infer an unsuffixed binding as `usize` without naming the type.
@@ -308,6 +319,8 @@ def allowlisted(code):
             if after in ("(", "::"):
                 if name not in METHODS:
                     reject("the method `{}`, which is not on the portable allowlist".format(name))
+                if name in FIELD_METHODS and tokens[i - 2:i - 1] != [] and tokens[i - 2] not in FIELD_METHODS[name]:
+                    reject("the method `{}` other than on {}".format(name, " or ".join(FIELD_METHODS[name])))
             elif name not in FIELDS:
                 reject("the field `{}`, which is not on the portable allowlist".format(name))
             i += 1
@@ -326,6 +339,9 @@ def allowlisted(code):
                 reject("the function `{}` as a value, whose address differs between the backends".format(path))
             i = j + 1 if turbofish else j
             continue
+        if name in STRUCT_FIELDS and after == ":" and tokens[i + 2:i + 3] != [":"]:
+            i += 1  # A field of a server request struct expression.
+            continue
         if name[0].isupper():
             if name not in TYPES and name not in defined:
                 reject("the name `{}`, which is not on the portable allowlist".format(name))
@@ -343,8 +359,8 @@ def allowlisted(code):
 
 
 def portable(code):
-    """Raise ValueError for macros, attributes, environment writes, list access and indexing that
-    could behave differently in `AllowitCustomPolicy` and on the host, then apply the allowlist."""
+    """Raise ValueError for macros, attributes, context patterns, backend map access and indexing
+    that could behave differently in `AllowitCustomPolicy` and on the host, then apply the allowlist."""
     for found in MACRO_CALL.finditer(code):
         if found[1] not in RUST_KEYWORDS and found[1] not in MACROS:
             reject("macro `{}!`; only {} are allowed".format(found[1], ", ".join(m + "!" for m in sorted(MACROS))))
@@ -353,17 +369,12 @@ def portable(code):
             reject("attribute `{}`".format(found[1]))
     if re.search(r"[{,]\s*\.\.(?![=.])\s*[^\s}\]),]", code):
         reject("struct update syntax `..`")
-    allowed = set()
-    for call in LIST_CALL.finditer(code):
-        if call[1] == call[2]:
-            allowed.update((call.start(1), call.start(2)))
-    allowed.update(found.start(1) for found in LIST_VARIANT.finditer(code))
-    if any(found.start() not in allowed for found in LIST_NAME.finditer(code)):
-        reject("`recipients` or `tokens` other than as `allowit::<list>(ctx, &ctx.grant.<list>)`")
-    for found in LIST_STRUCT.finditer(code):
+    for found in CONTEXT_STRUCT.finditer(code):
         before = re.sub(r"(?:&\s*(?:'\w+\s*)?(?:mut\s+)?)+$", "", code[:found.start()].rstrip()).rstrip()
         if not before.endswith("->"):
-            reject("a struct expression or pattern of `AllowitGrant` or `AllowitContext`")
+            reject("a struct expression or pattern of `AllowitContext`")
+    if MAP_FIELD.search(code):
+        reject("the map inside params or args; read them with `.get(key)`")
     tokens = TOKEN.findall(code)
     for before, token in zip(tokens, tokens[1:]):
         if token == "[" and (before in (")", "]", "?") or before[:1].isdigit()
@@ -440,7 +451,8 @@ def checked_code(source):
 
 def standard_prefix(source):
     """Return the standard prefix of authored policy source: the consecutive leading statements of
-    `execute` of the exact form `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`. Any other statement ends it."""
+    `execute` of the exact form `allowit::<rule>(ctx, ctx.params.get(allowit::<RULE>))?;`, each rule
+    with its own canonical key. Any other statement ends it; a rule may still read any key there."""
     text = checked_code(source)
     found = list(EXECUTE.finditer(text))
     if len(found) != 1 or len(re.findall(r"\bexecute\b", text)) != 1:
@@ -448,10 +460,16 @@ def standard_prefix(source):
     rules = []
     for statement in text[found[0].end():].split(";"):
         call = PREFIX_CALL.fullmatch(re.sub(r"\s+", "", statement))
-        if not call or call[1] != call[2] or call[1] not in GRANT_FIELDS:
+        if not call or call[1].upper() != call[2] or call[1] not in PARAM_KEYS:
             break
         rules.append(call[1])
     return rules
+
+
+def writes_state(source):
+    """True when authored policy source calls `allowit::set_state`, a write that Simple and Common
+    cannot store: they run only the canonical prefix onchain, so the server denies every write."""
+    return bool(SET_STATE.search(checked_code(source)))
 
 
 @functools.lru_cache(maxsize=None)

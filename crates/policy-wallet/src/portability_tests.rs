@@ -11,18 +11,18 @@
 //! Host and Soroban outcomes must be identical on every pass value, error and post-flight state.
 //! Each vector holds the current state before the operation. The custom contract must return the
 //! mapped policy result, and the catching fixture the mapped catching result. The standard
-//! contract must return the mapped first prefix preflight error, which skips unset Grant fields.
-//! The simple contract runs no rules. Every contract then returns the shared post-flight result
-//! and stores exactly the post-flight state that the host computed. Kernel violations reject
-//! identically in every contract.
+//! contract must return the mapped first prefix preflight error, which skips absent params, and
+//! rejects a custom param. The simple contract runs no rules. Every contract then returns the
+//! shared post-flight result and stores exactly the post-flight state that the host computed.
+//! Kernel violations reject identically in every contract.
 //!
-//! A writing suffix on the standard tiers: the server keeps the suffix's own keys offchain and
-//! builds `ctx.state` with `allowit::offchain_state`, so Common and Simple approve exactly the
-//! operations that the catching custom contract approves.
+//! Policy writes: Custom stores them; the standard tiers run only the canonical prefix onchain,
+//! so the host's standard post-flight denies them. The server's evaluation therefore equals the
+//! stored state for every tier.
 extern crate std;
 use super::tests::{CATCHING, COMMON, CUSTOM, Fixture, SIMPLE};
 use super::*;
-use allowit::{AllowitError, AllowitStandardState};
+use allowit::{AllowitError, AllowitStandardState, AllowitTier, RULES};
 use allowit_wallet_protocol::AllowitPolicyInvocation;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -48,20 +48,9 @@ mod vectors {
 }
 use vectors::{Outcome, Vector};
 
-/// Every canonical rule in Grant field order.
-const RULES: [AllowitRule; 8] = [
-    AllowitRule::transaction_cap,
-    AllowitRule::spent_cap,
-    AllowitRule::day_spent_cap,
-    AllowitRule::day_total_cap,
-    AllowitRule::call_cap,
-    AllowitRule::recipients,
-    AllowitRule::tokens,
-    AllowitRule::expiry,
-];
 /// Every rule error, indexed by its code minus one.
 const ERRORS: [AllowitError; 14] = [
-    AllowitError::MissingGrant,
+    AllowitError::MissingParam,
     AllowitError::TransactionCapExceeded,
     AllowitError::SpentCapExceeded,
     AllowitError::DaySpentCapExceeded,
@@ -71,7 +60,7 @@ const ERRORS: [AllowitError; 14] = [
     AllowitError::TokenNotAllowed,
     AllowitError::Expired,
     AllowitError::Unpriced,
-    AllowitError::InvalidParameter,
+    AllowitError::InvalidParam,
     AllowitError::InvalidState,
     AllowitError::Overflow,
     AllowitError::Unsupported,
@@ -143,29 +132,51 @@ fn host_lines() -> List<Text> {
         .collect()
 }
 
-fn list(env: &Env, universe: &[Address], items: &Option<List<usize>>) -> Option<Vec<Address>> {
-    items.as_ref().map(|items| {
-        let mut out = Vec::new(env);
-        for i in items {
-            out.push_back(universe[*i].clone());
-        }
-        out
-    })
-}
-fn grant(env: &Env, universe: &[Address], v: &Vector) -> AllowitGrant {
-    AllowitGrant {
-        transaction_cap: v.caps[0],
-        spent_cap: v.caps[1],
-        day_spent_cap: v.caps[2],
-        day_total_cap: v.caps[3],
-        call_cap: v.call_cap,
-        recipients: list(env, universe, &v.recipients),
-        tokens: list(env, universe, &v.tokens),
-        expiry: v.expiry,
+/// A `List` of the universe addresses at `items`, or `None`.
+fn list(env: &Env, universe: &[Address], items: &Option<List<usize>>) -> Option<AllowitValue> {
+    let mut out = Vec::new(env);
+    for i in items.as_ref()? {
+        out.push_back(AllowitValue::Addr(universe[*i].clone()));
     }
+    Some(AllowitValue::List(out))
+}
+/// A key => value map of `entries`, without the absent ones.
+fn map(env: &Env, entries: &[(&str, Option<AllowitValue>)]) -> Map<Symbol, AllowitValue> {
+    let mut out = Map::new(env);
+    for (key, value) in entries {
+        if let Some(value) = value {
+            out.set(Symbol::new(env, key), value.clone());
+        }
+    }
+    out
+}
+/// The params of a vector: its canonical params and the custom `invoice_cap`.
+fn params(env: &Env, universe: &[Address], v: &Vector) -> Map<Symbol, AllowitValue> {
+    let int = |n: Option<i128>| n.map(AllowitValue::Int);
+    map(
+        env,
+        &[
+            (allowit::TRANSACTION_CAP, int(v.caps[0])),
+            (allowit::SPENT_CAP, int(v.caps[1])),
+            (allowit::DAY_SPENT_CAP, int(v.caps[2])),
+            (allowit::DAY_TOTAL_CAP, int(v.caps[3])),
+            (allowit::CALL_CAP, v.call_cap.map(AllowitValue::from)),
+            (allowit::RECIPIENTS, list(env, universe, &v.recipients)),
+            (allowit::TOKENS, list(env, universe, &v.tokens)),
+            (allowit::EXPIRY, v.expiry.map(AllowitValue::from)),
+            (vectors::INVOICE_CAP, int(v.invoice_cap)),
+        ],
+    )
+}
+/// The agent's execution params of a vector.
+fn args(env: &Env, v: &Vector) -> Map<Symbol, AllowitValue> {
+    map(
+        env,
+        &[(vectors::INVOICE, v.invoice.then_some(AllowitValue::Int(1)))],
+    )
 }
 /// The current state map of a vector, with the catching policy's key when set.
-fn state_map(env: &Env, v: &Vector) -> Map<Symbol, Val> {
+fn state_map(env: &Env, v: &Vector) -> Map<Symbol, AllowitValue> {
     let mut state = Map::new(env);
     let s = AllowitStandardState {
         calls: v.calls,
@@ -176,18 +187,18 @@ fn state_map(env: &Env, v: &Vector) -> Map<Symbol, Val> {
         day_total: v.day_total,
         day_unpriced: v.day_unpriced,
     };
-    s.write(env, &mut state).unwrap();
+    s.write(&mut state).unwrap();
     if let Some(over) = v.over {
-        state.set(Symbol::new(env, vectors::OVER), over.into_val(env));
+        state.set(Symbol::new(env, vectors::OVER), over.into());
     }
     state
 }
 /// A state map as `vectors::state_line`.
-fn line(env: &Env, state: &Map<Symbol, Val>) -> Text {
-    let s = AllowitStandardState::read(env, state).unwrap();
+fn line(env: &Env, state: &Map<Symbol, AllowitValue>) -> Text {
+    let s = AllowitStandardState::read(state).unwrap();
     let over = state
         .get(Symbol::new(env, vectors::OVER))
-        .map(|raw| u64::try_from_val(env, &raw).unwrap());
+        .map(|value| u64::try_from(value).unwrap());
     vectors::state_line(
         s.calls,
         s.spent,
@@ -202,7 +213,7 @@ fn line(env: &Env, state: &Map<Symbol, Val>) -> Text {
 fn context(env: &Env, universe: &[Address], v: &Vector) -> AllowitContext {
     AllowitContext {
         env: env.clone(),
-        grant: grant(env, universe, v),
+        params: AllowitParams(params(env, universe, v)),
         state: state_map(env, v),
         request: AllowitRequest {
             operation: if v.deposit {
@@ -218,6 +229,7 @@ fn context(env: &Env, universe: &[Address], v: &Vector) -> AllowitContext {
             spent_units: v.spent_units,
             gas_units: v.gas_units,
             unpriced: !v.priced,
+            args: AllowitParams(args(env, v)),
         },
     }
 }
@@ -225,45 +237,42 @@ fn context(env: &Env, universe: &[Address], v: &Vector) -> AllowitContext {
 fn soroban_outcome(env: &Env, contract: &Address, universe: &[Address], v: &Vector) -> Outcome {
     env.as_contract(contract, || {
         let c = context(env, universe, v);
-        let g = &c.grant;
+        let p = |key| c.params.get(key);
         let code = |e: AllowitError| e as u32;
         let index = |a: Address| format!("@{}", universe.iter().position(|x| *x == a).unwrap());
-        let next = || {
-            allowit::post_flight(&c)
+        let evaluate = |tier| {
+            allowit::evaluate(&c, catching::execute, tier)
                 .map(|state| line(env, &state))
                 .map_err(code)
         };
         let rules: List<Result<Text, u32>> = [
-            allowit::transaction_cap(&c, &g.transaction_cap).map(|v| v.to_string()),
-            allowit::spent_cap(&c, &g.spent_cap).map(|v| v.to_string()),
-            allowit::day_spent_cap(&c, &g.day_spent_cap).map(|v| v.to_string()),
-            allowit::day_total_cap(&c, &g.day_total_cap).map(|v| v.to_string()),
-            allowit::call_cap(&c, &g.call_cap).map(|v| v.to_string()),
-            allowit::recipients(&c, &g.recipients).map(index),
-            allowit::tokens(&c, &g.tokens).map(index),
-            allowit::expiry(&c, &g.expiry).map(|v| v.to_string()),
+            allowit::transaction_cap(&c, p(allowit::TRANSACTION_CAP)).map(|v| v.to_string()),
+            allowit::spent_cap(&c, p(allowit::SPENT_CAP)).map(|v| v.to_string()),
+            allowit::day_spent_cap(&c, p(allowit::DAY_SPENT_CAP)).map(|v| v.to_string()),
+            allowit::day_total_cap(&c, p(allowit::DAY_TOTAL_CAP)).map(|v| v.to_string()),
+            allowit::call_cap(&c, p(allowit::CALL_CAP)).map(|v| v.to_string()),
+            allowit::recipients(&c, p(allowit::RECIPIENTS)).map(index),
+            allowit::tokens(&c, p(allowit::TOKENS)).map(index),
+            allowit::expiry(&c, p(allowit::EXPIRY)).map(|v| v.to_string()),
         ]
         .into_iter()
         .map(|r| r.map_err(code))
         .collect();
-        let preflight = RULES
-            .into_iter()
-            .map(|rule| allowit::preflight(&c, rule).map_err(code))
-            .collect();
-        let policy = sample::execute(&c).map_err(code);
-        let branch = branch::execute(&c).map_err(code);
-        let plain = next();
-        // The catching policy may write; post-flight consumes the writes in either case.
-        let catching = catching::execute(&c).map_err(code);
-        let catching_next = next();
         Outcome {
-            policy,
-            branch,
-            catching,
+            policy: sample::execute(&c).map_err(code),
+            branch: branch::execute(&c).map_err(code),
+            catching: catching::execute(&c).map_err(code),
             rules,
-            preflight,
-            next: plain,
-            catching_next: catching.and(catching_next),
+            preflight: RULES
+                .into_iter()
+                .map(|rule| allowit::preflight(&c, rule).map_err(code))
+                .collect(),
+            // The bare catching run above may have buffered a write; `evaluate` clears it first.
+            next: allowit::evaluate(&c, |_| Ok(()), AllowitTier::Standard)
+                .map(|state| line(env, &state))
+                .map_err(code),
+            catching_next: evaluate(AllowitTier::Custom),
+            catching_standard: evaluate(AllowitTier::Standard),
         }
     })
 }
@@ -282,11 +291,11 @@ fn sample_prefix() -> List<AllowitRule> {
         }
         let call = line
             .strip_prefix("allowit::")
-            .and_then(|call| call.strip_suffix(")?;"))
-            .and_then(|call| call.split_once("(ctx, &ctx.grant."));
-        let Some(rule) = call.and_then(|(rule, field)| {
+            .and_then(|call| call.strip_suffix("))?;"))
+            .and_then(|call| call.split_once("(ctx, ctx.params.get(allowit::"));
+        let Some(rule) = call.and_then(|(rule, key)| {
             let i = RULES.iter().position(|r| std::format!("{r:?}") == rule)?;
-            (rule == field).then_some(RULES[i])
+            (rule.to_uppercase() == key).then_some(RULES[i])
         }) else {
             break;
         };
@@ -383,14 +392,14 @@ impl Wallet {
             store(env, &state);
         });
     }
-    /// Install the vector's Grant and current state, and move the ledger to the request time.
-    /// The owner can change Grant values without code redeployment.
+    /// Install the vector's params and current state, and move the ledger to the request time.
+    /// The owner can change param values without code redeployment.
     fn seed(&self, v: &Vector, paused: bool) {
         let env = &self.f.env;
         env.ledger().with_mut(|l| l.timestamp = v.now);
         env.as_contract(&self.f.wallet, || {
             let mut s = state(env).unwrap();
-            s.grant = grant(env, &self.universe, v);
+            s.params = params(env, &self.universe, v);
             s.policy_state = state_map(env, v);
             s.paused = paused;
             store(env, &s);
@@ -426,6 +435,7 @@ impl Wallet {
             nonce: s.nonce,
             deployment_version: s.deployment_version,
             expires_at: v.expires_at,
+            args: args(env, v),
             invocation: AllowitPolicyInvocation {
                 module_digest: b.module_digest,
                 entrypoint: b.entrypoint,
@@ -481,21 +491,36 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
             .iter()
             .map(|rule| outcome.preflight[RULES.iter().position(|r| r == rule).unwrap()])
             .find(Result::is_err);
+        // The standard contract admits only canonical params, also after a direct seed.
+        let custom_param = v
+            .invoice_cap
+            .map_or(Ok(()), |_| Err(AllowitError::InvalidParam as u32));
         let expected = |tier: Tier| {
             match tier {
                 Tier::Custom => outcome.policy.and(next),
-                Tier::Common => first_prefix_error.unwrap_or(Ok(())).and(next),
-                Tier::Simple => next,
+                Tier::Common => custom_param
+                    .and(first_prefix_error.unwrap_or(Ok(())))
+                    .and(next),
+                Tier::Simple => custom_param.and(next),
                 Tier::Catching => outcome.catching_next.clone().map(|_| ()),
             }
             .map_err(wallet_error)
         };
+        // A standard post-flight denies the catching policy's write and otherwise equals the
+        // plain post-flight, which the standard tiers store.
+        let wrote = outcome.catching_next != outcome.catching.and(outcome.next.clone());
+        let standard = if wrote {
+            Err(AllowitError::Unsupported as u32)
+        } else {
+            outcome.catching.and(outcome.next.clone())
+        };
+        assert_eq!(outcome.catching_standard, standard, "{}", v.name);
         let unset = v.caps.contains(&None)
             || v.call_cap.is_none()
             || v.recipients.is_none()
             || v.tokens.is_none()
             || v.expiry.is_none();
-        if !unset {
+        if !unset && v.invoice_cap.is_none() {
             assert_eq!(expected(Tier::Common), expected(Tier::Custom), "{}", v.name);
         }
         if outcome.catching.is_ok() && outcome.policy.is_err() {
@@ -522,7 +547,7 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
             }
         }
     }
-    assert_eq!(realized, 33);
+    assert_eq!(realized, 37);
     // The deployed catching Wasm let these continue after a caught rule error and wrote its key.
     for name in ["over_day_spent_cap", "over_day_spent_cap_counted_once"] {
         assert!(caught.contains(&name), "{name} {caught:?}");
@@ -583,58 +608,105 @@ fn kernel_violations_reject_identically_in_every_contract() {
     }
 }
 
-/// Simple and Common store only standard keys: the catching suffix's own key never reaches the
-/// chain. The server keeps it and builds `ctx.state` with `allowit::offchain_state`, so the
-/// standard tiers allow exactly the two caught daily cap errors that the custom contract allows.
+/// The server signs only an approved `evaluate`, and every tier then stores exactly the state it
+/// returned. The catching policy's write counts on Custom; a standard tier cannot store it, so the
+/// host denies it there, where the chain alone would drop the write and diverge.
 #[test]
-fn standard_tier_server_keeps_suffix_writes_and_matches_the_custom_contract() {
-    let mut v = vectors::base();
-    v.caps[2] = Some(44);
+fn every_tier_stores_exactly_the_state_that_the_server_evaluates() {
+    let base = vectors::base();
+    let mut over = base.clone();
+    over.caps[2] = Some(44);
     let custom = Wallet::new(Tier::Catching);
     let common = Wallet::new(Tier::Common);
     // The catching policy's prefix is its leading `recipients` call.
     common.bind(&[AllowitRule::recipients]);
     let simple = Wallet::new(Tier::Simple);
-    let mut want = List::new();
-    custom.seed(&v, false);
-    for _ in 0..3 {
-        let result = custom.execute(&custom.request(&v));
-        let stored = line(&custom.f.env, &custom.f.client().policy_state());
-        want.push(result.map(|()| stored));
-    }
-    let denied = Err(wallet_error(AllowitError::DaySpentCapExceeded as u32));
-    assert!(
-        want[0].is_ok() && want[1].is_ok() && want[2] == denied,
-        "{want:?}"
-    );
-    for wallet in [&common, &simple] {
+    for (wallet, tier) in [
+        (&custom, AllowitTier::Custom),
+        (&common, AllowitTier::Standard),
+        (&simple, AllowitTier::Standard),
+    ] {
         let env = &wallet.f.env;
-        wallet.seed(&v, false);
-        // The server's view: the state map of its last approved evaluation.
-        let mut kept = Map::new(env);
-        // Evaluate the full catching policy on the server's `ctx.state`, as the server would.
-        let evaluate = |state: Map<Symbol, Val>| {
-            env.as_contract(&wallet.f.wallet, || {
-                let mut c = context(env, &wallet.universe, &v);
-                c.state = state;
-                allowit::evaluate(&c, catching::execute).map_err(|e| wallet_error(e as u32))
-            })
-        };
-        for (i, want) in want.iter().enumerate() {
+        for v in [&base, &over] {
+            wallet.seed(v, false);
             let chain = wallet.f.client().policy_state();
-            // Danger: from chain state alone the suffix never sees its count and approves the third.
-            assert!(evaluate(chain.clone()).is_ok(), "{i} {:?}", wallet.tier);
-            let got = evaluate(allowit::offchain_state(&kept, &chain)).and_then(|next| {
-                // The server signs only an approved evaluation; the wallet then agrees.
-                wallet.execute(&wallet.request(&v))?;
-                let after = wallet.f.client().policy_state();
-                // The chain stored the host's standard keys; only the suffix's key stays offchain.
-                assert_eq!(allowit::offchain_state(&next, &after), next, "{i}");
-                assert!(!after.contains_key(Symbol::new(env, vectors::OVER)), "{i}");
-                kept = next;
-                Ok(line(env, &kept))
+            let host = env.as_contract(&wallet.f.wallet, || {
+                let mut c = context(env, &wallet.universe, v);
+                c.state = chain.clone();
+                allowit::evaluate(&c, catching::execute, tier)
             });
-            assert_eq!(got, *want, "{i} {:?}", wallet.tier);
+            let written = v.caps[2] == Some(44);
+            if tier == AllowitTier::Standard && written {
+                assert_eq!(host, Err(AllowitError::Unsupported), "{:?}", wallet.tier);
+                // Danger: signed anyway, the chain stores a state without the counted write.
+                assert_eq!(wallet.execute(&wallet.request(v)), Ok(()));
+                let stored = wallet.f.client().policy_state();
+                assert!(!stored.contains_key(Symbol::new(env, vectors::OVER)));
+                continue;
+            }
+            let next = host.unwrap();
+            assert_eq!(next.contains_key(Symbol::new(env, vectors::OVER)), written);
+            assert_eq!(
+                wallet.execute(&wallet.request(v)),
+                Ok(()),
+                "{:?}",
+                wallet.tier
+            );
+            assert_eq!(wallet.f.client().policy_state(), next, "{:?}", wallet.tier);
         }
+    }
+}
+
+/// The agent's execution params reach a Custom policy, are covered by the agent and server
+/// authorization, stay within their bound, and the standard tiers ignore them.
+#[test]
+fn execution_params_reach_custom_policy_are_signed_and_standard_tiers_ignore_them() {
+    let mut v = vectors::base();
+    v.invoice_cap = Some(39);
+    let custom = Wallet::new(Tier::Catching);
+    custom.seed(&v, false);
+    assert_eq!(custom.execute(&custom.request(&v)), Ok(()));
+    v.invoice = true;
+    let capped = Err(wallet_error(AllowitError::TransactionCapExceeded as u32));
+    assert_eq!(custom.execute(&custom.request(&v)), capped);
+    v.invoice_cap = Some(40);
+    custom.seed(&v, false);
+    assert_eq!(custom.execute(&custom.request(&v)), Ok(()));
+    // The standard tiers store no custom param and ignore the args.
+    v.invoice_cap = None;
+    for tier in [Tier::Common, Tier::Simple] {
+        let wallet = Wallet::new(tier);
+        wallet.seed(&v, false);
+        assert_eq!(wallet.execute(&wallet.request(&v)), Ok(()), "{tier:?}");
+    }
+    for wallet in TIERS.map(Wallet::new) {
+        let (f, env) = (&wallet.f, &wallet.f.env);
+        wallet.seed(&v, false);
+        // Agent and server sign the full invocation: a changed arg fails authorization.
+        let signed = wallet.request(&v);
+        f.auth(
+            &[&f.agent, &f.server],
+            "execute",
+            (signed.clone(),).into_val(env),
+        );
+        let mut changed = signed.clone();
+        changed
+            .args
+            .set(Symbol::new(env, vectors::INVOICE), AllowitValue::Int(2));
+        assert!(matches!(f.client().try_execute(&changed), Err(Err(_))));
+        // More than MAX_ARGS keys, or an oversized value, reject in the kernel.
+        let mut many = wallet.request(&v);
+        for i in 0..=allowit::MAX_ARGS {
+            let key = Symbol::new(env, &std::format!("key_{i}"));
+            many.args.set(key, AllowitValue::Bool(true));
+        }
+        let invalid = Err(AllowitWalletError::InvalidInvocation as u32);
+        assert_eq!(wallet.execute(&many), invalid, "{:?}", wallet.tier);
+        let mut long = wallet.request(&v);
+        let text = soroban_sdk::String::from_str(env, &"x".repeat(257));
+        long.args
+            .set(Symbol::new(env, "memo"), AllowitValue::Str(text));
+        assert_eq!(wallet.execute(&long), invalid, "{:?}", wallet.tier);
+        assert_eq!(wallet.f.client().state().nonce, 0, "{:?}", wallet.tier);
     }
 }

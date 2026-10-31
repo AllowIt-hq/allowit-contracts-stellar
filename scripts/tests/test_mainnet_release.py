@@ -31,7 +31,7 @@ class ReleaseTests(unittest.TestCase):
             source_revision=release.DEFAULT_REVISION,
             policy_source_digest=release.digest(release.SMOKE_SOURCE), artifact_manifest='manifest.json',
             owner=keys[0], admin=keys[1], agent=keys[2], recipient=keys[3], forbidden_recipient=keys[4], admin_members=keys[5:8], server=keys[8], asset=Asset.native().contract_id(Network.PUBLIC_NETWORK_PASSPHRASE), policy_instance='01'*32,
-            grant=dict(recipients=[keys[3]], transaction_cap=10000, day_total_cap=20020000, spent_cap=20020000, call_cap=2, expiry=2000000000),
+            params=dict(recipients=[keys[3]], transaction_cap=10000, day_total_cap=20020000, spent_cap=20020000, call_cap=2, expiry=2000000000),
             fund_stroops=20000, payment_stroops=10000, fee_caps_stroops=dict.fromkeys(release.STAGES, 10000000), total_fee_cap_stroops=70000000, artifacts={})
         files = [release.ROOT/n for n in ('Cargo.toml','Cargo.lock','rust-toolchain.toml')]
         files += list((release.ROOT/'crates').rglob('*.rs')) + list((release.ROOT/'crates').rglob('Cargo.toml'))
@@ -73,24 +73,24 @@ class ReleaseTests(unittest.TestCase):
         self.plan['policy_source_digest']='00'*32
         with self.assertRaisesRegex(ValueError,'source differs'): self.load()
 
-    def test_reject_legacy_or_partial_grant_names(self):
+    def test_reject_legacy_or_partial_param_names(self):
         for legacy in ('per_transfer','daily_limit','total_limit','max_calls','expires_at'):
-            plan=copy.deepcopy(self.plan);plan['grant'][legacy]=1
-            with self.assertRaisesRegex(ValueError,'canonical rule'): release.smoke_grant(plan)
-        plan=copy.deepcopy(self.plan);del plan['grant']['call_cap']
-        with self.assertRaisesRegex(ValueError,'canonical rule'): release.smoke_grant(plan)
-        plan=copy.deepcopy(self.plan);plan['grant']['day_total_cap']=10009999
-        with self.assertRaisesRegex(ValueError,'daily capacity'): release.smoke_grant(plan)
+            plan=copy.deepcopy(self.plan);plan['params'][legacy]=1
+            with self.assertRaisesRegex(ValueError,'canonical rule'): release.smoke_params(plan)
+        plan=copy.deepcopy(self.plan);del plan['params']['call_cap']
+        with self.assertRaisesRegex(ValueError,'canonical rule'): release.smoke_params(plan)
+        plan=copy.deepcopy(self.plan);plan['params']['day_total_cap']=10009999
+        with self.assertRaisesRegex(ValueError,'daily capacity'): release.smoke_params(plan)
 
     def test_reject_fee_aggregate(self):
         self.plan['total_fee_cap_stroops']=100
         with self.assertRaisesRegex(ValueError,'aggregate'): self.load()
 
-    def test_reject_funding_above_grant(self):
+    def test_reject_funding_above_the_spent_cap_param(self):
         self.plan['fund_stroops']=20020001
         with self.assertRaisesRegex(ValueError,'inconsistent'): self.load()
         self.plan['fund_stroops']=20000
-        self.plan['grant']['spent_cap']=10009999
+        self.plan['params']['spent_cap']=10009999
         with self.assertRaisesRegex(ValueError,'inconsistent'): self.load()
 
     def test_reject_network_and_signer_overlap(self):
@@ -131,9 +131,9 @@ class ReleaseTests(unittest.TestCase):
         packet.update(expected_receipt=expected,expected_effects=dict(wallet=self.plan['asset'],wallet_balance=20000,recipient_balance=50,calls=0,spent_total=0))
         meta=SimpleNamespace(v=4,v4=SimpleNamespace(soroban_meta=SimpleNamespace(return_value=value)))
         response=dict(status='SUCCESS',envelopeXdr=packet['unsigned_xdr'],resultMetaXdr='mock',resultXdr=xdr.TransactionResult(xdr.Int64(100),xdr.TransactionResultResult(xdr.TransactionResultCode.txSUCCESS,results=[]),xdr.TransactionResultExt(0)).to_xdr())
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[10000,10050]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=['Int',1],spent=['Int',10010000]))), patch.object(release,'balance',side_effect=[10000,10050]):
             self.assertEqual(release.settle(self.plan,packet)['status'],'success')
-        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=1,spent=10010000))), patch.object(release,'balance',side_effect=[9999]):
+        with patch.object(release,'rpc',return_value=response), patch.object(release.xdr.TransactionMeta,'from_xdr',return_value=meta), patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=['Int',1],spent=['Int',10010000]))), patch.object(release,'balance',side_effect=[9999]):
             with self.assertRaisesRegex(ValueError,'balances or counters'):release.settle(self.plan,packet)
 
     def test_funding_settlement_checks_exact_principal_and_fee(self):
@@ -186,12 +186,12 @@ class ReleaseTests(unittest.TestCase):
             tx.transaction.soroban_data=xdr.SorobanTransactionData(xdr.SorobanTransactionDataExt(0),xdr.SorobanResources(xdr.LedgerFootprint([],[]),xdr.Uint32(100),xdr.Uint32(0),xdr.Uint32(0)),xdr.Int64(123))
             if mutate: mutate(tx)
             return tx.to_xdr()
-        with patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.wa,'owner_only'),patch.object(release,'rpc',return_value={'sequence':100}),patch.object(release.ca,'cli_run',side_effect=simulate),patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=0,spent=0))),patch.object(release,'balance',side_effect=[20000,50]):
+        with patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release.wa,'fetch',return_value={'sequence':'1'}),patch.object(release.wa,'owner_only'),patch.object(release,'rpc',return_value={'sequence':100}),patch.object(release.ca,'cli_run',side_effect=simulate),patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=['Int',0],spent=['Int',0]))),patch.object(release,'balance',side_effect=[20000,50]):
             return release.complete_execute(self.plan,packet,signed.to_xdr())
 
     def test_execute_prepare_retains_unsigned_server_request_and_original_effects(self):
         packet,_,state,binding=self.execution_packet()
-        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']),patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']) as prepare,patch.object(release,'balance',side_effect=[20000,50]),patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=0,spent=0))),patch.object(release,'rpc',return_value={'sequence':100}):
+        with patch.object(release.wa,'fetch',return_value={}),patch.object(release.wa,'owner_only'),patch.object(release.wa,'admin'),patch.object(release,'require_settled'),patch.object(release,'wallet_state',return_value=(state,binding)),patch.object(release,'raw_invoke',return_value=packet['unsigned_xdr']),patch.object(release.ca,'prepare_xdr',return_value=packet['unsigned_xdr']) as prepare,patch.object(release,'balance',side_effect=[20000,50]),patch.object(release,'read_contract',return_value=dict(policy_state=dict(calls=['Int',0],spent=['Int',0]))),patch.object(release,'rpc',return_value={'sequence':100}):
             result=release.prepare(self.plan,self.base,'execute',parent=self.plan['asset'],wallet=self.plan['asset'],operation_id='ab'*32)
         self.assertFalse(result['signing_ready'])
         self.assertEqual(result['expected_effects']['recipient_balance'],50)
@@ -246,34 +246,39 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release,'rpc',side_effect=AssertionError('must reject before network')):
             with self.assertRaisesRegex(ValueError,'Complete'):release.settle(self.plan,packet)
 
-    def test_common_config_selects_all_smoke_rules_and_typed_grant(self):
+    def test_common_config_selects_all_smoke_rules_and_their_params(self):
         config=release.wallet_config(self.plan)
         self.assertEqual(config['rules'],release.RULES)
         self.assertEqual(config['server'],self.plan['server'])
         self.assertFalse(config['x402_enabled'])
-        self.assertEqual(list(config['grant']),list(release.ca.GRANT_FIELDS))
-        self.assertEqual(config['grant']['transaction_cap'],10000)
-        self.assertIsNone(config['grant']['day_spent_cap'])
-        self.assertIsNone(config['grant']['tokens'])
+        self.assertEqual(set(config['params']),set(release.RULES))
+        self.assertEqual(config['params']['transaction_cap'],10000)
+        self.assertNotIn('day_spent_cap',config['params'])
+        self.assertNotIn('tokens',config['params'])
         self.assertEqual(config['source_digest'],release.prefix_digest(release.WALLET_KIND,self.hashes['wallet'],self.plan['asset'],release.RULES))
-        self.assertEqual(release.SMOKE_SOURCE.decode().count('(ctx, &ctx.grant.'),len(release.RULES))
+        self.assertEqual(release.SMOKE_SOURCE.decode().count('(ctx, ctx.params.get(allowit::'),len(release.RULES))
+        cli=json.loads(release.ca.serialize({'config':config})[1])['params']
+        self.assertEqual(cli['recipients'],{'List':[{'Addr':self.plan['recipient']}]})
+        self.assertEqual(cli['spent_cap'],{'Int':'20020000'})
 
     def test_wallet_state_accepts_a_real_encoded_state_and_rejects_other_rules(self):
         wallet,parent,engine=(StrKey.encode_contract(bytes([n])*32) for n in (21,22,23))
         expected=release.wallet_config(self.plan)
+        def value(item):
+            # One AllowitValue: a unit enum variant with its single field, as a two-element vector.
+            if isinstance(item,list): return scval.to_vec([scval.to_symbol('List'),scval.to_vec([value(i) for i in item])])
+            if isinstance(item,bool): return scval.to_vec([scval.to_symbol('Bool'),scval.to_bool(item)])
+            if isinstance(item,str): return scval.to_vec([scval.to_symbol('Addr'),scval.to_address(item)])
+            return scval.to_vec([scval.to_symbol('Int'),scval.to_int128(item)])
         def state(rules):
-            grant=expected['grant']
-            def field(name,value):
-                if value is None: return scval.to_void()
-                if name in ('recipients','tokens'): return scval.to_vec([scval.to_address(a) for a in value])
-                return scval.to_uint64(value) if name in ('call_cap','expiry') else scval.to_int128(value)
-            policy_state=scval.to_struct({k:scval.to_uint64(0) if k in ('calls','day') else scval.to_bool(False) if 'unpriced' in k else scval.to_int128(0) for k in ('calls','spent','unpriced','day','day_spent','day_total','day_unpriced')})
+            params=scval.to_struct({k:value(v) for k,v in expected['params'].items()})
+            policy_state=scval.to_struct({k:value(False) if 'unpriced' in k else value(0) for k in ('calls','spent','unpriced','day','day_spent','day_total','day_unpriced')})
             return scval.to_struct(dict(policy_state=policy_state,contract_version=scval.to_uint32(release.ca.WALLET_CONTRACT_VERSION),
                 owner=scval.to_address(self.plan['owner']),agent=scval.to_address(self.plan['agent']),server=scval.to_address(self.plan['server']),
                 asset=scval.to_address(self.plan['asset']),policy_instance=scval.to_bytes(bytes.fromhex(self.plan['policy_instance'])),
                 source_digest=scval.to_bytes(bytes.fromhex(expected['source_digest'])),
                 rules=scval.to_vec([scval.to_vec([scval.to_symbol(r)]) for r in rules]),
-                grant=scval.to_struct({k:field(k,v) for k,v in grant.items()}),x402_enabled=scval.to_bool(False),
+                params=params,x402_enabled=scval.to_bool(False),
                 token=scval.to_string('XLM'),deployment_version=scval.to_uint64(0),nonce=scval.to_uint64(0),paused=scval.to_bool(False)))
         binding=scval.to_struct(dict(engine_kind=scval.to_symbol(release.WALLET_KIND),contract_version=scval.to_uint32(release.ca.WALLET_CONTRACT_VERSION),
             policy_instance=scval.to_bytes(bytes.fromhex(self.plan['policy_instance'])),module_digest=scval.to_bytes(bytes.fromhex(self.hashes['wallet'])),
@@ -297,9 +302,10 @@ class ReleaseTests(unittest.TestCase):
                 return release.wallet_state(self.plan,wallet,parent)
         decoded,_=run(release.RULES)
         self.assertEqual(decoded['rules'],[[r] for r in release.RULES])
-        self.assertEqual(decoded['grant'],expected['grant'])
+        self.assertEqual(release.plain_params(decoded['params']),expected['params'])
+        self.assertEqual(release.plain_params(decoded['policy_state'])['calls'],0)
         for rules in (release.RULES[::-1],release.RULES[:-1],release.RULES+['tokens']):
-            with self.assertRaisesRegex(ValueError,'grant differs'): run(rules)
+            with self.assertRaisesRegex(ValueError,'params differ'): run(rules)
 
     def test_prefix_digest_matches_the_contract_vector(self):
         # crates/policy-wallet/src/sep56_tests.rs standard_prefix_digest_matches_independent_xdr_vector_and_binds_context

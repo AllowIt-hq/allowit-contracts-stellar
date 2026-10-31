@@ -13,8 +13,8 @@ import sys
 from pathlib import Path
 from stellar_sdk import Address, Network, xdr, StrKey, TransactionEnvelope, InvokeHostFunction, Preconditions, TimeBounds
 from wallet_admin import admin as verify_admin, fetch, owner_only, PASSPHRASE
-# Typed Grant fields are the canonical rule names. Unset fields are null.
-from policy_source import GRANT_FIELDS, checked_code, host_compile, standard_prefix
+# Canonical param keys are the canonical rule names. An absent key is unset.
+from policy_source import PARAM_KEYS, checked_code, host_compile, standard_prefix, writes_state
 
 # No transfers, token approvals, general calls or arbitrary method dispatch.
 WALLET = {
@@ -78,9 +78,9 @@ def pinned_wasm(path, expected_hash):
     return expected_hash
 
 
-# Custody State layout this tool encodes: typed Grant, Vec<AllowitRule> prefix and a free-form policy_state map.
-# Version 2 stored a typed history struct and version 1 a Grant map; neither migrates.
-WALLET_CONTRACT_VERSION = 3
+# Custody State layout this tool encodes: key => AllowitValue params, Vec<AllowitRule> prefix and a
+# key => AllowitValue policy_state map. Versions 1 to 3 stored other encodings; none migrates.
+WALLET_CONTRACT_VERSION = 4
 
 
 CUSTODY_LAYOUT_KEY = b"allowit_custody_layout"
@@ -154,25 +154,67 @@ def wallet_layout(state):
 
 CAPS = {"transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap"}
 LISTS = {"recipients", "tokens"}
+# Bounds that the wallet contract enforces: `allowit::MAX_PARAMS`, `MAX_ITEMS` and `MAX_TEXT`.
+MAX_PARAMS, MAX_ITEMS, MAX_TEXT = 32, 64, 256
+VALUE_TYPES = ("Int", "Bool", "Str", "Addr", "List")
+PARAM_KEY = re.compile(r"[A-Za-z0-9_]{1,32}")
 
 
-def grant(value):
-    """Validate a typed Grant and return all fields in canonical order. Missing fields are null."""
-    if not isinstance(value, dict) or any(name not in GRANT_FIELDS for name in value):
-        raise ValueError("Grant fields must be canonical rule names: " + ", ".join(GRANT_FIELDS))
+def is_address(item):
+    """True for a G or C StrKey."""
+    try:
+        return isinstance(item, str) and (StrKey.is_valid_ed25519_public_key(item) or StrKey.is_valid_contract(item))
+    except Exception:
+        return False
+
+
+def param_value(item, count):
+    """Return the pinned CLI spec JSON of one AllowitValue and count its nested values in count[0].
+    An integer is Int, a boolean Bool, a G or C address Addr, other text Str and a list List. A
+    one-key object such as {"Str": "GA..."} names the type explicitly."""
+    if isinstance(item, dict):
+        if len(item) != 1 or next(iter(item)) not in VALUE_TYPES:
+            raise ValueError("A typed param value is one key of " + ", ".join(VALUE_TYPES))
+        kind, item = next(iter(item.items()))
+    else:
+        kind = ("Bool" if type(item) is bool else "Int" if type(item) is int else "List" if isinstance(item, list)
+                else "Addr" if is_address(item) else "Str" if isinstance(item, str) else None)
+    if kind == "Int" and type(item) is int and -2**127 <= item < 2**127:
+        return {"Int": str(item)}  # i128 as a decimal string avoids float decoding.
+    if kind == "Bool" and type(item) is bool or kind == "Addr" and is_address(item):
+        return {kind: item}
+    if kind == "Str" and isinstance(item, str) and len(item.encode()) <= MAX_TEXT:
+        return {"Str": item}
+    if kind == "List" and isinstance(item, list):
+        count[0] += len(item)
+        if count[0] > MAX_ITEMS:
+            raise ValueError("A param value nests at most {} values".format(MAX_ITEMS))
+        return {"List": [param_value(entry, count) for entry in item]}
+    raise ValueError("Unsupported param value: " + json.dumps(item))
+
+
+def params(value, tier=None):
+    """Validate owner params and return their pinned CLI spec JSON, a key => AllowitValue object.
+    Keys are 1 to 32 ASCII letters, digits or underscores, at most 32 of them. Simple and Common admit
+    only the canonical keys, each with its rule's type: nonnegative caps, unsigned 64-bit `call_cap`
+    and `expiry`, and address lists. An absent key is unset."""
+    standard = tier in ("simple", "common")
+    if not isinstance(value, dict) or len(value) > (len(PARAM_KEYS) if standard else MAX_PARAMS):
+        raise ValueError("Params must be an object of at most {} keys".format(MAX_PARAMS))
     result = {}
-    for name in GRANT_FIELDS:
-        item = value.get(name)
-        if item is None:
-            pass
-        elif name in LISTS:
-            if not isinstance(item, list):
-                raise ValueError("Grant " + name + " must be a list of addresses")
-            for entry in item:
-                address(entry)
-        elif type(item) is not int or not 0 <= item <= (2**127 - 1 if name in CAPS else 2**64 - 1):
-            raise ValueError("Grant " + name + " must be a nonnegative native integer")
-        result[name] = item
+    for key, item in value.items():
+        if not PARAM_KEY.fullmatch(key):
+            raise ValueError("Param keys are 1 to 32 ASCII letters, digits or underscores")
+        encoded = result[key] = param_value(item, [0])
+        if not standard:
+            continue
+        if key not in PARAM_KEYS:
+            raise ValueError("Simple and Common params admit only the canonical keys: " + ", ".join(PARAM_KEYS))
+        if key in LISTS:
+            if any("Addr" not in entry for entry in encoded.get("List", [{}])):
+                raise ValueError("Param " + key + " must be a list of addresses")
+        elif not 0 <= int(encoded.get("Int", -1)) < 2**(127 if key in CAPS else 64):
+            raise ValueError("Param " + key + " must be a nonnegative integer in its range")
     return result
 
 
@@ -194,31 +236,31 @@ def policy_rules(value, tier, source_path):
         raise ValueError("Rules must be the standard prefix derived from the policy source: " + json.dumps(expected))
     if tier == "custom" and value["source_digest"] != hashlib.sha256(source).hexdigest():
         raise ValueError("Custom source_digest must be the SHA-256 of the policy source")
-    # Valid configuration: the owner can set the field later without code redeployment.
-    unset = [rule for rule in value["rules"] if (value.get("grant") or {}).get(rule) is None]
+    # Simple and Common store only standard state, so their server denies every policy write.
+    if tier != "custom" and writes_state(source.decode()):
+        raise ValueError("Simple and Common cannot store allowit::set_state writes; use the custom tier")
+    values = value.get("params", {})
+    params(values, tier)
+    # Valid configuration: the owner can set the param later without code redeployment.
+    unset = [rule for rule in value["rules"] if rule not in values]
     if unset:
-        print("Warning: the standard preflight skips prefix rules whose Grant field is unset: " + ", ".join(unset)
-              + ". The full policy denies them with MissingGrant.", file=sys.stderr)
+        print("Warning: the standard preflight skips prefix rules whose param is absent: " + ", ".join(unset)
+              + ". The full policy denies them with MissingParam.", file=sys.stderr)
     return value
 
 
-def grant_cli(value):
-    # Pinned CLI spec JSON: Option is null or its value; i128 as a decimal string avoids float decoding.
-    return {name: str(item) if name in CAPS and item is not None else item for name, item in grant(value).items()}
-
-
 def deployment(value):
-    fields = {"deployment_version", "owner", "agent", "server", "source_digest", "rules", "grant", "x402_enabled", "wasm_hash"}
+    fields = {"deployment_version", "owner", "agent", "server", "source_digest", "rules", "params", "x402_enabled", "wasm_hash"}
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("Deployment fields must exactly match the policy wallet ABI")
     if type(value["deployment_version"]) is not int or not 0 < value["deployment_version"] < 2**64:
         raise ValueError("Invalid deployment version")
     for role in ("owner", "agent", "server"):
         address(value[role])
-    grant(value["grant"])
+    params(value["params"])
     code_hash(value["source_digest"])
-    if not isinstance(value["rules"], list) or any(rule not in GRANT_FIELDS for rule in value["rules"]):
-        raise ValueError("Rules must name canonical rules: " + ", ".join(GRANT_FIELDS))
+    if not isinstance(value["rules"], list) or any(rule not in PARAM_KEYS for rule in value["rules"]):
+        raise ValueError("Rules must name canonical rules: " + ", ".join(PARAM_KEYS))
     if type(value["x402_enabled"]) is not bool:
         raise ValueError("x402_enabled must be boolean")
     if value["x402_enabled"] and any(not StrKey.is_valid_ed25519_public_key(value[role]) for role in ("agent", "server")):
@@ -251,8 +293,6 @@ def checked_args(method, values, family):
             account(value)
         elif key == "engine":
             contract(value)
-        elif key == "grant":
-            grant(value)
         else:
             address(value)
     return values
@@ -263,9 +303,7 @@ def serialize(values):
     for key, value in values.items():
         if key in ("deployment", "config"):
             value = copy.deepcopy(value)
-            value["grant"] = grant_cli(value["grant"])
-        elif key == "grant":
-            value = grant_cli(value)
+            value["params"] = params(value["params"])
         args += ["--" + key.replace("_", "-"), json.dumps(value, separators=(",", ":")) if not isinstance(value, str) else value]
     return args
 
@@ -385,7 +423,7 @@ def command(args):
                 raise ValueError("Parent deployment source must be its native admin account")
         else:
             config = public_json(args.config)
-            fields = {"owner", "agent", "server", "asset", "policy_instance", "source_digest", "rules", "grant", "x402_enabled"}
+            fields = {"owner", "agent", "server", "asset", "policy_instance", "source_digest", "rules", "params", "x402_enabled"}
             if not isinstance(config, dict) or set(config) != fields:
                 raise ValueError("Config fields must exactly match the policy wallet ABI")
             deployment({key: config[key] for key in fields - {"asset", "policy_instance"}} | {"deployment_version": 1, "wasm_hash": None})
@@ -423,7 +461,7 @@ def main():
     p.add_argument("--network", choices=["testnet", "mainnet"], default="testnet")
     p.add_argument("--allow-mainnet", action="store_true")
     p.add_argument("--source", required=True, type=account)
-    for flag in ("wasm", "wasm-hash", "engine-wasm", "owner", "agent", "engine", "asset", "grant", "policy-instance", "config", "contract", "method"):
+    for flag in ("wasm", "wasm-hash", "engine-wasm", "owner", "agent", "engine", "asset", "policy-instance", "config", "contract", "method"):
         p.add_argument("--" + flag)
     p.add_argument("--family", choices=["wallet", "parent"], default="wallet")
     p.add_argument("--tier", choices=TIERS, help="Wallet tier of an owner packet: simple, common or custom")

@@ -1,6 +1,16 @@
 use super::*;
-use allowit::{AllowitOperation, AllowitRule, AllowitStandardState};
-use soroban_sdk::{Map, testutils::Address as _, vec};
+use allowit::{AllowitOperation, AllowitRule, AllowitStandardState, RULES as ALL};
+use soroban_sdk::{testutils::Address as _, vec};
+/// Set one param of `ctx`, or unset it with `None`.
+fn set(ctx: &mut AllowitContext, key: &str, value: Option<AllowitValue>) {
+    let key = Symbol::new(&ctx.env, key);
+    match value {
+        Some(value) => ctx.params.0.set(key, value),
+        None => {
+            ctx.params.0.remove(key);
+        }
+    }
+}
 /// Current state before a 40-unit priced transfer: after it, spent is 45 and day_total 43.
 fn fixture(env: &Env) -> AllowitContext {
     let mut state = Map::new(env);
@@ -11,45 +21,42 @@ fn fixture(env: &Env) -> AllowitContext {
         day_total: 3,
         ..Default::default()
     };
-    current.write(env, &mut state).unwrap();
+    current.write(&mut state).unwrap();
     let asset = Address::generate(env);
     let recipient = Address::generate(env);
-    AllowitContext {
+    let mut ctx = AllowitContext {
         env: env.clone(),
-        grant: AllowitGrant {
-            transaction_cap: Some(100),
-            spent_cap: Some(45),
-            day_spent_cap: Some(50),
-            day_total_cap: Some(100),
-            call_cap: Some(3),
-            recipients: Some(vec![env, recipient.clone()]),
-            tokens: Some(vec![env, asset.clone()]),
-            expiry: Some(1_000),
-        },
+        params: AllowitParams(Map::new(env)),
         state,
         request: AllowitRequest {
             operation: AllowitOperation::sep41_transfer,
-            asset,
-            recipient,
+            asset: asset.clone(),
+            recipient: recipient.clone(),
             amount: 40,
             now: 100,
             expires_at: 500,
             spent_units: 40,
             gas_units: 0,
             unpriced: false,
+            args: AllowitParams(Map::new(env)),
         },
+    };
+    let int = |n: i128| Some(AllowitValue::Int(n));
+    let list = |a: &Address| Some(AllowitValue::List(vec![env, AllowitValue::Addr(a.clone())]));
+    for (key, value) in [
+        (allowit::TRANSACTION_CAP, int(100)),
+        (allowit::SPENT_CAP, int(45)),
+        (allowit::DAY_SPENT_CAP, int(50)),
+        (allowit::DAY_TOTAL_CAP, int(100)),
+        (allowit::CALL_CAP, int(3)),
+        (allowit::RECIPIENTS, list(&recipient)),
+        (allowit::TOKENS, list(&asset)),
+        (allowit::EXPIRY, int(1_000)),
+    ] {
+        set(&mut ctx, key, value);
     }
+    ctx
 }
-const ALL: [AllowitRule; 8] = [
-    AllowitRule::transaction_cap,
-    AllowitRule::spent_cap,
-    AllowitRule::day_spent_cap,
-    AllowitRule::day_total_cap,
-    AllowitRule::call_cap,
-    AllowitRule::recipients,
-    AllowitRule::tokens,
-    AllowitRule::expiry,
-];
 #[test]
 fn native_contract_wrapper_matches_the_bundled_rule() {
     let env = Env::default();
@@ -57,14 +64,14 @@ fn native_contract_wrapper_matches_the_bundled_rule() {
     let call = || {
         AllowitEngine::day_total_cap(
             env.clone(),
-            ctx.grant.clone(),
+            ctx.params.0.clone(),
             ctx.state.clone(),
             ctx.request.clone(),
         )
     };
     assert_eq!(
         call(),
-        allowit::day_total_cap(&ctx, &ctx.grant.day_total_cap)
+        allowit::day_total_cap(&ctx, ctx.params.get(allowit::DAY_TOTAL_CAP))
     );
     assert_eq!(call(), Ok(57));
 }
@@ -84,84 +91,88 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
     let client = AllowitEngineClient::new(&env, &id);
     let mut ctx = fixture(&env);
     let c = &ctx;
-    let g = &c.grant;
+    let p = |key| c.params.get(key);
     // The exhaustive match fails to compile when a rule lacks its engine method.
     for rule in ALL {
         match rule {
             AllowitRule::transaction_cap => {
-                let v = allowit::transaction_cap(c, &g.transaction_cap);
+                let v = allowit::transaction_cap(c, p(allowit::TRANSACTION_CAP));
                 assert_eq!(
-                    (client.transaction_cap(&c.grant, &c.state, &c.request), v),
+                    (client.transaction_cap(&c.params.0, &c.state, &c.request), v),
                     (60, Ok(60))
                 );
             }
             AllowitRule::spent_cap => {
-                let v = allowit::spent_cap(c, &g.spent_cap);
+                let v = allowit::spent_cap(c, p(allowit::SPENT_CAP));
                 assert_eq!(
-                    (client.spent_cap(&c.grant, &c.state, &c.request), v),
+                    (client.spent_cap(&c.params.0, &c.state, &c.request), v),
                     (0, Ok(0))
                 );
             }
             AllowitRule::day_spent_cap => {
-                let v = allowit::day_spent_cap(c, &g.day_spent_cap);
+                let v = allowit::day_spent_cap(c, p(allowit::DAY_SPENT_CAP));
                 assert_eq!(
-                    (client.day_spent_cap(&c.grant, &c.state, &c.request), v),
+                    (client.day_spent_cap(&c.params.0, &c.state, &c.request), v),
                     (5, Ok(5))
                 );
             }
             AllowitRule::day_total_cap => {
-                let v = allowit::day_total_cap(c, &g.day_total_cap);
+                let v = allowit::day_total_cap(c, p(allowit::DAY_TOTAL_CAP));
                 assert_eq!(
-                    (client.day_total_cap(&c.grant, &c.state, &c.request), v),
+                    (client.day_total_cap(&c.params.0, &c.state, &c.request), v),
                     (57, Ok(57))
                 );
             }
             AllowitRule::call_cap => {
-                let v = allowit::call_cap(c, &g.call_cap);
+                let v = allowit::call_cap(c, p(allowit::CALL_CAP));
                 assert_eq!(
-                    (client.call_cap(&c.grant, &c.state, &c.request), v),
+                    (client.call_cap(&c.params.0, &c.state, &c.request), v),
                     (1, Ok(1))
                 );
             }
             AllowitRule::recipients => {
-                let v = allowit::recipients(c, &g.recipients);
-                assert_eq!(Ok(client.recipients(&c.grant, &c.state, &c.request)), v);
+                let v = allowit::recipients(c, p(allowit::RECIPIENTS));
+                assert_eq!(Ok(client.recipients(&c.params.0, &c.state, &c.request)), v);
                 assert_eq!(v, Ok(c.request.recipient.clone()));
             }
             AllowitRule::tokens => {
-                let v = allowit::tokens(c, &g.tokens);
-                assert_eq!(Ok(client.tokens(&c.grant, &c.state, &c.request)), v);
+                let v = allowit::tokens(c, p(allowit::TOKENS));
+                assert_eq!(Ok(client.tokens(&c.params.0, &c.state, &c.request)), v);
                 assert_eq!(v, Ok(c.request.asset.clone()));
             }
             AllowitRule::expiry => {
-                let v = allowit::expiry(c, &g.expiry);
+                let v = allowit::expiry(c, p(allowit::EXPIRY));
                 assert_eq!(
-                    (client.expiry(&c.grant, &c.state, &c.request), v),
+                    (client.expiry(&c.params.0, &c.state, &c.request), v),
                     (900, Ok(900))
                 );
             }
         }
     }
-    ctx.grant.day_total_cap = Some(42);
+    set(
+        &mut ctx,
+        allowit::DAY_TOTAL_CAP,
+        Some(AllowitValue::Int(42)),
+    );
     assert_eq!(
-        client.try_day_total_cap(&ctx.grant, &ctx.state, &ctx.request),
+        client.try_day_total_cap(&ctx.params.0, &ctx.state, &ctx.request),
         Err(Ok(AllowitError::DayTotalCapExceeded))
     );
-    ctx.grant.spent_cap = None;
+    set(&mut ctx, allowit::SPENT_CAP, None);
     assert_eq!(
-        client.try_spent_cap(&ctx.grant, &ctx.state, &ctx.request),
-        Err(Ok(AllowitError::MissingGrant))
+        client.try_spent_cap(&ctx.params.0, &ctx.state, &ctx.request),
+        Err(Ok(AllowitError::MissingParam))
     );
     // A failed rule reads and writes no more ledger entries than a passing one, so a failure at
     // apply time that simulation did not see stays within the simulated footprint.
     let passing = fixture(&env);
     assert_eq!(
-        client.try_expiry(&passing.grant, &passing.state, &passing.request),
+        client.try_expiry(&passing.params.0, &passing.state, &passing.request),
         Ok(Ok(900))
     );
     let pass = env.cost_estimate().resources();
     assert_eq!(
-        client.try_day_total_cap(&ctx.grant, &ctx.state, &ctx.request),
+        client.try_day_total_cap(&ctx.params.0, &ctx.state, &ctx.request),
         Err(Ok(AllowitError::DayTotalCapExceeded))
     );
     let fail = env.cost_estimate().resources();

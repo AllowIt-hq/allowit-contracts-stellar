@@ -24,6 +24,11 @@ def source(body, head=HEAD):
     return head + body + "    Ok(())\n}\n"
 
 
+def CALL(rule):
+    """One canonical prefix statement: the rule on its own canonical param key."""
+    return "    allowit::{0}(ctx, ctx.params.get(allowit::{1}))?;\n".format(rule, rule.upper())
+
+
 def leb128(value):
     out = bytearray()
     while True:
@@ -185,24 +190,34 @@ class ContractAdmin(unittest.TestCase):
                 ca.checked_args("set_pause", value, "wallet")
         self.assertNotIn("transfer", ca.WALLET)
         self.assertNotIn("approve", ca.WALLET)
-        self.assertNotIn("set_grant", ca.PARENT)
+        self.assertNotIn("set_params", ca.PARENT)
 
-    def test_typed_grant_uses_canonical_fields_and_native_ranges(self):
+    def test_params_encode_typed_values_and_standard_tiers_admit_only_canonical_keys(self):
         values = {"spent_cap": 2**127 - 1, "call_cap": 0, "recipients": [KEYS[1]], "tokens": []}
-        complete = ca.grant(values)
-        self.assertEqual(list(complete), list(ca.GRANT_FIELDS))
-        self.assertEqual({k: v for k, v in complete.items() if v is not None}, values)
-        self.assertEqual(ca.grant({}), dict.fromkeys(ca.GRANT_FIELDS))
-        tagged = json.loads(ca.serialize({"grant": values})[1])
-        self.assertEqual(tagged["spent_cap"], str(2**127 - 1))
-        self.assertIsNone(tagged["expiry"])
-        for invalid in ({"per_transfer": 1}, {"max_calls": 1}, {"daily_limit": 1}, {"spent_cap": -1}, {"spent_cap": 2**127},
+        self.assertEqual(ca.params(values, "common"), {"spent_cap": {"Int": str(2**127 - 1)}, "call_cap": {"Int": "0"},
+                                                       "recipients": {"List": [{"Addr": KEYS[1]}]}, "tokens": {"List": []}})
+        self.assertEqual(ca.params({}, "simple"), {})
+        tagged = json.loads(ca.serialize({"deployment": {"params": values}})[1])["params"]
+        self.assertEqual(tagged["spent_cap"], {"Int": str(2**127 - 1)})
+        self.assertNotIn("expiry", tagged)
+        # Custom params: inferred or explicitly typed values within the contract's bounds.
+        custom = {"vendor_cap": -5, "note": "pay invoices", "vendor": KEYS[2], "as_text": {"Str": KEYS[2]}, "urgent": True,
+                  "pairs": [[1, KEYS[1]]]}
+        self.assertEqual(ca.params(custom, "custom"), {"vendor_cap": {"Int": "-5"}, "note": {"Str": "pay invoices"},
+                                                        "vendor": {"Addr": KEYS[2]}, "as_text": {"Str": KEYS[2]},
+                                                        "urgent": {"Bool": True}, "pairs": {"List": [{"List": [{"Int": "1"}, {"Addr": KEYS[1]}]}]}})
+        for invalid in ({"per_transfer": 1}, {"max_calls": 1}, {"vendor_cap": 1}, {"spent_cap": -1}, {"spent_cap": 2**127},
                         {"call_cap": 2**64}, {"expiry": True}, {"transaction_cap": "1"}, {"recipients": KEYS[1]},
-                        {"tokens": ["not-an-address"]}, {1: 1}):
-            with self.assertRaises((ValueError, TypeError)):
-                ca.grant(invalid)
+                        {"tokens": ["not-an-address"]}, {"recipients": [[KEYS[1]]]}):
+            with self.subTest(params=invalid), self.assertRaises(ValueError):
+                ca.params(invalid, "common")
+        for invalid in ({"bad key": 1}, {"k" * 33: 1}, {1: 1}, {"x": 1.5}, {"x": None}, {"x": {"Int": "1"}},
+                        {"x": {"Map": 1}}, {"x": "y" * 257}, {"x": list(range(65))}, {"x": [list(range(64))]},
+                        {"x": 2**127}, {"k" + str(i): i for i in range(33)}):
+            with self.subTest(params=invalid), self.assertRaises((ValueError, TypeError)):
+                ca.params(invalid, "custom")
         deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
-                      "rules": ["spent_cap", "recipients"], "grant": values, "x402_enabled": False, "wasm_hash": None}
+                      "rules": ["spent_cap", "recipients"], "params": values, "x402_enabled": False, "wasm_hash": None}
         ca.deployment(deployment)
         for removed in ("set_cap_per_day", "cap_per_transaction", "require_recipient", "require_asset", "allow_actions", "state_remove", "fail", "daily_cap"):
             with self.assertRaises(ValueError):
@@ -210,8 +225,8 @@ class ContractAdmin(unittest.TestCase):
         with self.assertRaises(ValueError):
             ca.public_json('{"custom":1,"custom":2}')
         # Owner packets encode the current layout only; earlier and later layouts are refused.
-        self.assertEqual(ca.wallet_layout({"contract_version": 3})["contract_version"], 3)
-        for state in ({"contract_version": 1}, {"contract_version": 2}, {"contract_version": 4}, {}):
+        self.assertEqual(ca.wallet_layout({"contract_version": 4})["contract_version"], 4)
+        for state in ({"contract_version": 1}, {"contract_version": 3}, {"contract_version": 5}, {}):
             with self.assertRaisesRegex(ValueError, "layout"):
                 ca.wallet_layout(state)
 
@@ -403,7 +418,7 @@ class ContractAdmin(unittest.TestCase):
             engine = StrKey.encode_contract(bytes([3]) * 32)
             values = {"expiry": 2000000000}
             config = {"owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "asset": asset,
-                "source_digest": "22" * 32, "rules": [], "grant": values, "x402_enabled": False, "policy_instance": "11" * 32}
+                "source_digest": "22" * 32, "rules": [], "params": values, "x402_enabled": False, "policy_instance": "11" * 32}
             policy = Path(directory) / "policy.rs"
             policy.write_text(source(""))
             args = SimpleNamespace(action="deploy-wallet", network="testnet", allow_mainnet=False, tier="simple", policy_source=str(policy),
@@ -418,18 +433,20 @@ class ContractAdmin(unittest.TestCase):
 
     def test_standard_prefix_is_derived_from_policy_source_statements(self):
         sample = (ROOT / "crates/custom-policy/policy/policy.rs").read_text()
-        self.assertEqual(ca.standard_prefix(sample), list(ca.GRANT_FIELDS))
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        self.assertEqual(ca.standard_prefix(sample), list(ca.PARAM_KEYS))
+        call = CALL
         vectors = [
-            # A mismatched Grant reference ends the prefix; later calls run offchain or in Custom.
-            (call("recipients") + "    allowit::spent_cap(ctx, &ctx.grant.day_spent_cap)?;\n" + call("expiry"), ["recipients"]),
+            # A rule that reads another key ends the prefix; later calls run offchain or in Custom.
+            (call("recipients") + "    allowit::spent_cap(ctx, ctx.params.get(allowit::DAY_SPENT_CAP))?;\n" + call("expiry"), ["recipients"]),
+            (call("recipients") + "    allowit::spent_cap(ctx, ctx.params.get(\"vendor_cap\"))?;\n" + call("expiry"), ["recipients"]),
             # Statements, not lines: a split call, two calls on one line and comments.
-            ("    allowit::spent_cap(\n        ctx,\n        &ctx.grant.spent_cap,\n    )?;\n" + call("expiry").rstrip() + call("tokens"), ["spent_cap", "expiry", "tokens"]),
+            ("    allowit::spent_cap(\n        ctx,\n        ctx.params.get(allowit::SPENT_CAP),\n    )?;\n" + call("expiry").rstrip() + call("tokens"), ["spent_cap", "expiry", "tokens"]),
+            ("    allowit::spent_cap(\n        ctx,\n        ctx.params.get(\n            allowit::SPENT_CAP,\n        ),\n    )?;\n", ["spent_cap"]),
             ("    // limits\n" + call("call_cap") + "    /* then */ " + call("call_cap"), ["call_cap", "call_cap"]),
             # Any other statement ends the prefix.
-            ("    let left = allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n" + call("expiry"), []),
+            ("    let left = allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?;\n" + call("expiry"), []),
             (call("expiry") + "    if ctx.request.operation == AllowitOperation::sep56_deposit {\n" + call("spent_cap") + "    }\n", ["expiry"]),
-            (call("expiry") + "    allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n" + call("tokens"), ["expiry"]),
+            (call("expiry") + "    allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP));\n" + call("tokens"), ["expiry"]),
         ]
         for body, expected in vectors:
             with self.subTest(body=body):
@@ -448,9 +465,9 @@ class ContractAdmin(unittest.TestCase):
                 ca.standard_prefix(invalid)
 
     def test_standard_prefix_lexes_comments_and_literals_like_rust(self):
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        call = CALL
         # Block comments nest: the whole span is a comment, so recipients runs first.
-        nested = "    /* outer /* inner */ allowit::spent_cap(ctx, &ctx.grant.spent_cap)?; */\n" + call("recipients")
+        nested = "    /* outer /* inner */ allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?; */\n" + call("recipients")
         self.assertEqual(ca.standard_prefix(source(nested)), ["recipients"])
         # Literals cannot add, hide or end calls; a quote char and lifetimes are not strings.
         helper = "fn quote<'a>(x: &'a str) -> char { let _ = x; '\"' }\nconst C: char = '\\'';\n"
@@ -473,7 +490,7 @@ class ContractAdmin(unittest.TestCase):
     def test_owner_packets_bind_rules_derived_from_the_policy_source(self):
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
-            text = source("    allowit::recipients(ctx, &ctx.grant.recipients)?;\n    allowit::expiry(ctx, &ctx.grant.expiry)?;\n")
+            text = source("    allowit::recipients(ctx, ctx.params.get(allowit::RECIPIENTS))?;\n    allowit::expiry(ctx, ctx.params.get(allowit::EXPIRY))?;\n")
             policy.write_text(text)
             digest = hashlib.sha256(text.encode()).hexdigest()
             packet = {"rules": ["recipients", "expiry"], "source_digest": "22" * 32}
@@ -487,9 +504,24 @@ class ContractAdmin(unittest.TestCase):
             self.assertEqual(ca.policy_rules({"rules": [], "source_digest": "22" * 32}, "simple", str(policy))["rules"], [])
             with self.assertRaises(ValueError):
                 ca.policy_rules(packet, "common", None)
+            # Simple and Common store only standard state: a policy that writes state needs Custom.
+            writer = source(CALL("recipients") + "    allowit::set_state(ctx, \"seen\", 1u64)?;\n")
+            policy.write_text(writer)
+            for tier in ("common", "simple"):
+                rules = ["recipients"] if tier == "common" else []
+                with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "set_state"):
+                    ca.policy_rules({"rules": rules, "source_digest": "22" * 32}, tier, str(policy))
+            writer_digest = hashlib.sha256(writer.encode()).hexdigest()
+            self.assertEqual(ca.policy_rules({"rules": [], "source_digest": writer_digest}, "custom", str(policy))["rules"], [])
+            # Simple and Common admit only canonical params; Custom admits its own keys.
+            custom_key = {"rules": [], "source_digest": writer_digest, "params": {"vendor_cap": 5}}
+            self.assertEqual(ca.policy_rules(custom_key, "custom", str(policy)), custom_key)
+            policy.write_text(text)
+            with self.assertRaisesRegex(ValueError, "canonical keys"):
+                ca.policy_rules(dict(packet, params={"vendor_cap": 5}), "common", str(policy))
             # The admin packet path applies the same binding.
             deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
-                          "rules": ["expiry"], "grant": {}, "x402_enabled": False, "wasm_hash": None}
+                          "rules": ["expiry"], "params": {}, "x402_enabled": False, "wasm_hash": None}
             args = SimpleNamespace(action="admin", network="testnet", allow_mainnet=False, source=KEYS[0], family="wallet",
                                    contract=StrKey.encode_contract(bytes([2]) * 32), method="deploy_policy", tier="common",
                                    policy_source=str(policy), arguments=json.dumps({"deployment": deployment}))
@@ -501,15 +533,15 @@ class ContractAdmin(unittest.TestCase):
             args.arguments = json.dumps({"deployment": deployment})
             with patch("sys.stderr", new=StringIO()) as stderr:
                 self.assertIn("deploy_policy", ca.command(args))
-            self.assertIn("unset: recipients, expiry", stderr.getvalue())
-            deployment["grant"] = {"recipients": [KEYS[3]], "expiry": 2000000000}
+            self.assertIn("absent: recipients, expiry", stderr.getvalue())
+            deployment["params"] = {"recipients": [KEYS[3]], "expiry": 2000000000}
             args.arguments = json.dumps({"deployment": deployment})
             with patch("sys.stderr", new=StringIO()) as stderr:
                 self.assertIn("deploy_policy", ca.command(args))
             self.assertEqual(stderr.getvalue(), "")
 
     def test_policy_source_cannot_rebind_allowit(self):
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        call = CALL
         body = call("recipients") + call("expiry")
         self.assertEqual(ca.standard_prefix(source(body)), ["recipients", "expiry"])
         # A local `allowit` would make the trusted prefix call a different function.
@@ -552,7 +584,7 @@ class ContractAdmin(unittest.TestCase):
         self.assertEqual(ca.standard_prefix(allowed + source(body)), ["recipients", "expiry"])
 
     def test_policy_source_is_one_self_contained_file(self):
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        call = CALL
         body = call("expiry")
         outside = (
             'include!("more.rs");\n',
@@ -666,7 +698,7 @@ class ContractAdmin(unittest.TestCase):
                    "const T: &str = \"crate::x cfg!(test) ::core\";\npub fn two() -> u8 { one() + 2 }\n"
                    "fn three(file: u8, x: u8) -> u8 { u8::from(true) + file + x }\n"
                    "fn four(x: i128) -> i128 { x.saturating_add(i128::MAX.min(0)) + Option::None.unwrap_or(0) }\n"
-                   "use allowit::{AllowitError, DAY};\nfn five() -> AllowitError { AllowitError::MissingGrant }\n"
+                   "use allowit::{AllowitError, DAY};\nfn five() -> AllowitError { AllowitError::MissingParam }\n"
                    "const LIMIT: u64 = DAY * 2;\n"
                    "fn six(ctx: &AllowitContext) -> AllowitContext { let c = &ctx . env; let _ = c; ctx.clone() }\n"
                    "fn seven<'a>(x: &'static str, y: &'a str) -> bool { x != y && 0u32 != 1 && LIMIT > 1 }\n")
@@ -679,7 +711,7 @@ class ContractAdmin(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_policy_source_passes_the_std_only_compile_of_the_offchain_server(self):
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        call = CALL
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
 
@@ -696,7 +728,7 @@ class ContractAdmin(unittest.TestCase):
                 compiled(sdk)
             # Soroban methods of an aliased environment or an address and std prelude items are
             # off the allowlist.
-            for body in ("    let _ = allowit::spent_cap(ctx, &ctx.grant.spent_cap);\n    let e = &ctx.env;\n"
+            for body in ("    let _ = allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP));\n    let e = &ctx.env;\n"
                          "    e.storage().temporary().has(&0u32);\n",
                          "    ctx.request.recipient.require_auth();\n",
                          "    let _ = Box::new(ctx.request.amount);\n",
@@ -720,7 +752,7 @@ class ContractAdmin(unittest.TestCase):
                     ca.policy_rules({"rules": rules, "source_digest": source_digest}, tier, str(policy))
 
     def test_policy_source_rejects_code_that_diverges_between_backends(self):
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        call = CALL
         head = HEAD + call("recipients")
         diverging = (
             # Native code that runs inside the offchain evaluator process before `main`.
@@ -740,15 +772,16 @@ class ContractAdmin(unittest.TestCase):
             "fn g(ctx: &AllowitContext, e: &AllowitContext) { let mut d = ctx.clone(); core::mem::swap(&mut d.env, &mut e.clone().env); }\n",
             "fn g(ctx: &AllowitContext) { let _ = core::mem::replace(&mut ctx.clone().env, ctx.env.clone()); }\n",
             "fn g() { let _: Option<allowit::AllowitEnv> = None; }\n",
-            # Lists outside their rules, and pointer-width values.
-            "fn g(ctx: &AllowitContext) -> bool { ctx.grant.recipients.is_some() }\n",
-            "fn g(ctx: &AllowitContext) { let mut c = ctx.clone(); c.grant.tokens = None; let _ = c; }\n",
-            "fn g(ctx: &AllowitContext) { let _ = allowit::recipients(ctx, &ctx.grant.tokens); }\n",
-            "use allowit::recipients;\nfn g(ctx: &AllowitContext) { let _ = recipients(ctx, &ctx.grant.recipients); }\n",
-            "fn g(ctx: &AllowitContext) { let r#tokens = 0u8; let _ = (ctx, r#tokens); }\n",
-            "fn g(ctx: &AllowitContext) { let AllowitGrant { spent_cap, .. } = ctx.grant.clone(); let _ = spent_cap; }\n",
-            "fn g(ctx: &AllowitContext) { let AllowitContext { grant, .. } = ctx.clone(); let _ = grant; }\n",
-            "fn g(ctx: &AllowitContext) -> AllowitGrant { AllowitGrant { spent_cap: None, ..ctx.grant.clone() } }\n",
+            # The backend maps and lists behind params, and pointer-width values.
+            "fn g(ctx: &AllowitContext) -> bool { ctx.params.recipients.is_some() }\n",
+            "fn g(ctx: &AllowitContext) -> bool { ctx.params.0.is_empty() }\n",
+            "fn g(ctx: &AllowitContext) { for _ in ctx.request.args . 0.clone() {} }\n",
+            "fn g(ctx: &AllowitContext) { let p = allowit::AllowitParams(ctx.request.args.clone().0); let _ = p; }\n",
+            "fn g(ctx: &AllowitContext) -> bool { matches!(ctx.params.get(\"k\"), Some(AllowitValue::List(v)) if v.get(0).is_some()) }\n",
+            "fn g(ctx: &AllowitContext) -> bool { matches!(allowit::param(ctx, \"k\"), Ok(AllowitValue::Str(v)) if v.len() > 1) }\n",
+            "fn g(ctx: &AllowitContext) -> bool { ctx.params.get(\"k\").map(AllowitValue::List).is_some() }\n",
+            "use allowit::recipients;\nfn g(ctx: &AllowitContext) { let _ = recipients(ctx, ctx.params.get(allowit::RECIPIENTS)); }\n",
+            "fn g(ctx: &AllowitContext) { let AllowitContext { state, .. } = ctx.clone(); let _ = state; }\n",
             "fn g(ctx: &AllowitContext) -> AllowitRequest { AllowitRequest { amount: 1, ..ctx.request.clone() } }\n",
             "fn g() -> bool { [0u8; 1].len().count_zeros() > 40 }\n",
             "fn g() -> bool { let i = 0; let _ = [1u8][i]; (!i) as u64 > 1 << 40 }\n",
@@ -766,7 +799,7 @@ class ContractAdmin(unittest.TestCase):
                     ca.standard_prefix(text)
         # The detaching probe passes the std-only compile, so only the gate rejects it.
         detach = source("    let mut d = ctx.clone();\n    d.env = allowit::AllowitEnv::new();\n"
-                        "    if let Err(e) = allowit::spent_cap(&d, &d.grant.spent_cap) {\n        let _ = e;\n    }\n", head)
+                        "    if let Err(e) = allowit::spent_cap(&d, d.params.get(allowit::SPENT_CAP)) {\n        let _ = e;\n    }\n", head)
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
             for text in (detach, source("", head) + diverging[0]):
@@ -778,10 +811,13 @@ class ContractAdmin(unittest.TestCase):
                         ca.policy_rules({"rules": rules, "source_digest": source_digest}, tier, str(policy))
         # Portable code beside them stays valid.
         allowed = ("fn a(x: bool) -> bool { if !x { return !x; } assert!(x != !x); matches!(Some(1u8), Some(_)) }\n"
-                   "#[inline]\n#[allow(dead_code)]\nfn b(c: &AllowitContext) -> AllowitGrant { c.grant.clone() }\n"
+                   "#[inline]\n#[allow(dead_code)]\nfn b(c: &AllowitContext) -> Option<AllowitValue> { c.params.get(allowit::SPENT_CAP).or(c.request.args.get(\"memo\")) }\n"
                    "fn d(c: &AllowitContext) -> &AllowitContext { c }\n"
                    "use allowit::AllowitRule;\nfn e(r: AllowitRule) -> bool { r == AllowitRule::tokens || r == allowit::AllowitRule::recipients }\n"
-                   "fn f(ctx: &AllowitContext) -> allowit::Result { let c = ctx.clone(); allowit::tokens(&c, &c.grant.tokens)?; Ok(()) }\n"
+                   "fn f(ctx: &AllowitContext) -> allowit::Result { let c = ctx.clone(); allowit::tokens(&c, c.params.get(allowit::TOKENS))?; Ok(()) }\n"
+                   "fn vendor_cap_of(c: &AllowitContext) -> allowit::Result<i128> { allowit::recipients(c, c.params.get(allowit::TOKENS))?; match allowit::param(c, \"vendor_cap\")? "
+                   "{ AllowitValue::Int(cap) => Ok(cap), AllowitValue::List(items) => { let mut n = 0i128; for _ in items { n += 1; } Ok(n) } _ => Err(AllowitError::InvalidParam) } }\n"
+                   "fn ask(c: &AllowitContext) -> allowit::Result<u32> { allowit::systemone(c, &allowit::AllowitSystemOne { id: \"a\", query: \"b\", deny_below: 1u32, allow_above: 2u32 }) }\n"
                    "fn h(pair: [u8; 2]) -> u64 { let [x, y] = pair; u64::from(x) + u64::from(y) }\n"
                    "fn i(c: &AllowitContext) -> u64 { let held = &c.env; let _ = held; let mut n = 0u64; for x in 0..3u64 { n = n.max(x + c.request.now); } n }\n"
                    "fn j(c: &AllowitContext) -> allowit::Result<u64> { let n: Option<u64> = allowit::get_state(c, \"seen\")?; "
@@ -795,13 +831,13 @@ class ContractAdmin(unittest.TestCase):
             ca.host_compile(policy)
 
     def test_policy_source_rejects_pointer_width_and_address_probes(self):
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        call = CALL
         head = HEAD + call("recipients")
         # The review probe: a 64-bit host skips the cap that a 32-bit contract enforces.
         probe = ("    let wide = core::num::NonZeroUsize::MAX.ilog2() == 63;\n    if !wide {\n"
-                 "        allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n    }\n")
+                 "        allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?;\n    }\n")
         # A format width or precision count is `usize`, so it infers `a: usize` without naming it.
-        cap = "    let wide = a.checked_mul(a).is_some();\n    if !wide {\n        allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n    }\n"
+        cap = "    let wide = a.checked_mul(a).is_some();\n    if !wide {\n        allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?;\n    }\n"
         guard = "    let a = 65_536;\n    if ctx.request.amount < 0i128 {{ {} }}\n".format
         formats = (
             guard('panic!("{:1$}", 0u8, a);') + cap,
@@ -852,9 +888,9 @@ class ContractAdmin(unittest.TestCase):
                 ca.standard_prefix(source(body, head))
 
     def test_policy_source_rejects_closure_pointer_and_layout_probes(self):
-        call = "    allowit::{0}(ctx, &ctx.grant.{0})?;\n".format
+        call = CALL
         head = HEAD + call("recipients")
-        cap = "    if {} {{\n        allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;\n    }}\n".format
+        cap = "    if {} {{\n        allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?;\n    }}\n".format
         # Closures after `break` coerce to function pointers whose equality depends on the build.
         pointers = ("    let a = loop { break |x: u64| x; };\n    let b = loop { break |x: u64| x; };\n"
                     "    let p = if ctx.request.now > 0u64 { a } else { b };\n"
@@ -913,9 +949,9 @@ class ContractAdmin(unittest.TestCase):
                 ca.custody_layout(invalid)
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
-            policy.write_text(source("    allowit::expiry(ctx, &ctx.grant.expiry)?;\n"))
+            policy.write_text(source("    allowit::expiry(ctx, ctx.params.get(allowit::EXPIRY))?;\n"))
             deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
-                          "rules": ["expiry"], "grant": {}, "x402_enabled": False, "wasm_hash": None}
+                          "rules": ["expiry"], "params": {}, "x402_enabled": False, "wasm_hash": None}
             args = SimpleNamespace(action="admin", network="testnet", allow_mainnet=False, source=KEYS[0], family="wallet",
                                    contract=StrKey.encode_contract(bytes([2]) * 32), method="deploy_policy", tier="common",
                                    policy_source=str(policy), wasm=None)
@@ -927,11 +963,11 @@ class ContractAdmin(unittest.TestCase):
                 args.wasm, args.arguments = str(path), json.dumps({"deployment": deployment})
                 return ca.command(args)
 
-            self.assertIn("deploy_policy", prepare(meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"3"))))
-            # The old Map-Grant and history releases, a future layout and an unpinned file reject.
+            self.assertIn("deploy_policy", prepare(meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"4"))))
+            # The releases of layouts 1 to 3, a future layout and an unpinned file reject.
             for wasm_bytes, wasm_hash in ((meta_wasm((b"rsver", b"1.98.0")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"1")), None),
-                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"2")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"4")), None),
-                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"3")), "11" * 32)):
+                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"3")), None), (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"5")), None),
+                                          (meta_wasm((ca.CUSTODY_LAYOUT_KEY, b"4")), "11" * 32)):
                 with self.subTest(wasm=wasm_bytes), self.assertRaises(ValueError):
                     prepare(wasm_bytes, wasm_hash)
             args.wasm = None
@@ -943,7 +979,7 @@ class ContractAdmin(unittest.TestCase):
             self.assertIn("deploy_policy", ca.command(args))
 
     @unittest.skipUnless((ROOT / "target/wasm32v1-none/release/allowit_common_policy_engine.wasm").exists(), "contracts not built")
-    def test_built_wallet_wasm_declares_custody_layout_3(self):
+    def test_built_wallet_wasm_declares_the_current_custody_layout(self):
         for name in ("simple_policy_engine", "common_policy_engine", "custom_policy"):
             wasm = (ROOT / "target/wasm32v1-none/release" / ("allowit_" + name + ".wasm")).read_bytes()
             self.assertEqual(ca.custody_layout(wasm), ca.WALLET_CONTRACT_VERSION)

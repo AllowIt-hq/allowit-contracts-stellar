@@ -1,5 +1,5 @@
 use super::*;
-use allowit::{AllowitContext, AllowitGrant, AllowitOperation, AllowitRequest};
+use allowit::{AllowitContext, AllowitOperation, AllowitParams, AllowitRequest, AllowitValue};
 use allowit_wallet_engine::AllowitEngineClient;
 use soroban_sdk::{
     Bytes, IntoVal, Val, Vec,
@@ -57,10 +57,13 @@ impl Fixture {
 fn context(env: &Env) -> AllowitContext {
     AllowitContext {
         env: env.clone(),
-        grant: AllowitGrant {
-            transaction_cap: Some(10),
-            ..Default::default()
-        },
+        params: AllowitParams(soroban_sdk::Map::from_array(
+            env,
+            [(
+                soroban_sdk::Symbol::new(env, allowit::TRANSACTION_CAP),
+                AllowitValue::Int(10),
+            )],
+        )),
         state: soroban_sdk::Map::new(env),
         request: AllowitRequest {
             operation: AllowitOperation::sep41_transfer,
@@ -72,6 +75,7 @@ fn context(env: &Env) -> AllowitContext {
             spent_units: 1,
             gas_units: 0,
             unpriced: false,
+            args: AllowitParams(soroban_sdk::Map::new(env)),
         },
     }
 }
@@ -82,7 +86,11 @@ fn transaction_cap(
 ) -> Result<Result<i128, soroban_sdk::Error>, Result<allowit::AllowitError, soroban_sdk::InvokeError>>
 {
     let ctx = context(env);
-    AllowitEngineClient::new(env, engine).try_transaction_cap(&ctx.grant, &ctx.state, &ctx.request)
+    AllowitEngineClient::new(env, engine).try_transaction_cap(
+        &ctx.params.0,
+        &ctx.state,
+        &ctx.request,
+    )
 }
 fn approved(env: &Env, engine: &Address) -> bool {
     transaction_cap(env, engine).is_ok_and(|left| left == Ok(9))

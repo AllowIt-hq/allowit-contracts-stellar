@@ -1,6 +1,9 @@
 extern crate std;
 use super::*;
-use allowit::AllowitStandardState;
+use allowit::{
+    AllowitStandardState, CALL_CAP, DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, RECIPIENTS, SPENT_CAP,
+    TOKENS, TRANSACTION_CAP,
+};
 use allowit_wallet_protocol::AllowitPolicyInvocation;
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
@@ -22,6 +25,29 @@ pub(super) const CUSTOM: &[u8] =
 /// `AllowitCustomPolicy` built with `test-catching` by `scripts/build-contracts.sh`.
 pub(super) const CATCHING: &[u8] =
     include_bytes!("../../../target/test-fixtures/custom_catching.wasm");
+
+/// A `List` of `Addr` values.
+pub(super) fn addresses(env: &Env, items: &[&Address]) -> AllowitValue {
+    let mut list = Vec::new(env);
+    for item in items {
+        list.push_back(AllowitValue::Addr((*item).clone()));
+    }
+    AllowitValue::List(list)
+}
+/// Set one param, or remove it with `None`.
+pub(super) fn set_param(
+    params: &mut Map<Symbol, AllowitValue>,
+    key: &str,
+    value: Option<AllowitValue>,
+) {
+    let key = Symbol::new(params.env(), key);
+    match value {
+        Some(value) => params.set(key, value),
+        None => {
+            params.remove(key);
+        }
+    }
+}
 
 pub(super) struct Fixture {
     pub(super) env: Env,
@@ -119,16 +145,19 @@ impl Fixture {
             env.register_stellar_asset_contract_v2(Address::generate(&env))
                 .address()
         };
-        let grant = AllowitGrant {
-            transaction_cap: Some(100),
-            spent_cap: Some(250),
-            day_spent_cap: Some(150),
-            day_total_cap: Some(150),
-            call_cap: Some(3),
-            recipients: Some(vec![&env, recipient.clone()]),
-            tokens: Some(vec![&env, asset.clone()]),
-            expiry: Some(1_000_000),
-        };
+        let mut params = Map::new(&env);
+        for (key, value) in [
+            (TRANSACTION_CAP, AllowitValue::Int(100)),
+            (SPENT_CAP, AllowitValue::Int(250)),
+            (DAY_SPENT_CAP, AllowitValue::Int(150)),
+            (DAY_TOTAL_CAP, AllowitValue::Int(150)),
+            (CALL_CAP, AllowitValue::Int(3)),
+            (RECIPIENTS, addresses(&env, &[&recipient])),
+            (TOKENS, addresses(&env, &[&asset])),
+            (EXPIRY, AllowitValue::Int(1_000_000)),
+        ] {
+            params.set(Symbol::new(&env, key), value);
+        }
         let mut rules = Vec::new(&env);
         if wasm == COMMON {
             for rule in [
@@ -177,7 +206,7 @@ impl Fixture {
             policy_instance: BytesN::from_array(&env, &[1; 32]),
             source_digest,
             rules,
-            grant,
+            params,
             x402_enabled: x402,
         };
         let wallet = env.register(wasm, (config,));
@@ -233,6 +262,7 @@ impl Fixture {
             nonce: s.nonce,
             deployment_version: s.deployment_version,
             expires_at: self.env.ledger().timestamp() + 100,
+            args: Map::new(&self.env),
             invocation: AllowitPolicyInvocation {
                 module_digest: b.module_digest,
                 entrypoint: b.entrypoint,
@@ -260,6 +290,7 @@ impl Fixture {
             nonce: s.nonce,
             deployment_version: s.deployment_version,
             expires_at: self.env.ledger().timestamp() + 100,
+            args: Map::new(&self.env),
             invocation: AllowitPolicyInvocation {
                 module_digest: module.clone(),
                 entrypoint: Symbol::new(&self.env, "execute"),
@@ -302,7 +333,7 @@ impl Fixture {
     }
     /// Standard values of the stored policy state.
     pub(super) fn history(&self) -> AllowitStandardState {
-        AllowitStandardState::read(&self.env, &self.client().policy_state()).unwrap()
+        AllowitStandardState::read(&self.client().policy_state()).unwrap()
     }
     pub(super) fn balance(&self) -> i128 {
         token::Client::new(&self.env, &self.asset).balance(&self.wallet)
@@ -333,7 +364,7 @@ impl Fixture {
             server: s.server,
             source_digest: s.source_digest,
             rules: s.rules,
-            grant: s.grant,
+            params: s.params,
             x402_enabled: s.x402_enabled,
             wasm_hash: None,
         }
@@ -418,7 +449,7 @@ impl Fixture {
     }
 }
 #[test]
-fn simple_requires_both_signers_and_does_not_infer_rules_from_grant() {
+fn simple_requires_both_signers_and_does_not_infer_rules_from_params() {
     let f = Fixture::new(SIMPLE, false);
     let e = f.execution(200);
     for actors in [&[&f.agent][..], &[&f.server][..], &[&f.owner][..], &[][..]] {
@@ -462,13 +493,13 @@ fn common_rules_bound_transfers_and_commit_usage_once() {
     assert_eq!(f.history().spent, 250);
 }
 #[test]
-fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
+fn common_skips_absent_params_and_rejects_unknown_names_keys_and_values() {
     let f = Fixture::new(COMMON, false);
-    // Soroban decodes vector elements when read. The packet binds a digest over the raw rules, so
-    // only the kernel's element decoding rejects them before they are stored.
+    // Soroban decodes vector and map elements when read. The packet binds a digest over the raw
+    // rules, so only the kernel's element decoding rejects them before they are stored.
     let module = f.env.crypto().sha256(&Bytes::from_slice(&f.env, COMMON));
     let kind = Symbol::new(&f.env, "common_policy_engine");
-    let packet = |rule: Val, grant: Option<(&str, Val)>| {
+    let packet = |rule: Val, param: Option<(&str, Val)>| {
         let rules: Val = vec![&f.env, rule].into_val(&f.env);
         let lazy = Vec::<AllowitRule>::try_from_val(&f.env, &rules).unwrap();
         let digest = standard_prefix_digest(&f.env, &kind, &module.to_bytes(), &f.asset, &lazy);
@@ -478,11 +509,11 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
             Symbol::new(&f.env, "source_digest"),
             digest.into_val(&f.env),
         );
-        if let Some((name, value)) = grant {
-            let raw = packet.get(Symbol::new(&f.env, "grant")).unwrap();
+        if let Some((name, value)) = param {
+            let raw = packet.get(Symbol::new(&f.env, "params")).unwrap();
             let mut fields = Map::<Symbol, Val>::try_from_val(&f.env, &raw).unwrap();
             fields.set(Symbol::new(&f.env, name), value);
-            packet.set(Symbol::new(&f.env, "grant"), fields.into_val(&f.env));
+            packet.set(Symbol::new(&f.env, "params"), fields.into_val(&f.env));
         }
         packet
     };
@@ -496,16 +527,18 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
         assert_eq!(f.client().state().deployment_version, 0);
         result
     };
-    // A malformed rule element or allowlist element is InvalidGrant.
+    // A malformed rule element, param value or list item is InvalidParam.
     let junk: Val = 5u32.into_val(&f.env);
     let recipient: Val = vec![&f.env, Symbol::new(&f.env, "recipients")].into_val(&f.env);
-    let junk_list: Val = vec![&f.env, junk].into_val(&f.env);
+    let list: Val = Symbol::new(&f.env, "List").into_val(&f.env);
+    let junk_list: Val = vec![&f.env, list, vec![&f.env, junk].into_val(&f.env)].into_val(&f.env);
     for raw in [
         packet(junk, None),
+        packet(recipient, Some(("recipients", junk))),
         packet(recipient, Some(("recipients", junk_list))),
         packet(recipient, Some(("tokens", junk_list))),
     ] {
-        assert_eq!(deploy(raw), Err(Ok(AllowitWalletError::InvalidGrant)));
+        assert_eq!(deploy(raw), Err(Ok(AllowitWalletError::InvalidParam)));
     }
     // A name outside the enum aborts in the host's symbol lookup.
     for name in [
@@ -525,26 +558,36 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
         let rule: Val = vec![&f.env, Symbol::new(&f.env, name)].into_val(&f.env);
         assert!(deploy(packet(rule, None)).is_err());
     }
-    for field in 0..4 {
+    // The standard contract admits only the canonical keys, each with its rule's type.
+    let text = AllowitValue::Str(String::from_str(&f.env, "100"));
+    let invalid = [
+        (TRANSACTION_CAP, AllowitValue::Int(-1)),
+        (SPENT_CAP, AllowitValue::Int(-1)),
+        (DAY_SPENT_CAP, AllowitValue::Int(-1)),
+        (DAY_TOTAL_CAP, text.clone()),
+        (CALL_CAP, AllowitValue::Int(-1)),
+        (EXPIRY, AllowitValue::Bool(true)),
+        (RECIPIENTS, AllowitValue::Addr(f.recipient.clone())),
+        (TOKENS, AllowitValue::List(vec![&f.env, text])),
+        ("vendor_cap", AllowitValue::Int(5)),
+        ("per_transfer", AllowitValue::Int(5)),
+    ];
+    for (key, value) in invalid {
         let mut p = f.deployment();
-        *[
-            &mut p.grant.transaction_cap,
-            &mut p.grant.spent_cap,
-            &mut p.grant.day_spent_cap,
-            &mut p.grant.day_total_cap,
-        ][field] = Some(-1);
+        set_param(&mut p.params, key, Some(value));
         f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
         assert_eq!(
             f.client().try_deploy_policy(&p),
-            Err(Ok(AllowitWalletError::InvalidGrant))
+            Err(Ok(AllowitWalletError::InvalidParam)),
+            "{key}"
         );
     }
     let mut p = f.deployment();
-    p.grant = AllowitGrant::default();
+    p.params = Map::new(&f.env);
     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
     f.client().deploy_policy(&p);
-    assert_eq!(f.client().state().grant, AllowitGrant::default());
-    // Every selected rule is skipped by the standard preflight when its field is unset.
+    assert!(f.client().state().params.is_empty());
+    // Every selected rule is skipped by the standard preflight when its param is absent.
     assert_eq!(f.transfer(500).amount, 500);
     // The same raw path stores a known rule.
     assert!(f.deploy_raw(packet(recipient, None)));
@@ -554,11 +597,11 @@ fn common_skips_unset_parameters_and_rejects_unknown_names_or_negative_caps() {
     );
 }
 #[test]
-fn custom_policy_denies_an_unset_grant_field_that_common_preflight_skips() {
+fn custom_policy_denies_an_absent_param_that_common_preflight_skips() {
     for wasm in [COMMON, CUSTOM] {
         let f = Fixture::new(wasm, false);
         let mut p = f.deployment();
-        p.grant.expiry = None;
+        set_param(&mut p.params, EXPIRY, None);
         f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
         f.client().deploy_policy(&p);
         let e = f.execution(10);
@@ -570,7 +613,7 @@ fn custom_policy_denies_an_unset_grant_field_that_common_preflight_skips() {
         if wasm == CUSTOM {
             assert_eq!(
                 f.client().try_execute(&e),
-                Err(Ok(AllowitWalletError::InvalidGrant))
+                Err(Ok(AllowitWalletError::InvalidParam))
             );
             assert_eq!(f.history(), AllowitStandardState::default());
         } else {
@@ -580,33 +623,22 @@ fn custom_policy_denies_an_unset_grant_field_that_common_preflight_skips() {
     }
 }
 #[test]
-fn untyped_or_legacy_grant_packets_do_not_decode() {
-    use soroban_sdk::Map;
+fn params_that_are_not_key_value_maps_do_not_decode() {
     let f = Fixture::new(COMMON, false);
     let p = f.deployment();
-    let mut legacy = Map::<String, Val>::new(&f.env);
-    legacy.set(
-        String::from_str(&f.env, "per_transfer"),
-        10i128.into_val(&f.env),
+    // A text-keyed map and a struct of raw values, the earlier layouts' encodings.
+    let mut text_keys = Map::<String, Val>::new(&f.env);
+    text_keys.set(
+        String::from_str(&f.env, "transaction_cap"),
+        AllowitValue::Int(10).into_val(&f.env),
     );
-    let typed: Val = p.grant.clone().into_val(&f.env);
-    let mut fields = Map::<Symbol, Val>::try_from_val(&f.env, &typed).unwrap();
-    fields.set(Symbol::new(&f.env, "call_cap"), true.into_val(&f.env));
+    let mut raw_values = Map::<Symbol, Val>::new(&f.env);
+    raw_values.set(Symbol::new(&f.env, "call_cap"), 3u64.into_val(&f.env));
     let packet: Val = p.clone().into_val(&f.env);
-    for grant in [legacy.into_val(&f.env), fields.into_val(&f.env)] {
+    for params in [text_keys.into_val(&f.env), raw_values.into_val(&f.env)] {
         let mut raw = Map::<Symbol, Val>::try_from_val(&f.env, &packet).unwrap();
-        raw.set(Symbol::new(&f.env, "grant"), grant);
-        let args: Vec<Val> = (raw,).into_val(&f.env);
-        f.auth(&[&f.owner], "deploy_policy", args.clone());
-        assert!(
-            f.env
-                .try_invoke_contract::<(), AllowitWalletError>(
-                    &f.wallet,
-                    &Symbol::new(&f.env, "deploy_policy"),
-                    args
-                )
-                .is_err()
-        );
+        raw.set(Symbol::new(&f.env, "params"), params);
+        assert!(!f.deploy_raw(raw));
         assert_eq!(f.client().state().deployment_version, 0);
     }
 }
@@ -614,41 +646,27 @@ fn untyped_or_legacy_grant_packets_do_not_decode() {
 fn owner_signs_the_canonical_packet_so_absent_or_extra_keys_reject() {
     let f = Fixture::new(COMMON, false);
     let p = f.deployment();
-    let grant = |edit: &dyn Fn(&mut Map<Symbol, Val>)| {
-        let mut packet = f.packet(&p);
-        let typed: Val = p.grant.clone().into_val(&f.env);
-        let mut fields = Map::<Symbol, Val>::try_from_val(&f.env, &typed).unwrap();
-        edit(&mut fields);
-        packet.set(Symbol::new(&f.env, "grant"), fields.into_val(&f.env));
-        packet
-    };
-    let legacy = |fields: &mut Map<Symbol, Val>| {
-        fields.set(Symbol::new(&f.env, "per_transfer"), 5i128.into_val(&f.env))
-    };
     let mut extra_top = f.packet(&p);
     extra_top.set(Symbol::new(&f.env, "per_transfer"), 5i128.into_val(&f.env));
     let mut absent_top = f.packet(&p);
     absent_top.remove(Symbol::new(&f.env, "wasm_hash"));
-    for packet in [
-        // A legacy name beside an absent typed field would decode as an unset cap.
-        grant(&|fields| {
-            fields.remove(Symbol::new(&f.env, "transaction_cap"));
-            legacy(fields);
-        }),
-        grant(&legacy),
-        grant(&|fields| {
-            fields.remove(Symbol::new(&f.env, "expiry"));
-        }),
-        extra_top,
-        absent_top,
-    ] {
+    let mut legacy_name = p.clone();
+    set_param(
+        &mut legacy_name.params,
+        "per_transfer",
+        Some(AllowitValue::Int(5)),
+    );
+    for packet in [extra_top, absent_top, f.packet(&legacy_name)] {
         assert!(!f.deploy_raw(packet));
         assert_eq!(f.client().state().deployment_version, 0);
-        assert_eq!(f.client().state().grant, p.grant);
+        assert_eq!(f.client().state().params, p.params);
     }
-    // The canonical raw packet passes through the same path.
-    assert!(f.deploy_raw(f.packet(&p)));
+    // The canonical raw packet passes through the same path; an absent key is unset.
+    let mut unset = p.clone();
+    set_param(&mut unset.params, EXPIRY, None);
+    assert!(f.deploy_raw(f.packet(&unset)));
     assert_eq!(f.client().state().deployment_version, 1);
+    assert_eq!(f.client().state().params, unset.params);
 }
 #[test]
 fn wallet_wasm_declares_its_custody_layout() {
@@ -980,25 +998,16 @@ fn custom_source_and_unknown_storage_layout_reject() {
     for case in 0..5 {
         f.env.as_contract(&f.wallet, || {
             let mut raw: Map<Symbol, Val> = f.env.storage().instance().get(&STATE_KEY).unwrap();
-            let nested = |name: &str| {
-                let key = Symbol::new(&f.env, name);
-                let mut inner = Map::<Symbol, Val>::try_from_val(&f.env, &raw.get(key).unwrap());
-                let inner = inner.as_mut().unwrap();
-                inner.set(extra.clone(), 5i128.into_val(&f.env));
-                inner.clone()
-            };
             match case {
                 0 => {
                     raw.remove(Symbol::new(&f.env, "server"));
                 }
                 1 => raw.set(extra.clone(), 5i128.into_val(&f.env)),
-                2 => raw.set(
-                    Symbol::new(&f.env, "grant"),
-                    nested("grant").into_val(&f.env),
-                ),
+                // Params must be a map.
+                2 => raw.set(Symbol::new(&f.env, "params"), 5u32.into_val(&f.env)),
                 // Policy state must be a map.
                 3 => raw.set(Symbol::new(&f.env, "policy_state"), 5u32.into_val(&f.env)),
-                // A legacy empty Grant map would otherwise decode as an all-unset typed Grant.
+                // The earlier layout's field beside the params does not decode as this layout.
                 _ => raw.set(
                     Symbol::new(&f.env, "grant"),
                     Map::<Symbol, Val>::new(&f.env).into_val(&f.env),
@@ -1030,7 +1039,8 @@ struct LegacyHistory {
     day_unpriced: bool,
 }
 
-/// Version 1 layout: untyped Grant map, symbol rules and a history struct.
+/// Version 1 layout: a text-keyed map of raw params stored as `grant`, symbol rules and a history
+/// struct.
 #[contracttype]
 #[derive(Clone)]
 struct LegacyState {
@@ -1056,8 +1066,8 @@ fn earlier_layouts_keep_owner_recovery_and_do_not_migrate_implicitly() {
     let f = Fixture::new(COMMON, false);
     f.transfer(10);
     let current = f.client().state();
-    let mut grant = Map::<String, Val>::new(&f.env);
-    grant.set(
+    let mut params = Map::<String, Val>::new(&f.env);
+    params.set(
         String::from_str(&f.env, "transaction_cap"),
         5i128.into_val(&f.env),
     );
@@ -1079,7 +1089,7 @@ fn earlier_layouts_keep_owner_recovery_and_do_not_migrate_implicitly() {
         policy_instance: current.policy_instance.clone(),
         source_digest: current.source_digest.clone(),
         rules: vec![&f.env, Symbol::new(&f.env, "transaction_cap")],
-        grant,
+        grant: params,
         x402_enabled: false,
         token: current.token.clone(),
         deployment_version: current.deployment_version,
@@ -1116,7 +1126,7 @@ fn earlier_layouts_keep_owner_recovery_and_do_not_migrate_implicitly() {
         server: current.server.clone(),
         source_digest: current.source_digest.clone(),
         rules: current.rules.clone(),
-        grant: current.grant.clone(),
+        params: current.params.clone(),
         x402_enabled: false,
         wasm_hash: None,
     };
@@ -1130,6 +1140,22 @@ fn earlier_layouts_keep_owner_recovery_and_do_not_migrate_implicitly() {
         );
         assert!(f.client().try_state().is_err());
     }
+    // Layout 3 also stored `policy_state`, with raw values, so it does not carry over either.
+    f.env.as_contract(&f.wallet, || {
+        let encoded: Val = current.clone().into_val(&f.env);
+        let mut raw = Map::<Symbol, Val>::try_from_val(&f.env, &encoded).unwrap();
+        raw.set(
+            Symbol::new(&f.env, "contract_version"),
+            3u32.into_val(&f.env),
+        );
+        f.env.storage().instance().set(&STATE_KEY, &raw);
+    });
+    f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
+    assert_eq!(
+        f.client().try_deploy_policy(&p),
+        Err(Ok(AllowitWalletError::InvalidState))
+    );
+    assert!(f.client().try_state().is_err());
     // A later layout may change kept fields, so even owner recovery rejects it.
     legacy.contract_version = CONTRACT_VERSION + 1;
     install(&legacy);
@@ -1193,7 +1219,7 @@ fn constructor_owner_signs_the_canonical_packet_so_absent_or_extra_keys_reject()
         policy_instance: s.policy_instance,
         source_digest: s.source_digest,
         rules: s.rules,
-        grant: s.grant,
+        params: s.params,
         x402_enabled: false,
     };
     let wasm = f.env.deployer().upload_contract_wasm(COMMON);
@@ -1205,14 +1231,10 @@ fn constructor_owner_signs_the_canonical_packet_so_absent_or_extra_keys_reject()
         .with_address(factory.clone(), salt)
         .deployed_address();
     let key = |name: &str| Symbol::new(&f.env, name);
-    type Fields = Map<Symbol, Val>;
-    let raw = |edit: &dyn Fn(&mut Fields, &mut Fields)| {
+    let raw = |edit: &dyn Fn(&mut Map<Symbol, Val>)| {
         let encoded: Val = config.clone().into_val(&f.env);
         let mut packet = Map::<Symbol, Val>::try_from_val(&f.env, &encoded).unwrap();
-        let mut grant =
-            Map::<Symbol, Val>::try_from_val(&f.env, &packet.get(key("grant")).unwrap()).unwrap();
-        edit(&mut packet, &mut grant);
-        packet.set(key("grant"), grant.into_val(&f.env));
+        edit(&mut packet);
         packet
     };
     // The owner authorizes exactly the raw packet sent.
@@ -1231,25 +1253,20 @@ fn constructor_owner_signs_the_canonical_packet_so_absent_or_extra_keys_reject()
             .try_deploy_raw(&wasm, &packet)
             .is_ok()
     };
-    let legacy = |grant: &mut Map<Symbol, Val>| {
-        grant.set(key("per_transfer"), 5i128.into_val(&f.env));
-    };
+    let mut legacy = config.params.clone();
+    set_param(&mut legacy, "per_transfer", Some(AllowitValue::Int(5)));
     for packet in [
-        // A legacy name beside an absent typed field would decode as an unset cap.
-        raw(&|_, grant| {
-            grant.remove(key("transaction_cap"));
-            legacy(grant);
+        raw(&|packet| packet.set(key("per_transfer"), 5i128.into_val(&f.env))),
+        raw(&|packet| {
+            packet.remove(key("x402_enabled"));
         }),
-        raw(&|_, grant| legacy(grant)),
-        raw(&|_, grant| {
-            grant.remove(key("expiry"));
-        }),
-        raw(&|packet, _| packet.set(key("per_transfer"), 5i128.into_val(&f.env))),
+        // The standard contract admits only canonical param keys.
+        raw(&|packet| packet.set(key("params"), legacy.clone().into_val(&f.env))),
     ] {
         assert!(!deploy(packet));
     }
-    assert!(deploy(raw(&|_, _| {})));
-    assert_eq!(Client::new(&f.env, &wallet).state().grant, config.grant);
+    assert!(deploy(raw(&|_| {})));
+    assert_eq!(Client::new(&f.env, &wallet).state().params, config.params);
 }
 #[test]
 fn constructor_and_deploy_policy_reject_a_mismatched_standard_prefix_digest() {
@@ -1281,7 +1298,7 @@ fn constructor_and_deploy_policy_reject_a_mismatched_standard_prefix_digest() {
         policy_instance: s.policy_instance.clone(),
         source_digest: source_digest.clone(),
         rules: s.rules.clone(),
-        grant: s.grant.clone(),
+        params: s.params.clone(),
         x402_enabled: false,
     };
     let wasm = env.deployer().upload_contract_wasm(COMMON);
@@ -1333,7 +1350,7 @@ fn ordinary_compiled_deployment_requires_owner_authorization() {
         policy_instance: state.policy_instance,
         source_digest: state.source_digest,
         rules: state.rules,
-        grant: state.grant,
+        params: state.params,
         x402_enabled: false,
     };
     f.env.mock_auths(&[]);
@@ -1468,12 +1485,12 @@ fn x402_enforces_compiled_business_rules_without_committing() {
                 ),
                 _ => {
                     let mut p = f.deployment();
-                    p.grant.expiry = None;
+                    set_param(&mut p.params, EXPIRY, None);
                     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
                     f.client().deploy_policy(&p);
                     // Common preflight skips the unset field; Custom denies it.
                     let expected = if wasm == CUSTOM {
-                        AllowitWalletError::InvalidGrant
+                        AllowitWalletError::InvalidParam
                     } else {
                         AllowitWalletError::PolicyDenied
                     };
@@ -1673,7 +1690,7 @@ fn upgraded_tiers_validate_retained_rules_and_owner_can_correct_configuration() 
                 .to_bytes();
         }
         if target == COMMON {
-            p.grant.day_spent_cap = Some(-1);
+            set_param(&mut p.params, DAY_SPENT_CAP, Some(AllowitValue::Int(-1)));
         }
         if target == SIMPLE {
             p.source_digest = standard_prefix_digest(
@@ -1688,7 +1705,7 @@ fn upgraded_tiers_validate_retained_rules_and_owner_can_correct_configuration() 
         if target == COMMON {
             assert_eq!(
                 f.client().try_deploy_policy(&p),
-                Err(Ok(AllowitWalletError::InvalidGrant))
+                Err(Ok(AllowitWalletError::InvalidParam))
             );
             f.transfer(10);
             continue;
@@ -1702,11 +1719,15 @@ fn upgraded_tiers_validate_retained_rules_and_owner_can_correct_configuration() 
         );
         assert_eq!(
             f.client().try_execute(&e),
-            Err(Ok(AllowitWalletError::InvalidGrant))
+            Err(Ok(AllowitWalletError::InvalidParam))
         );
         let mut fixed = f.deployment();
         if target == COMMON {
-            fixed.grant.day_spent_cap = Some(150);
+            set_param(
+                &mut fixed.params,
+                DAY_SPENT_CAP,
+                Some(AllowitValue::Int(150)),
+            );
         } else {
             fixed.rules = Vec::new(&f.env);
             if target == SIMPLE {
@@ -1903,7 +1924,7 @@ fn common_empty_rule_constructor_is_an_explicit_simple_configuration() {
             &Vec::new(&f.env),
         ),
         rules: Vec::new(&f.env),
-        grant: state.grant,
+        params: state.params,
         x402_enabled: false,
     };
     f.env.mock_all_auths_allowing_non_root_auth();
@@ -2035,7 +2056,7 @@ fn repeated_prefix_rules_read_one_current_state_and_charge_once() {
         &f.asset,
         &p.rules,
     );
-    p.grant.spent_cap = Some(30);
+    set_param(&mut p.params, SPENT_CAP, Some(AllowitValue::Int(30)));
     f.auth(&[&f.owner], "deploy_policy", (p.clone(),).into_val(&f.env));
     f.client().deploy_policy(&p);
     f.transfer(20);

@@ -1,7 +1,7 @@
 // Shared types and rules, included once per backend. The including module supplies `Address`,
-// `AllowitEnv`, `AllowitStateMap`, `AllowitValue` and `Vec`, and the state primitives `read`,
-// `write`, `record`, `take_writes` and `merge`. Field types keep those names so Soroban contract
-// specs name native types.
+// `AllowitEnv`, `Map`, `String`, `Symbol` and `Vec`, and the map primitives `lookup`, `insert`,
+// `count`, `text_len`, `each_value`, `each_item`, `record`, `take_writes` and `merge`. Field
+// types keep those names so Soroban contract specs name native types.
 
 /// UTC day length in seconds.
 pub const DAY: u64 = 86_400;
@@ -9,46 +9,51 @@ pub const DAY: u64 = 86_400;
 pub use types::*;
 
 /// Contract types. Kept apart from `Result` so generated code sees the standard prelude.
-/// `AllowitRule` variants keep the snake-case names of their functions and Grant fields.
+/// `AllowitRule` variants keep the snake-case names of their functions and param keys.
 #[allow(non_camel_case_types)]
 mod types {
-    use super::{Address, AllowitEnv, AllowitStateMap, Vec};
+    use super::{Address, AllowitEnv, AllowitMap, Map, String, Symbol, Vec};
 
     value! {
-        /// Owner-signed typed rule parameters. `None` is unset: its rule denies with `MissingGrant`.
-        /// Amounts use underlying native units.
-        #[derive(Clone, Debug, Default, Eq, PartialEq)]
-        pub struct AllowitGrant {
-            /// Nonnegative gross ceiling for one operation.
-            pub transaction_cap: Option<i128>,
-            /// Nonnegative cumulative irreversible-expense ceiling.
-            pub spent_cap: Option<i128>,
-            /// Nonnegative UTC-day irreversible-expense ceiling.
-            pub day_spent_cap: Option<i128>,
-            /// Nonnegative UTC-day gross amount plus separate attributable gas ceiling.
-            pub day_total_cap: Option<i128>,
-            /// Successful operation count ceiling. Zero denies every operation.
-            pub call_cap: Option<u64>,
-            /// Exact permitted destinations, including deposit vaults. Empty denies.
-            pub recipients: Option<Vec<Address>>,
-            /// Exact permitted underlying asset contracts. Empty denies.
-            pub tokens: Option<Vec<Address>>,
-            /// Exclusive Unix timestamp; the grant denies at and after it.
-            pub expiry: Option<u64>,
+        /// One value of params, request args and policy state.
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        pub enum AllowitValue {
+            /// Signed integer: amounts, counts, days and timestamps.
+            Int(i128),
+            /// Flag.
+            Bool(bool),
+            /// Text of at most `MAX_TEXT` bytes.
+            Str(String),
+            /// Exact Stellar account or contract.
+            Addr(Address),
+            /// Ordered values, such as the addresses of an allowlist.
+            List(Vec<AllowitValue>),
         }
+    }
+
+    value! {
+        /// Key => value params: the owner's constructor params in `ctx.params` and the agent's
+        /// execution params in `ctx.request.args`. An absent key is unset.
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        pub struct AllowitParams(
+            /// The key => value map. Policy reads it only through `get`.
+            pub Map<Symbol, AllowitValue>,
+        );
     }
 
     value! {
         /// Kernel-selected native operation. Variants keep the canonical `stellar::<name>` names.
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub enum AllowitOperation {
+            /// SEP-41 token transfer to a recipient.
             sep41_transfer,
+            /// SEP-56 deposit into a vault, which is the recipient.
             sep56_deposit,
         }
     }
 
     value! {
-        /// Authenticated request facts read by rules.
+        /// Authenticated request facts read by rules, and the agent's execution params.
         #[derive(Clone, Debug, Eq, PartialEq)]
         pub struct AllowitRequest {
             /// Kernel-selected native operation.
@@ -69,32 +74,55 @@ mod types {
             pub gas_units: i128,
             /// The request carries no expense bounds.
             pub unpriced: bool,
+            /// The agent's execution params of this call, covered by the agent and server
+            /// signatures. Never stored; canonical rules and the standard contract ignore them.
+            pub args: AllowitParams,
         }
     }
 
     value! {
-        /// Canonical rule. Each variant names its rule function and its same-named Grant field.
+        /// Canonical rule. Each variant names its rule function and its canonical param key.
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub enum AllowitRule {
+            /// `transaction_cap`: gross ceiling of one operation.
             transaction_cap,
+            /// `spent_cap`: cumulative irreversible-expense ceiling.
             spent_cap,
+            /// `day_spent_cap`: UTC-day irreversible-expense ceiling.
             day_spent_cap,
+            /// `day_total_cap`: UTC-day gross amount plus gas ceiling.
             day_total_cap,
+            /// `call_cap`: successful operation count ceiling.
             call_cap,
+            /// `recipients`: permitted destinations.
             recipients,
+            /// `tokens`: permitted underlying assets.
             tokens,
+            /// `expiry`: exclusive Unix timestamp of the params.
             expiry,
         }
     }
 
-    /// Complete rule input, supplied by the wallet or server. Plain data: `env` is the backend
-    /// environment, a Soroban `Env` onchain and an `AllowitEnv` on the host; `state` is the current
-    /// policy state, before this operation.
+    /// Which params a wallet admits and which policy state it stores.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AllowitTier {
+        /// Simple and Common: the canonical params only, and only the standard state keys,
+        /// because only the canonical prefix runs onchain.
+        Standard,
+        /// Custom: any bounded params, and every key the compiled policy writes.
+        Custom,
+    }
+
+    /// Complete rule input, supplied by the wallet or server. Plain data without methods.
     #[derive(Clone)]
     pub struct AllowitContext {
+        /// Backend environment: a Soroban `Env` onchain and an `AllowitEnv` on the host.
         pub env: AllowitEnv,
-        pub grant: AllowitGrant,
-        pub state: AllowitStateMap,
+        /// The owner's constructor params, set at install and changed by owner-signed update.
+        pub params: AllowitParams,
+        /// Current policy state, before this operation.
+        pub state: AllowitMap,
+        /// Authenticated request facts and the agent's execution params.
         pub request: AllowitRequest,
     }
 
@@ -103,29 +131,42 @@ mod types {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         #[repr(u32)]
         pub enum AllowitError {
-            /// The rule's Grant field is unset.
-            MissingGrant = 1,
+            /// The rule's param is unset.
+            MissingParam = 1,
+            /// The amount exceeds `transaction_cap`.
             TransactionCapExceeded = 2,
+            /// Lifetime expenses would exceed `spent_cap`.
             SpentCapExceeded = 3,
+            /// Expenses of the UTC day would exceed `day_spent_cap`.
             DaySpentCapExceeded = 4,
+            /// Gross amounts and gas of the UTC day would exceed `day_total_cap`.
             DayTotalCapExceeded = 5,
+            /// This operation would exceed `call_cap`.
             CallCapExceeded = 6,
+            /// The destination is not in `recipients`.
             RecipientNotAllowed = 7,
+            /// The asset is not in `tokens`.
             TokenNotAllowed = 8,
+            /// The params or the request have expired.
             Expired = 9,
             /// Selected expense accounting has an unpriced liability.
             Unpriced = 10,
-            /// Negative cap, nonpositive amount, negative request units or invalid state key.
-            InvalidParameter = 11,
+            /// A param of the wrong type or range, a nonpositive amount, negative request units,
+            /// or a key or value outside its bounds.
+            InvalidParam = 11,
             /// Read state is negative, of another type, or belongs to a later day.
             InvalidState = 12,
             /// An accounting sum leaves its integer range.
             Overflow = 13,
-            /// A server-only function this evaluator does not provide.
+            /// A server-only function this evaluator does not provide, or a policy write that a
+            /// standard wallet cannot store.
             Unsupported = 14,
         }
     }
 }
+
+/// Key => value map of params, request args and policy state.
+pub type AllowitMap = Map<Symbol, AllowitValue>;
 
 /// A rule's passing constraint, or its denial.
 pub type Result<T = ()> = core::result::Result<T, AllowitError>;
@@ -133,12 +174,40 @@ pub type Result<T = ()> = core::result::Result<T, AllowitError>;
 /// Names used by authored policy.
 pub mod prelude {
     pub use super::{
-        Address, AllowitContext, AllowitError, AllowitGrant, AllowitOperation, AllowitRequest,
+        Address, AllowitContext, AllowitError, AllowitOperation, AllowitRequest, AllowitValue,
         Result,
     };
 }
 
-// Standard state keys. `post_flight` writes them; policy writes apply after them.
+// Canonical param keys, read by the same-named rules.
+/// Canonical param key of `transaction_cap`: nonnegative `Int`.
+pub const TRANSACTION_CAP: &str = "transaction_cap";
+/// Canonical param key of `spent_cap`: nonnegative `Int`.
+pub const SPENT_CAP: &str = "spent_cap";
+/// Canonical param key of `day_spent_cap`: nonnegative `Int`.
+pub const DAY_SPENT_CAP: &str = "day_spent_cap";
+/// Canonical param key of `day_total_cap`: nonnegative `Int`.
+pub const DAY_TOTAL_CAP: &str = "day_total_cap";
+/// Canonical param key of `call_cap`: `Int` in the `u64` range.
+pub const CALL_CAP: &str = "call_cap";
+/// Canonical param key of `recipients`: `List` of `Addr`.
+pub const RECIPIENTS: &str = "recipients";
+/// Canonical param key of `tokens`: `List` of `Addr`.
+pub const TOKENS: &str = "tokens";
+/// Canonical param key of `expiry`: `Int` in the `u64` range.
+pub const EXPIRY: &str = "expiry";
+
+// Bounds of params, args and state values.
+/// Most params that a Custom wallet stores.
+pub const MAX_PARAMS: u32 = 32;
+/// Most execution params that one request carries.
+pub const MAX_ARGS: u32 = 16;
+/// Most values nested in one value, such as the addresses of an allowlist.
+pub const MAX_ITEMS: u32 = 64;
+/// Longest text value, in bytes.
+pub const MAX_TEXT: u32 = 256;
+
+// Standard state keys. `post_flight` writes them; Custom policy writes apply after them.
 /// Standard key: lifetime irreversible expenses.
 pub const SPENT: &str = "spent";
 /// Standard key: irreversible expenses on `day`.
@@ -153,6 +222,71 @@ pub const DAY_KEY: &str = "day";
 pub const UNPRICED: &str = "unpriced";
 /// Standard key: an operation on `day` lacked price facts.
 pub const DAY_UNPRICED: &str = "day_unpriced";
+
+/// Every canonical rule, in param key order.
+pub const RULES: [AllowitRule; 8] = [
+    AllowitRule::transaction_cap,
+    AllowitRule::spent_cap,
+    AllowitRule::day_spent_cap,
+    AllowitRule::day_total_cap,
+    AllowitRule::call_cap,
+    AllowitRule::recipients,
+    AllowitRule::tokens,
+    AllowitRule::expiry,
+];
+
+impl AllowitRule {
+    /// The canonical param key that the standard preflight reads for this rule: its own name.
+    pub fn key(self) -> &'static str {
+        match self {
+            AllowitRule::transaction_cap => TRANSACTION_CAP,
+            AllowitRule::spent_cap => SPENT_CAP,
+            AllowitRule::day_spent_cap => DAY_SPENT_CAP,
+            AllowitRule::day_total_cap => DAY_TOTAL_CAP,
+            AllowitRule::call_cap => CALL_CAP,
+            AllowitRule::recipients => RECIPIENTS,
+            AllowitRule::tokens => TOKENS,
+            AllowitRule::expiry => EXPIRY,
+        }
+    }
+}
+
+impl AllowitParams {
+    /// The value of `key`, or `None` when it is unset. A key that no map can hold, such as one
+    /// with a space, is unset. Values are owned because Soroban maps decode them on read.
+    pub fn get(&self, key: &str) -> Option<AllowitValue> {
+        lookup(&self.0, key)
+    }
+}
+
+// Typed views of a value: `From` builds one, and `TryFrom` reads one or is `InvalidParam`.
+/// One `From` and `TryFrom` pair per scalar type.
+macro_rules! scalars {
+    ($($t:ty => $variant:ident($from:expr, $into:expr)),*) => {$(
+        impl From<$t> for AllowitValue {
+            /// The value holding this scalar.
+            fn from(value: $t) -> Self {
+                AllowitValue::$variant($from(value))
+            }
+        }
+        impl TryFrom<AllowitValue> for $t {
+            type Error = AllowitError;
+            /// The scalar of a value of this type and range.
+            fn try_from(value: AllowitValue) -> Result<$t> {
+                match value {
+                    AllowitValue::$variant(inner) => $into(inner),
+                    _ => Err(AllowitError::InvalidParam),
+                }
+            }
+        }
+    )*};
+}
+scalars!(
+    i128 => Int(core::convert::identity, Ok),
+    u64 => Int(i128::from, |n| u64::try_from(n).map_err(|_| AllowitError::InvalidParam)),
+    bool => Bool(core::convert::identity, Ok),
+    Address => Addr(core::convert::identity, Ok)
+);
 
 /// Standard values of a state map. An absent key reads as zero or false.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -175,33 +309,155 @@ pub struct AllowitStandardState {
 
 impl AllowitStandardState {
     /// Decode the standard keys of `state`. A value of another type is `InvalidState`.
-    pub fn read(env: &AllowitEnv, state: &AllowitStateMap) -> Result<Self> {
+    pub fn read(state: &AllowitMap) -> Result<Self> {
         Ok(Self {
-            calls: read(env, state, CALLS)?.unwrap_or_default(),
-            spent: read(env, state, SPENT)?.unwrap_or_default(),
-            unpriced: read(env, state, UNPRICED)?.unwrap_or_default(),
-            day: read(env, state, DAY_KEY)?.unwrap_or_default(),
-            day_spent: read(env, state, DAY_SPENT)?.unwrap_or_default(),
-            day_total: read(env, state, DAY_TOTAL)?.unwrap_or_default(),
-            day_unpriced: read(env, state, DAY_UNPRICED)?.unwrap_or_default(),
+            calls: read(state, CALLS)?.unwrap_or_default(),
+            spent: read(state, SPENT)?.unwrap_or_default(),
+            unpriced: read(state, UNPRICED)?.unwrap_or_default(),
+            day: read(state, DAY_KEY)?.unwrap_or_default(),
+            day_spent: read(state, DAY_SPENT)?.unwrap_or_default(),
+            day_total: read(state, DAY_TOTAL)?.unwrap_or_default(),
+            day_unpriced: read(state, DAY_UNPRICED)?.unwrap_or_default(),
         })
     }
 
     /// Write every standard key into `state`.
-    pub fn write(&self, env: &AllowitEnv, state: &mut AllowitStateMap) -> Result {
-        write(env, state, CALLS, self.calls)?;
-        write(env, state, SPENT, self.spent)?;
-        write(env, state, UNPRICED, self.unpriced)?;
-        write(env, state, DAY_KEY, self.day)?;
-        write(env, state, DAY_SPENT, self.day_spent)?;
-        write(env, state, DAY_TOTAL, self.day_total)?;
-        write(env, state, DAY_UNPRICED, self.day_unpriced)
+    pub fn write(&self, state: &mut AllowitMap) -> Result {
+        insert(state, CALLS, self.calls.into())?;
+        insert(state, SPENT, self.spent.into())?;
+        insert(state, UNPRICED, self.unpriced.into())?;
+        insert(state, DAY_KEY, self.day.into())?;
+        insert(state, DAY_SPENT, self.day_spent.into())?;
+        insert(state, DAY_TOTAL, self.day_total.into())?;
+        insert(state, DAY_UNPRICED, self.day_unpriced.into())
     }
 }
 
-/// A state key is 1 to 32 ASCII letters, digits or underscores, as a Soroban `Symbol` requires.
+/// A key is 1 to 32 ASCII letters, digits or underscores, as a Soroban `Symbol` requires.
 fn key_ok(key: &str) -> bool {
     (1..=32).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// The typed value of state `key`, or `None`. An invalid key is `InvalidParam`; a value of
+/// another type or range is `InvalidState`.
+pub(crate) fn read<V: TryFrom<AllowitValue>>(state: &AllowitMap, key: &str) -> Result<Option<V>> {
+    if !key_ok(key) {
+        return Err(AllowitError::InvalidParam);
+    }
+    lookup(state, key)
+        .map(|value| V::try_from(value).map_err(|_| AllowitError::InvalidState))
+        .transpose()
+}
+
+/// Check a value's bounds: at most `MAX_ITEMS` values nested in it and `MAX_TEXT` bytes per
+/// text. A larger or undecodable value is `InvalidParam`.
+pub fn check_value(value: &AllowitValue) -> Result {
+    nested(value, &mut 0)
+}
+
+/// Count the values nested in `value` into `total`, checking every bound on the way.
+fn nested(value: &AllowitValue, total: &mut u32) -> Result {
+    match value {
+        AllowitValue::Str(text) if text_len(text) > MAX_TEXT => Err(AllowitError::InvalidParam),
+        AllowitValue::List(items) => each_item(items, |item| {
+            *total += 1;
+            if *total > MAX_ITEMS {
+                return Err(AllowitError::InvalidParam);
+            }
+            nested(&item, total)
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Check a key => value map: at most `max` entries, valid keys and bounded values.
+fn check_map(map: &AllowitMap, max: u32) -> Result {
+    if count(map) > max {
+        return Err(AllowitError::InvalidParam);
+    }
+    each_value(map, |value| check_value(&value))
+}
+
+/// Check owner params before storing them. A standard wallet admits only the canonical keys,
+/// each with the type its rule decodes; Custom admits up to `MAX_PARAMS` keys with bounded
+/// values, which its policy defines. A rejected map is `InvalidParam`.
+pub fn check_params(params: &AllowitMap, tier: AllowitTier) -> Result {
+    // Decode and bound every value first, so no later lookup meets an undecodable one.
+    if tier == AllowitTier::Custom {
+        return check_map(params, MAX_PARAMS);
+    }
+    check_map(params, RULES.len() as u32)?;
+    let mut canonical = 0;
+    for rule in RULES {
+        if let Some(value) = lookup(params, rule.key()) {
+            canonical += 1;
+            canonical_value(rule, value)?;
+        }
+    }
+    if canonical == count(params) {
+        Ok(())
+    } else {
+        Err(AllowitError::InvalidParam)
+    }
+}
+
+/// Decode a canonical param as its rule does, without request or state facts.
+fn canonical_value(rule: AllowitRule, value: AllowitValue) -> Result {
+    let value = Some(value);
+    match rule {
+        AllowitRule::call_cap | AllowitRule::expiry => int::<u64>(value).map(|_| ()),
+        AllowitRule::recipients | AllowitRule::tokens => each_address(value, |_| ()),
+        _ => cap(value).map(|_| ()),
+    }
+}
+
+/// Check the agent's execution params: at most `MAX_ARGS` keys with bounded values.
+pub fn check_args(args: &AllowitMap) -> Result {
+    check_map(args, MAX_ARGS)
+}
+
+/// The integer of a set param: unset is `MissingParam`; another type or a value outside `T` is
+/// `InvalidParam`.
+fn int<T: TryFrom<i128>>(value: Option<AllowitValue>) -> Result<T> {
+    match value.ok_or(AllowitError::MissingParam)? {
+        AllowitValue::Int(n) => T::try_from(n).map_err(|_| AllowitError::InvalidParam),
+        _ => Err(AllowitError::InvalidParam),
+    }
+}
+
+/// A set cap: a nonnegative `Int`.
+fn cap(value: Option<AllowitValue>) -> Result<i128> {
+    let cap = int::<i128>(value)?;
+    if cap < 0 {
+        Err(AllowitError::InvalidParam)
+    } else {
+        Ok(cap)
+    }
+}
+
+/// Run `seen` on each address of a set `List` of `Addr`; any other value is `InvalidParam`.
+fn each_address(value: Option<AllowitValue>, mut seen: impl FnMut(Address)) -> Result {
+    let AllowitValue::List(items) = value.ok_or(AllowitError::MissingParam)? else {
+        return Err(AllowitError::InvalidParam);
+    };
+    each_item(&items, |item| match item {
+        AllowitValue::Addr(address) => {
+            seen(address);
+            Ok(())
+        }
+        _ => Err(AllowitError::InvalidParam),
+    })
+}
+
+/// Require `wanted` in a set allowlist. Every item must be an `Addr`; an empty list denies.
+fn allowed(value: Option<AllowitValue>, wanted: &Address, denied: AllowitError) -> Result<Address> {
+    let mut found = false;
+    each_address(value, |address| found |= address == *wanted)?;
+    if found {
+        Ok(wanted.clone())
+    } else {
+        Err(denied)
+    }
 }
 
 /// Checked sum of accounting values.
@@ -213,7 +469,7 @@ fn sum(a: i128, b: i128) -> Result<i128> {
 fn contribution(parts: &[i128]) -> Result<i128> {
     parts.iter().try_fold(0, |total, part| {
         if *part < 0 {
-            Err(AllowitError::InvalidParameter)
+            Err(AllowitError::InvalidParam)
         } else {
             sum(total, *part)
         }
@@ -222,7 +478,7 @@ fn contribution(parts: &[i128]) -> Result<i128> {
 
 /// Standard values of the current state.
 fn standard(ctx: &AllowitContext) -> Result<AllowitStandardState> {
-    AllowitStandardState::read(&ctx.env, &ctx.state)
+    AllowitStandardState::read(&ctx.state)
 }
 
 /// Daily values `(day_spent, day_total, day_unpriced)` on the request's UTC day: those of an
@@ -246,9 +502,6 @@ fn accounting(
     add: Result<i128>,
     exceeded: AllowitError,
 ) -> Result<i128> {
-    if cap < 0 {
-        return Err(AllowitError::InvalidParameter);
-    }
     if used < 0 {
         return Err(AllowitError::InvalidState);
     }
@@ -267,13 +520,13 @@ fn left(cap: i128, used: i128, exceeded: AllowitError) -> Result<i128> {
     }
 }
 
-/// Bound the gross amount of one operation.
+/// Bound the gross amount of one operation by the cap in `value`.
 ///
-/// Returns `cap - request.amount`. A negative cap or nonpositive amount is `InvalidParameter`.
-pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    let cap = cap.ok_or(AllowitError::MissingGrant)?;
-    if cap < 0 || ctx.request.amount <= 0 {
-        return Err(AllowitError::InvalidParameter);
+/// Returns `cap - request.amount`. A negative cap or nonpositive amount is `InvalidParam`.
+pub fn transaction_cap(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<i128> {
+    let cap = cap(value)?;
+    if ctx.request.amount <= 0 {
+        return Err(AllowitError::InvalidParam);
     }
     left(
         cap,
@@ -285,8 +538,8 @@ pub fn transaction_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128>
 /// Bound cumulative irreversible expenses: `spent + request.spent_units <= cap`.
 ///
 /// Returns the headroom left after this operation. Lifetime or request unpriced is `Unpriced`.
-pub fn spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    let cap = cap.ok_or(AllowitError::MissingGrant)?;
+pub fn spent_cap(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<i128> {
+    let cap = cap(value)?;
     let (s, r) = (standard(ctx)?, &ctx.request);
     let add = contribution(&[r.spent_units]);
     let e = AllowitError::SpentCapExceeded;
@@ -297,8 +550,8 @@ pub fn spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
 /// `day_spent` is zero when the state belongs to an earlier day.
 ///
 /// Returns the headroom left after this operation. Unpriced today or in the request is `Unpriced`.
-pub fn day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    let cap = cap.ok_or(AllowitError::MissingGrant)?;
+pub fn day_spent_cap(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<i128> {
+    let cap = cap(value)?;
     let (day_spent, _, day_unpriced) = daily(ctx, &standard(ctx)?)?;
     let r = &ctx.request;
     let add = contribution(&[r.spent_units]);
@@ -311,8 +564,8 @@ pub fn day_spent_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
 /// belong to principal and count once.
 ///
 /// Returns the headroom left after this operation. Unpriced today or in the request is `Unpriced`.
-pub fn day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
-    let cap = cap.ok_or(AllowitError::MissingGrant)?;
+pub fn day_total_cap(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<i128> {
+    let cap = cap(value)?;
     let (_, day_total, day_unpriced) = daily(ctx, &standard(ctx)?)?;
     let r = &ctx.request;
     let add = contribution(&[r.amount, r.gas_units]);
@@ -324,8 +577,8 @@ pub fn day_total_cap(ctx: &AllowitContext, cap: &Option<i128>) -> Result<i128> {
 /// `calls + 1 <= cap`.
 ///
 /// Returns the operations left after this one. A zero cap always denies.
-pub fn call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
-    let cap = cap.ok_or(AllowitError::MissingGrant)?;
+pub fn call_cap(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<u64> {
+    let cap = int::<u64>(value)?;
     let next = standard(ctx)?
         .calls
         .checked_add(1)
@@ -339,34 +592,23 @@ pub fn call_cap(ctx: &AllowitContext, cap: &Option<u64>) -> Result<u64> {
 /// Require an exact permitted destination. Deposits name their vault as the recipient.
 ///
 /// Returns the matched `request.recipient`. An empty list denies.
-pub fn recipients(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
-    let allowed = allowed.as_ref().ok_or(AllowitError::MissingGrant)?;
-    let recipient = &ctx.request.recipient;
-    if allowed.contains(recipient) {
-        Ok(recipient.clone())
-    } else {
-        Err(AllowitError::RecipientNotAllowed)
-    }
+pub fn recipients(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<Address> {
+    let e = AllowitError::RecipientNotAllowed;
+    allowed(value, &ctx.request.recipient, e)
 }
 
 /// Require an exact permitted underlying asset contract.
 ///
 /// Returns the matched `request.asset`. An empty list denies.
-pub fn tokens(ctx: &AllowitContext, allowed: &Option<Vec<Address>>) -> Result<Address> {
-    let allowed = allowed.as_ref().ok_or(AllowitError::MissingGrant)?;
-    let asset = &ctx.request.asset;
-    if allowed.contains(asset) {
-        Ok(asset.clone())
-    } else {
-        Err(AllowitError::TokenNotAllowed)
-    }
+pub fn tokens(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<Address> {
+    allowed(value, &ctx.request.asset, AllowitError::TokenNotAllowed)
 }
 
-/// Require an unexpired grant and request, with the request expiring no later than the grant.
+/// Require unexpired params and request, with the request expiring no later than the params.
 ///
-/// Returns `expiry - request.now`, the seconds the grant has left.
-pub fn expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
-    let expiry = expiry.ok_or(AllowitError::MissingGrant)?;
+/// Returns `expiry - request.now`, the seconds the params have left.
+pub fn expiry(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<u64> {
+    let expiry = int::<u64>(value)?;
     let r = &ctx.request;
     if r.now < expiry && r.now < r.expires_at && r.expires_at <= expiry {
         Ok(expiry - r.now)
@@ -375,59 +617,53 @@ pub fn expiry(ctx: &AllowitContext, expiry: &Option<u64>) -> Result<u64> {
     }
 }
 
+/// The value of owner param `key`, such as a custom `vendor_cap`. Unset is `MissingParam`.
+pub fn param(ctx: &AllowitContext, key: &str) -> Result<AllowitValue> {
+    ctx.params.get(key).ok_or(AllowitError::MissingParam)
+}
+
 /// The current value of a state key, before this operation, or `None`. Writes of this run apply
-/// only in `post_flight`. A value of another type is `InvalidState`.
-pub fn get_state<V: AllowitValue>(ctx: &AllowitContext, key: &str) -> Result<Option<V>> {
-    read(&ctx.env, &ctx.state, key)
+/// only in `post_flight`. A value of another type or range is `InvalidState`.
+pub fn get_state<V: TryFrom<AllowitValue>>(ctx: &AllowitContext, key: &str) -> Result<Option<V>> {
+    read(&ctx.state, key)
 }
 
 /// Record a policy write of `key`. `post_flight` applies it after the standard update, so it may
-/// replace a standard key. A key is 1 to 32 ASCII letters, digits or underscores.
-pub fn set_state<V: AllowitValue>(ctx: &AllowitContext, key: &str, value: V) -> Result {
+/// replace a standard key; standard wallets deny every write. A key is 1 to 32 ASCII letters,
+/// digits or underscores, and the value stays within `check_value`.
+pub fn set_state(ctx: &AllowitContext, key: &str, value: impl Into<AllowitValue>) -> Result {
+    let value = value.into();
+    check_value(&value)?;
     record(&ctx.env, key, value)
 }
 
-/// Standard-contract preflight of one canonical prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;`.
-/// Only this runner skips a rule whose Grant field is unset. It discards pass values.
+/// Standard-contract preflight of one canonical prefix call
+/// `allowit::<rule>(ctx, ctx.params.get(allowit::<RULE>))?;`. Only this runner skips a rule whose
+/// param is absent. It discards pass values.
 pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
-    let g = &ctx.grant;
+    let Some(value) = ctx.params.get(rule.key()) else {
+        return Ok(());
+    };
+    let value = Some(value);
     match rule {
-        AllowitRule::transaction_cap if g.transaction_cap.is_some() => {
-            transaction_cap(ctx, &g.transaction_cap)?;
-        }
-        AllowitRule::spent_cap if g.spent_cap.is_some() => {
-            spent_cap(ctx, &g.spent_cap)?;
-        }
-        AllowitRule::day_spent_cap if g.day_spent_cap.is_some() => {
-            day_spent_cap(ctx, &g.day_spent_cap)?;
-        }
-        AllowitRule::day_total_cap if g.day_total_cap.is_some() => {
-            day_total_cap(ctx, &g.day_total_cap)?;
-        }
-        AllowitRule::call_cap if g.call_cap.is_some() => {
-            call_cap(ctx, &g.call_cap)?;
-        }
-        AllowitRule::recipients if g.recipients.is_some() => {
-            recipients(ctx, &g.recipients)?;
-        }
-        AllowitRule::tokens if g.tokens.is_some() => {
-            tokens(ctx, &g.tokens)?;
-        }
-        AllowitRule::expiry if g.expiry.is_some() => {
-            expiry(ctx, &g.expiry)?;
-        }
-        _ => {}
+        AllowitRule::transaction_cap => transaction_cap(ctx, value).map(|_| ()),
+        AllowitRule::spent_cap => spent_cap(ctx, value).map(|_| ()),
+        AllowitRule::day_spent_cap => day_spent_cap(ctx, value).map(|_| ()),
+        AllowitRule::day_total_cap => day_total_cap(ctx, value).map(|_| ()),
+        AllowitRule::call_cap => call_cap(ctx, value).map(|_| ()),
+        AllowitRule::recipients => recipients(ctx, value).map(|_| ()),
+        AllowitRule::tokens => tokens(ctx, value).map(|_| ()),
+        AllowitRule::expiry => expiry(ctx, value).map(|_| ()),
     }
-    Ok(())
 }
 
 /// Standard values of `state` and its daily values on the request's day. A value of another type,
 /// a negative amount or a later day is `InvalidState`.
 fn decode(
     ctx: &AllowitContext,
-    state: &AllowitStateMap,
+    state: &AllowitMap,
 ) -> Result<(AllowitStandardState, (i128, i128, bool))> {
-    let s = AllowitStandardState::read(&ctx.env, state)?;
+    let s = AllowitStandardState::read(state)?;
     let d = daily(ctx, &s)?;
     if s.spent < 0 || d.0 < 0 || d.1 < 0 {
         return Err(AllowitError::InvalidState);
@@ -437,11 +673,17 @@ fn decode(
 
 /// State after an approved operation, computed by the wallet and the server alike: roll the UTC
 /// day over, count the call, add spent and gross amounts, mark an unpriced request, then apply the
-/// policy's buffered writes. It clears the write buffer first, even when it fails. A result that
-/// later operations could not decode, or whose totals leave no room for one more call or unit, is
-/// `InvalidState`, so a policy write cannot make every later standard update fail.
-pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
+/// policy's buffered writes. It clears the write buffer first, even when it fails.
+///
+/// A `Standard` wallet stores only the standard keys, so any policy write is `Unsupported`: the
+/// host and the chain then store the same state for every tier. A result that later operations
+/// could not decode, or whose totals leave no room for one more call or unit, is `InvalidState`,
+/// so a policy write cannot make every later standard update fail.
+pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap> {
     let writes = take_writes(&ctx.env);
+    if tier == AllowitTier::Standard && count(&writes) > 0 {
+        return Err(AllowitError::Unsupported);
+    }
     let (mut s, (day_spent, day_total, day_unpriced)) = decode(ctx, &ctx.state)?;
     let r = &ctx.request;
     s.calls = s.calls.checked_add(1).ok_or(AllowitError::Overflow)?;
@@ -452,7 +694,7 @@ pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
     s.unpriced |= r.unpriced;
     s.day_unpriced = day_unpriced || r.unpriced;
     let mut state = ctx.state.clone();
-    s.write(&ctx.env, &mut state)?;
+    s.write(&mut state)?;
     merge(&mut state, writes);
     // The next standard update adds one call and may add a unit to each total.
     let (s, (day_spent, day_total, _)) = decode(ctx, &state)?;
@@ -463,42 +705,17 @@ pub fn post_flight(ctx: &AllowitContext) -> Result<AllowitStateMap> {
 }
 
 /// One policy evaluation, the server's entry point: clear stale writes, run `execute`, then
-/// `post_flight` on approval. A denial discards the policy's writes, so no write outlives it.
+/// `post_flight` for the wallet's tier on approval. A denial discards the policy's writes, so no
+/// write outlives it. The result is exactly the state the wallet stores.
 pub fn evaluate(
     ctx: &AllowitContext,
     execute: impl FnOnce(&AllowitContext) -> Result,
-) -> Result<AllowitStateMap> {
+    tier: AllowitTier,
+) -> Result<AllowitMap> {
     take_writes(&ctx.env);
     let run = execute(ctx);
     if run.is_err() {
         take_writes(&ctx.env);
     }
-    run.and_then(|()| post_flight(ctx))
-}
-
-/// The server's `ctx.state` for any wallet: the state it kept from its last approved `evaluate`,
-/// overlaid by the wallet's stored `policy_state`. Every key the chain holds wins. Simple and
-/// Common store only standard keys, so their suffix's own keys come from `kept`; Custom stores all.
-pub fn offchain_state(kept: &AllowitStateMap, chain: &AllowitStateMap) -> AllowitStateMap {
-    let mut state = kept.clone();
-    merge(&mut state, chain.clone());
-    state
-}
-
-impl AllowitGrant {
-    /// Check owner configuration before storing it. Negative caps are `InvalidParameter`.
-    /// The struct enforces types. Unset fields are valid configuration.
-    pub fn validate(&self) -> Result {
-        let caps = [
-            self.transaction_cap,
-            self.spent_cap,
-            self.day_spent_cap,
-            self.day_total_cap,
-        ];
-        if caps.iter().flatten().any(|cap| *cap < 0) {
-            Err(AllowitError::InvalidParameter)
-        } else {
-            Ok(())
-        }
-    }
+    run.and_then(|()| post_flight(ctx, tier))
 }

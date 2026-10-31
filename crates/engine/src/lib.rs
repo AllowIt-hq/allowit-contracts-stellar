@@ -1,16 +1,17 @@
 #![no_std]
-//! Shared stateless checker. Each method runs the canonical rule on its same-named Grant field.
-//! It holds no custody, Grant or accounting. No policy wallet or tool here calls it.
+//! Shared stateless checker. Each method runs the canonical rule on its canonical param.
+//! It holds no custody, params or accounting. No policy wallet or tool here calls it.
 //! `AllowitContext` carries the contract `Env`, so it is not a contract value. Each method takes
 //! the other context fields and builds the context with its own `Env`.
-use allowit::{AllowitContext, AllowitError, AllowitGrant, AllowitRequest, AllowitStateMap};
-use soroban_sdk::{Address, Env, contract, contractimpl, panic_with_error};
+use allowit::{AllowitContext, AllowitError, AllowitParams, AllowitRequest, AllowitValue};
+use soroban_sdk::{Address, Env, Map, Symbol, contract, contractimpl, panic_with_error};
 #[contract]
 pub struct AllowitEngine;
 /// Engine executable release, independent of parent administration. Version 3 takes the context
-/// fields `grant`, `state` (the free-form current policy state) and `request` as separate
-/// arguments, because the context carries the contract `Env`. It replaces the release 1 ABI,
-/// `(request: EngineRequest, state: EngineState)`; release 2 was never released.
+/// fields `params` (the owner's key => value params), `state` (the free-form current policy state)
+/// and `request` as separate arguments, because the context carries the contract `Env`. It
+/// replaces the release 1 ABI, `(request: EngineRequest, state: EngineState)`; release 2 was never
+/// released.
 const ENGINE_VERSION: u32 = 3;
 /// Contract error code of the test fixture veto. It is outside `allowit::AllowitError`.
 pub const TEST_DENY: u32 = 1000;
@@ -24,14 +25,14 @@ fn vetoed(env: &Env) {
 /// Rule input with this contract's `Env`, after the test fixture veto.
 fn context(
     env: Env,
-    grant: AllowitGrant,
-    state: AllowitStateMap,
+    params: Map<Symbol, AllowitValue>,
+    state: Map<Symbol, AllowitValue>,
     request: AllowitRequest,
 ) -> AllowitContext {
     vetoed(&env);
     AllowitContext {
         env,
-        grant,
+        params: AllowitParams(params),
         state,
         request,
     }
@@ -43,85 +44,85 @@ impl AllowitEngine {
         let _ = env;
         ENGINE_VERSION
     }
-    /// Run `allowit::transaction_cap(&ctx, &ctx.grant.transaction_cap)`; returns the headroom left for this operation.
+    /// Run `allowit::transaction_cap(&ctx, ctx.params.get(allowit::TRANSACTION_CAP))`; returns the headroom left for this operation.
     pub fn transaction_cap(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::transaction_cap(&ctx, &ctx.grant.transaction_cap)
+        let ctx = context(env, params, state, request);
+        allowit::transaction_cap(&ctx, ctx.params.get(allowit::TRANSACTION_CAP))
     }
-    /// Run `allowit::spent_cap(&ctx, &ctx.grant.spent_cap)`; returns the cumulative expense headroom.
+    /// Run `allowit::spent_cap(&ctx, ctx.params.get(allowit::SPENT_CAP))`; returns the cumulative expense headroom.
     pub fn spent_cap(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::spent_cap(&ctx, &ctx.grant.spent_cap)
+        let ctx = context(env, params, state, request);
+        allowit::spent_cap(&ctx, ctx.params.get(allowit::SPENT_CAP))
     }
-    /// Run `allowit::day_spent_cap(&ctx, &ctx.grant.day_spent_cap)`; returns the UTC-day expense headroom.
+    /// Run `allowit::day_spent_cap(&ctx, ctx.params.get(allowit::DAY_SPENT_CAP))`; returns the UTC-day expense headroom.
     pub fn day_spent_cap(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::day_spent_cap(&ctx, &ctx.grant.day_spent_cap)
+        let ctx = context(env, params, state, request);
+        allowit::day_spent_cap(&ctx, ctx.params.get(allowit::DAY_SPENT_CAP))
     }
-    /// Run `allowit::day_total_cap(&ctx, &ctx.grant.day_total_cap)`; returns the UTC-day gross headroom.
+    /// Run `allowit::day_total_cap(&ctx, ctx.params.get(allowit::DAY_TOTAL_CAP))`; returns the UTC-day gross headroom.
     pub fn day_total_cap(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<i128, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::day_total_cap(&ctx, &ctx.grant.day_total_cap)
+        let ctx = context(env, params, state, request);
+        allowit::day_total_cap(&ctx, ctx.params.get(allowit::DAY_TOTAL_CAP))
     }
-    /// Run `allowit::call_cap(&ctx, &ctx.grant.call_cap)`; returns the operations left.
+    /// Run `allowit::call_cap(&ctx, ctx.params.get(allowit::CALL_CAP))`; returns the operations left.
     pub fn call_cap(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<u64, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::call_cap(&ctx, &ctx.grant.call_cap)
+        let ctx = context(env, params, state, request);
+        allowit::call_cap(&ctx, ctx.params.get(allowit::CALL_CAP))
     }
-    /// Run `allowit::recipients(&ctx, &ctx.grant.recipients)`; returns the matched recipient.
+    /// Run `allowit::recipients(&ctx, ctx.params.get(allowit::RECIPIENTS))`; returns the matched recipient.
     pub fn recipients(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<Address, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::recipients(&ctx, &ctx.grant.recipients)
+        let ctx = context(env, params, state, request);
+        allowit::recipients(&ctx, ctx.params.get(allowit::RECIPIENTS))
     }
-    /// Run `allowit::tokens(&ctx, &ctx.grant.tokens)`; returns the matched asset.
+    /// Run `allowit::tokens(&ctx, ctx.params.get(allowit::TOKENS))`; returns the matched asset.
     pub fn tokens(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<Address, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::tokens(&ctx, &ctx.grant.tokens)
+        let ctx = context(env, params, state, request);
+        allowit::tokens(&ctx, ctx.params.get(allowit::TOKENS))
     }
-    /// Run `allowit::expiry(&ctx, &ctx.grant.expiry)`; returns the seconds left.
+    /// Run `allowit::expiry(&ctx, ctx.params.get(allowit::EXPIRY))`; returns the seconds left.
     pub fn expiry(
         env: Env,
-        grant: AllowitGrant,
-        state: AllowitStateMap,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
         request: AllowitRequest,
     ) -> Result<u64, AllowitError> {
-        let ctx = context(env, grant, state, request);
-        allowit::expiry(&ctx, &ctx.grant.expiry)
+        let ctx = context(env, params, state, request);
+        allowit::expiry(&ctx, ctx.params.get(allowit::EXPIRY))
     }
 }
 #[cfg(test)]

@@ -3,8 +3,22 @@
 //! custom, standard and simple contracts.
 extern crate std;
 use super::*;
-use allowit::{AllowitGrant, AllowitOperation, AllowitRequest, AllowitStandardState};
-use soroban_sdk::{Address, Bytes, Map, testutils::Address as _, vec};
+use allowit::{
+    AllowitOperation, AllowitParams, AllowitRequest, AllowitStandardState, AllowitValue, CALL_CAP,
+    DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, RECIPIENTS, SPENT_CAP, TOKENS, TRANSACTION_CAP,
+};
+use soroban_sdk::{Address, Bytes, Map, Symbol, testutils::Address as _, vec};
+
+/// Set one param of `ctx`, or unset it with `None`.
+fn set(ctx: &mut AllowitContext, key: &str, value: Option<AllowitValue>) {
+    let key = Symbol::new(&ctx.env, key);
+    match value {
+        Some(value) => ctx.params.0.set(key, value),
+        None => {
+            ctx.params.0.remove(key);
+        }
+    }
+}
 
 #[test]
 fn custom_runner_maps_the_policy_result() {
@@ -16,45 +30,56 @@ fn custom_runner_maps_the_policy_result() {
         spent: 5,
         ..Default::default()
     };
-    current.write(&env, &mut state).unwrap();
-    let ctx = AllowitContext {
+    current.write(&mut state).unwrap();
+    let mut ctx = AllowitContext {
         env: env.clone(),
-        grant: AllowitGrant {
-            transaction_cap: Some(10),
-            spent_cap: Some(15),
-            day_spent_cap: Some(10),
-            day_total_cap: Some(10),
-            call_cap: Some(1),
-            recipients: Some(vec![&env, recipient.clone()]),
-            tokens: Some(vec![&env, asset.clone()]),
-            expiry: Some(100),
-        },
+        params: AllowitParams(Map::new(&env)),
         state,
         request: AllowitRequest {
             operation: AllowitOperation::sep41_transfer,
-            asset,
-            recipient,
+            asset: asset.clone(),
+            recipient: recipient.clone(),
             amount: 10,
             now: 10,
             expires_at: 20,
             spent_units: 10,
             gas_units: 0,
             unpriced: false,
+            args: AllowitParams(Map::new(&env)),
         },
     };
+    let int = |n: i128| Some(AllowitValue::Int(n));
+    let list = |a: &Address| {
+        Some(AllowitValue::List(vec![
+            &env,
+            AllowitValue::Addr(a.clone()),
+        ]))
+    };
+    for (key, value) in [
+        (TRANSACTION_CAP, int(10)),
+        (SPENT_CAP, int(15)),
+        (DAY_SPENT_CAP, int(10)),
+        (DAY_TOTAL_CAP, int(10)),
+        (CALL_CAP, int(1)),
+        (RECIPIENTS, list(&recipient)),
+        (TOKENS, list(&asset)),
+        (EXPIRY, int(100)),
+    ] {
+        set(&mut ctx, key, value);
+    }
     let rules = Vec::new(&env);
     assert_eq!(AllowitCustom::check(&ctx, &rules), Ok(()));
     let mut denied = ctx.clone();
-    denied.grant.spent_cap = Some(14);
+    set(&mut denied, SPENT_CAP, int(14));
     assert_eq!(
         AllowitCustom::check(&denied, &rules),
         Err(AllowitWalletError::PolicyDenied)
     );
     let mut unset = ctx.clone();
-    unset.grant.expiry = None;
+    set(&mut unset, EXPIRY, None);
     assert_eq!(
         AllowitCustom::check(&unset, &rules),
-        Err(AllowitWalletError::InvalidGrant)
+        Err(AllowitWalletError::InvalidParam)
     );
 }
 

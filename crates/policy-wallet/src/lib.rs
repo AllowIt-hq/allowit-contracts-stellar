@@ -1,8 +1,11 @@
 #![no_std]
 //! Owner-controlled custody mixins shared by fixed and bespoke policy wallets.
-use allowit::{AllowitContext, AllowitOperation, AllowitRequest, AllowitRule};
+use allowit::{
+    AllowitContext, AllowitOperation, AllowitParams, AllowitRequest, AllowitRule, AllowitTier,
+    AllowitValue,
+};
 use allowit_wallet_protocol::{
-    ARGUMENT_SCHEMA_DESCRIPTOR, AllowitExecutionRequest, AllowitExpenseBounds, AllowitGrant,
+    ARGUMENT_SCHEMA_DESCRIPTOR, AllowitExecutionRequest, AllowitExpenseBounds,
     AllowitPolicyBinding, AllowitSep41TransferArgs, AllowitSep56DepositArgs,
     AllowitSep56DepositEvent, AllowitSep56DepositReceipt, AllowitTransferReceipt,
     MAX_ARGUMENT_BYTES, MAX_EXPENSE_BYTES, SEP56_DEPOSIT_SCHEMA_DESCRIPTOR,
@@ -18,12 +21,14 @@ use soroban_sdk::{
 mod persistent;
 /// Instance-storage key of the custody State.
 const STATE_KEY: u32 = 0;
-/// Version 3: free-form `policy_state` map. Version 2 stored a typed accounting history struct and
-/// version 1 an untyped Grant map. No layout migrates implicitly: the owner recovers funds.
-pub const CONTRACT_VERSION: u32 = 3;
+/// Version 4: owner `params` and `policy_state` are key => `AllowitValue` maps. Version 3 stored the
+/// canonical params as a typed struct and a policy state of raw values, version 2 a typed accounting
+/// history struct and version 1 a text-keyed params map. No layout migrates implicitly: the owner
+/// recovers funds.
+pub const CONTRACT_VERSION: u32 = 4;
 // Wasm metadata equal to CONTRACT_VERSION. Release tooling refuses a code change to Wasm that
 // declares another custody layout, or none (version 1), because that code cannot read State.
-soroban_sdk::contractmeta!(key = "allowit_custody_layout", val = "3");
+soroban_sdk::contractmeta!(key = "allowit_custody_layout", val = "4");
 
 /// Initial owner-signed configuration. Asset and policy_instance stay fixed after creation.
 #[contracttype]
@@ -39,7 +44,8 @@ pub struct AllowitPolicyConfig {
     pub source_digest: BytesN<32>,
     /// Ordered owner-approved standard prefix. Simple and Custom use an empty list.
     pub rules: Vec<AllowitRule>,
-    pub grant: AllowitGrant,
+    /// Owner constructor params, key => value. Standard tiers admit only the canonical keys.
+    pub params: Map<Symbol, AllowitValue>,
     pub x402_enabled: bool,
 }
 
@@ -54,7 +60,8 @@ pub struct AllowitPolicyDeployment {
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     pub rules: Vec<AllowitRule>,
-    pub grant: AllowitGrant,
+    /// Replacement owner params, key => value; changing only them needs no code redeployment.
+    pub params: Map<Symbol, AllowitValue>,
     pub x402_enabled: bool,
     pub wasm_hash: Option<BytesN<32>>,
 }
@@ -64,7 +71,7 @@ pub struct AllowitPolicyDeployment {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllowitState {
     /// Free-form policy state after the last operation: standard and policy-defined keys.
-    pub policy_state: Map<Symbol, Val>,
+    pub policy_state: Map<Symbol, AllowitValue>,
     pub contract_version: u32,
     pub owner: Address,
     pub agent: Address,
@@ -74,7 +81,8 @@ pub struct AllowitState {
     /// Fixed standard prefix digest; Custom uses its complete compiled source digest.
     pub source_digest: BytesN<32>,
     pub rules: Vec<AllowitRule>,
-    pub grant: AllowitGrant,
+    /// Owner constructor params, key => value.
+    pub params: Map<Symbol, AllowitValue>,
     pub x402_enabled: bool,
     /// Authenticated SAC label cached before any active-token authorization callback.
     pub token: String,
@@ -98,7 +106,8 @@ pub struct AllowitPolicyAuthorization {
 #[repr(u32)]
 pub enum AllowitWalletError {
     InvalidState = 1,
-    InvalidGrant = 2,
+    /// Invalid owner params or rules, or a param that a rule cannot decode.
+    InvalidParam = 2,
     UnsupportedAsset = 3,
     InvalidActor = 4,
     StaleRequest = 5,
@@ -146,7 +155,7 @@ pub trait AllowitPolicy {
         if rules.is_empty() {
             Ok(())
         } else {
-            Err(AllowitWalletError::InvalidGrant)
+            Err(AllowitWalletError::InvalidParam)
         }
     }
     /// Evaluate the compiled checks on the kernel-built rule input. Pass values are discarded.
@@ -154,6 +163,21 @@ pub trait AllowitPolicy {
     fn check(ctx: &AllowitContext, rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError>;
 }
 
+/// The params a tier admits and the policy state it stores. Simple and Common run only the
+/// canonical prefix onchain; Custom runs its whole compiled policy.
+fn tier<P: AllowitPolicy>() -> AllowitTier {
+    if P::STANDARD_PREFIX {
+        AllowitTier::Standard
+    } else {
+        AllowitTier::Custom
+    }
+}
+/// Check owner params for the tier of `P`.
+fn checked_params<P: AllowitPolicy>(
+    params: &Map<Symbol, AllowitValue>,
+) -> Result<(), AllowitWalletError> {
+    allowit::check_params(params, tier::<P>()).map_err(|_| AllowitWalletError::InvalidParam)
+}
 /// A checked arithmetic result, or `Overflow`.
 fn checked<T>(value: Option<T>) -> Result<T, AllowitWalletError> {
     value.ok_or(AllowitWalletError::Overflow)
@@ -167,7 +191,7 @@ fn load(env: &Env, initial: Option<AllowitState>) -> Result<AllowitState, Allowi
     let state =
         AllowitState::try_from_val(env, &raw).map_err(|_| AllowitWalletError::InvalidState)?;
     // Struct decoding ignores extra keys and reads absent Option keys as None. Only the exact
-    // canonical encoding of this layout is accepted, including the nested Grant.
+    // canonical encoding of this layout is accepted, including the params map.
     if state.contract_version != CONTRACT_VERSION || state.clone().to_xdr(env) != raw.to_xdr(env) {
         return Err(AllowitWalletError::InvalidState);
     }
@@ -185,7 +209,7 @@ fn store(env: &Env, state: &AllowitState) {
     env.storage().instance().set(&STATE_KEY, state);
 }
 /// Stored fields that owner entrypoints keep. Struct decoding ignores the other State keys, so
-/// a stored Grant or rule list that no longer decodes never blocks recovery, passthrough or its
+/// stored params or a rule list that no longer decodes never block recovery, passthrough or their
 /// replacement by an owner packet. Policy state is read separately, only where it is carried over.
 #[contracttype]
 struct KeptState {
@@ -209,8 +233,15 @@ fn kept(env: &Env) -> Result<KeptState, AllowitWalletError> {
     extend(env);
     Ok(kept)
 }
-/// Policy state carried into a new State. Earlier layouts have none, so they do not migrate.
-fn kept_policy_state(env: &Env) -> Result<Map<Symbol, Val>, AllowitWalletError> {
+/// Policy state carried into a new State. Earlier layouts store none, or store other values, so
+/// they do not migrate.
+fn kept_policy_state(
+    env: &Env,
+    kept: &KeptState,
+) -> Result<Map<Symbol, AllowitValue>, AllowitWalletError> {
+    if kept.contract_version != CONTRACT_VERSION {
+        return Err(AllowitWalletError::InvalidState);
+    }
     let fields = Map::<Symbol, Val>::try_from_val(env, &stored(env)?)
         .map_err(|_| AllowitWalletError::InvalidState)?;
     let raw = fields
@@ -241,7 +272,7 @@ fn public_key(env: &Env, address: &Address) -> Result<BytesN<32>, AllowitWalletE
     encoded.slice(12..44).copy_into_slice(&mut key);
     Ok(BytesN::from_array(env, &key))
 }
-/// Pure standard-prefix binding. Grant values and the owner-signed offchain suffix are excluded.
+/// Pure standard-prefix binding. Param values and the owner-signed offchain suffix are excluded.
 pub fn standard_prefix_digest(
     env: &Env,
     kind: &Symbol,
@@ -281,7 +312,7 @@ fn checked_prefix<P: AllowitPolicy>(
         rules,
     ))
 }
-/// Check owner configuration: distinct roles, identities, source binding, Grant, rules and x402 keys.
+/// Check owner configuration: distinct roles, identities, source binding, params, rules and x402 keys.
 fn validate<P: AllowitPolicy>(
     env: &Env,
     config: &AllowitPolicyConfig,
@@ -300,15 +331,8 @@ fn validate<P: AllowitPolicy>(
     if P::source_digest(env).is_some_and(|digest| digest != config.source_digest) {
         return Err(AllowitWalletError::InvalidState);
     }
-    config
-        .grant
-        .validate()
-        .map_err(|_| AllowitWalletError::InvalidGrant)?;
+    checked_params::<P>(&config.params)?;
     decoded(&config.rules)?;
-    let lists = [&config.grant.recipients, &config.grant.tokens];
-    for list in lists.into_iter().flatten() {
-        decoded(list)?;
-    }
     P::validate(&config.rules)?;
     if P::STANDARD_PREFIX
         && config.source_digest != checked_prefix::<P>(env, &config.asset, &config.rules)?
@@ -321,14 +345,15 @@ fn validate<P: AllowitPolicy>(
     }
     Ok(())
 }
-/// Soroban decodes vector elements when read. Owner configuration decodes each one before storing
-/// it, so an element that later fails to decode cannot be stored. An unknown `AllowitRule` symbol aborts.
+/// Soroban decodes vector elements when read. Owner configuration decodes each rule before storing
+/// it, so an element that later fails to decode cannot be stored. An unknown `AllowitRule` symbol
+/// aborts. `allowit::check_params` decodes every param value the same way.
 fn decoded<T: IntoVal<Env, Val> + TryFromVal<Env, Val>>(
     list: &Vec<T>,
 ) -> Result<(), AllowitWalletError> {
     for i in 0..list.len() {
         list.try_get(i)
-            .map_err(|_| AllowitWalletError::InvalidGrant)?;
+            .map_err(|_| AllowitWalletError::InvalidParam)?;
     }
     Ok(())
 }
@@ -685,31 +710,32 @@ fn deposit_tokens(
     }
     Ok(shares)
 }
-/// Rule input: contract environment, owner Grant, current policy state and authenticated request
-/// facts. Deposits name their vault as the recipient. A request without expense bounds is unpriced.
+/// Rule input: contract environment, owner params, current policy state, authenticated request
+/// facts and the agent's execution params. Deposits name their vault as the recipient. A request
+/// without expense bounds is unpriced.
 fn rule_input(
     env: &Env,
     state: &AllowitState,
     operation: &NativeOperation,
     expense: Option<&AllowitExpenseBounds>,
-    now: u64,
-    expires_at: u64,
+    execution: &AllowitExecutionRequest,
 ) -> AllowitContext {
-    let args = operation.transfer(&state.asset);
+    let transfer = operation.transfer(&state.asset);
     AllowitContext {
         env: env.clone(),
-        grant: state.grant.clone(),
+        params: AllowitParams(state.params.clone()),
         state: state.policy_state.clone(),
         request: AllowitRequest {
             operation: operation.kind(),
             asset: state.asset.clone(),
-            recipient: args.to,
-            amount: args.amount,
-            now,
-            expires_at,
+            recipient: transfer.to,
+            amount: transfer.amount,
+            now: env.ledger().timestamp(),
+            expires_at: execution.expires_at,
             spent_units: expense.map_or(0, |e| e.spent_units),
             gas_units: expense.map_or(0, |e| e.gas_units),
             unpriced: expense.is_none(),
+            args: AllowitParams(execution.args.clone()),
         },
     }
 }
@@ -736,6 +762,7 @@ fn admit<P: AllowitPolicy>(
         || invocation.entrypoint != installed.entrypoint
         || invocation.argument_schema_digest != installed.argument_schema_digest
         || invocation.arguments.len() > MAX_ARGUMENT_BYTES
+        || allowit::check_args(&execution.args).is_err()
     {
         return Err(AllowitWalletError::InvalidInvocation);
     }
@@ -764,12 +791,16 @@ fn admit<P: AllowitPolicy>(
     }
     validate_expense(env, &state, expense, operation)?;
     let nonce = checked(state.nonce.checked_add(1))?;
+    // Code changes defer tier validation of the kept rules and params to this admission.
     P::validate(&state.rules)?;
-    let ctx = rule_input(env, &state, operation, expense, now, execution.expires_at);
+    if P::STANDARD_PREFIX {
+        checked_params::<P>(&state.params)?;
+    }
+    let ctx = rule_input(env, &state, operation, expense, &execution);
     P::check(&ctx, &state.rules)?;
     // The shared post-flight, then storage, precede token and vault calls. A later failure in
     // this transaction rolls all of it back.
-    state.policy_state = allowit::post_flight(&ctx)?;
+    state.policy_state = allowit::post_flight(&ctx, tier::<P>())?;
     state.nonce = nonce;
     store(env, &state);
     let receipt = AllowitTransferReceipt {
@@ -811,7 +842,7 @@ pub fn construct<P: AllowitPolicy>(
             policy_instance: config.policy_instance,
             source_digest: config.source_digest,
             rules: config.rules,
-            grant: config.grant,
+            params: config.params,
             x402_enabled: config.x402_enabled,
             token,
             deployment_version: 0,
@@ -826,7 +857,7 @@ pub fn state(env: &Env) -> Result<AllowitState, AllowitWalletError> {
     load(env, None)
 }
 /// Read the current free-form policy state: standard and policy-defined keys.
-pub fn policy_state(env: &Env) -> Result<Map<Symbol, Val>, AllowitWalletError> {
+pub fn policy_state(env: &Env) -> Result<Map<Symbol, AllowitValue>, AllowitWalletError> {
     Ok(load(env, None)?.policy_state)
 }
 /// Read the installed binding for the default argument schema.
@@ -907,7 +938,7 @@ pub fn deploy_policy<P: AllowitPolicy>(
     if checked(kept.deployment_version.checked_add(1))? != deployment.deployment_version {
         return Err(AllowitWalletError::StaleRequest);
     }
-    let policy_state = kept_policy_state(env)?;
+    let policy_state = kept_policy_state(env, &kept)?;
     let config = AllowitPolicyConfig {
         owner: deployment.owner,
         agent: deployment.agent,
@@ -916,7 +947,7 @@ pub fn deploy_policy<P: AllowitPolicy>(
         policy_instance: kept.policy_instance,
         source_digest: deployment.source_digest,
         rules: deployment.rules,
-        grant: deployment.grant,
+        params: deployment.params,
         x402_enabled: deployment.x402_enabled,
     };
     // A new bespoke executable validates its source on its next call. The owner binds its exact hash.
@@ -943,7 +974,7 @@ pub fn deploy_policy<P: AllowitPolicy>(
             policy_instance: config.policy_instance,
             source_digest: config.source_digest,
             rules: config.rules,
-            grant: config.grant,
+            params: config.params,
             x402_enabled: config.x402_enabled,
             token: kept.token,
             deployment_version: deployment.deployment_version,
@@ -1116,8 +1147,8 @@ impl AllowitPolicy for AllowitCommon {
     fn validate(_rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         Ok(())
     }
-    /// Run each prefix call `allowit::<rule>(ctx, &ctx.grant.<rule>)?;` in owner order.
-    /// An unset Grant field skips its rule here only; the full offchain policy denies it.
+    /// Run each prefix call `allowit::<rule>(ctx, ctx.params.get(allowit::<RULE>))?;` in owner
+    /// order. An absent param skips its rule here only; the full offchain policy denies it.
     fn check(ctx: &AllowitContext, rules: &Vec<AllowitRule>) -> Result<(), AllowitWalletError> {
         for rule in rules.iter() {
             allowit::preflight(ctx, rule)?;
@@ -1129,8 +1160,8 @@ impl AllowitPolicy for AllowitCommon {
 impl From<allowit::AllowitError> for AllowitWalletError {
     fn from(error: allowit::AllowitError) -> Self {
         match error {
-            allowit::AllowitError::MissingGrant | allowit::AllowitError::InvalidParameter => {
-                AllowitWalletError::InvalidGrant
+            allowit::AllowitError::MissingParam | allowit::AllowitError::InvalidParam => {
+                AllowitWalletError::InvalidParam
             }
             allowit::AllowitError::InvalidState => AllowitWalletError::InvalidState,
             allowit::AllowitError::Overflow => AllowitWalletError::Overflow,
@@ -1163,7 +1194,7 @@ macro_rules! policy_wallet {
             pub fn policy_state(
                 env: soroban_sdk::Env,
             ) -> Result<
-                soroban_sdk::Map<soroban_sdk::Symbol, soroban_sdk::Val>,
+                soroban_sdk::Map<soroban_sdk::Symbol, allowit_wallet_protocol::AllowitValue>,
                 $crate::AllowitWalletError,
             > {
                 $crate::policy_state(&env)

@@ -15,8 +15,13 @@ const SECONDS_PER_DAY: u64 = 86_400;
 pub const NOW: u64 = 2 * SECONDS_PER_DAY + 100;
 /// State key that the catching policy counts its caught daily cap errors in.
 pub const OVER: &str = "over_day_cap";
+/// Custom param key that the catching policy reads with `transaction_cap`.
+pub const INVOICE_CAP: &str = "invoice_cap";
+/// Execution param key that makes the catching policy apply its invoice cap.
+pub const INVOICE: &str = "invoice";
 
-/// One rule input: Grant, current state before the operation, and request.
+/// One rule input: params, current state before the operation, and request with its args.
+/// A `None` param is absent.
 #[derive(Clone, Debug)]
 pub struct Vector {
     pub name: &'static str,
@@ -26,6 +31,8 @@ pub struct Vector {
     pub recipients: Option<Vec<usize>>,
     pub tokens: Option<Vec<usize>>,
     pub expiry: Option<u64>,
+    /// The custom `invoice_cap` param, which only Custom wallets admit.
+    pub invoice_cap: Option<i128>,
     pub calls: u64,
     pub spent: i128,
     pub unpriced: bool,
@@ -45,6 +52,8 @@ pub struct Vector {
     pub gas_units: i128,
     /// The request carries expense bounds.
     pub priced: bool,
+    /// The agent's args carry the `invoice` execution param.
+    pub invoice: bool,
 }
 
 /// A vector that passes every rule with headroom left. After it, spent and day_spent are 45 and
@@ -57,6 +66,7 @@ pub fn base() -> Vector {
         recipients: Some(vec![RECIPIENT, VAULT]),
         tokens: Some(vec![ASSET]),
         expiry: Some(NOW + 1000),
+        invoice_cap: None,
         calls: 0,
         spent: 5,
         unpriced: false,
@@ -74,6 +84,7 @@ pub fn base() -> Vector {
         spent_units: 40,
         gas_units: 0,
         priced: true,
+        invoice: false,
     }
 }
 
@@ -160,11 +171,11 @@ pub fn vectors() -> Vec<Vector> {
         }),
         edit("other_recipient", |v| v.recipient = OTHER),
         edit("other_asset", |v| v.asset = OTHER),
-        edit("grant_expired", |v| {
+        edit("params_expired", |v| {
             v.now = NOW + 1000;
             v.expires_at = NOW + 1001;
         }),
-        edit("request_outlives_grant", |v| {
+        edit("request_outlives_params", |v| {
             v.expiry = Some(v.expires_at - 1)
         }),
         edit("negative_cap", |v| v.caps[0] = Some(-1)),
@@ -186,6 +197,17 @@ pub fn vectors() -> Vec<Vector> {
             v.tokens = None;
             v.expiry = None;
         }),
+        // A custom param alone changes nothing; an `invoice` arg applies the invoice cap.
+        edit("invoice_cap_without_invoice", |v| v.invoice_cap = Some(39)),
+        edit("invoice_within_cap", |v| {
+            v.invoice = true;
+            v.invoice_cap = Some(40);
+        }),
+        edit("invoice_over_cap", |v| {
+            v.invoice = true;
+            v.invoice_cap = Some(39);
+        }),
+        edit("invoice_without_cap", |v| v.invoice = true),
     ]
 }
 
@@ -214,21 +236,23 @@ pub fn state_line(
 }
 
 /// Every outcome a policy author can observe on one vector: the sample, branch and catching
-/// policies, each rule, the standard preflight runner, and the post-flight state without and with
-/// the catching policy's writes.
+/// policies, each rule, the standard preflight runner, the post-flight state without policy
+/// writes, and the catching policy's evaluation for a Custom and a standard wallet.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
     pub policy: Result<(), u32>,
     pub branch: Result<(), u32>,
     pub catching: Result<(), u32>,
-    /// Rule results in Grant field order. Address pass values are `@<index>`.
+    /// Rule results in canonical key order. Address pass values are `@<index>`.
     pub rules: Vec<Result<String, u32>>,
-    /// Preflight results in Grant field order.
+    /// Preflight results in canonical key order.
     pub preflight: Vec<Result<(), u32>>,
-    /// `post_flight` with no policy writes, as `state_line`.
+    /// `post_flight` with no policy writes, as `state_line`; the same for every tier.
     pub next: Result<String, u32>,
-    /// `post_flight` after the catching policy passed and wrote its key.
+    /// `evaluate` of the catching policy for a Custom wallet, which stores its key.
     pub catching_next: Result<String, u32>,
+    /// `evaluate` of the catching policy for a standard wallet, which denies any write.
+    pub catching_standard: Result<String, u32>,
 }
 
 impl Outcome {
@@ -237,7 +261,7 @@ impl Outcome {
         let list = |items: Vec<String>| items.join(",");
         let unit = |r: &Result<(), u32>| show(r.map(|()| "()"));
         format!(
-            "vector {name} policy={} branch={} catching={} rules={} preflight={} next={} catching_next={}",
+            "vector {name} policy={} branch={} catching={} rules={} preflight={} next={} catching_next={} catching_standard={}",
             unit(&self.policy),
             unit(&self.branch),
             unit(&self.catching),
@@ -245,6 +269,7 @@ impl Outcome {
             list(self.preflight.iter().map(unit).collect()),
             show(self.next.clone()),
             show(self.catching_next.clone()),
+            show(self.catching_standard.clone()),
         )
     }
 }
