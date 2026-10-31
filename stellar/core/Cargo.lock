@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "allowit-sdk"
 version = "0.1.0"
-source = "git+https://github.com/allowit-hq/allowit-sdk.git?rev=ede4e9f4a7abb41e18b5c5f57ac51c49eb83b368#ede4e9f4a7abb41e18b5c5f57ac51c49eb83b368"
+source = "git+https://github.com/allowit-hq/allowit-sdk.git?rev=67f5d696847992e18131f815ce905713ec3646e1#67f5d696847992e18131f815ce905713ec3646e1"
 dependencies = [
  "proc-macro2",
  "serde",
