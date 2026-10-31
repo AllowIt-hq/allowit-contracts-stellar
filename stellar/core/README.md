@@ -1,8 +1,8 @@
-# Stellar wallet SDK
+# Stellar rail core
 
 *Prepare, authorize and settle a policy-bound Stellar transfer, with the agent and the service each holding their own key.*
 
-`allowit-stellar-wallet` is the Stellar adapter of the Allowit SDK. It turns a canonical execution request into an exact Stellar transaction, routes it through the custody the owner chose (a classic G-address account or a policy wallet contract), collects the two required authorizations, and keeps the signed bytes so an uncertain broadcast can be recovered instead of repeated. The custody contracts themselves live in the [`crates/`](../../crates) folder of this repository; the [SDK engine](https://github.com/allowit-hq/allowit-sdk/tree/main/engine) composes this crate on the agent's behalf.
+`allowit-stellar-wallet` is the Stellar rail core. It turns a canonical execution request into an exact Stellar transaction, routes it through the custody the owner chose (a classic G-address account or a policy wallet contract), collects the two required authorizations, and keeps the signed bytes so an uncertain broadcast can be recovered instead of repeated. The custody contracts themselves live in the [`crates/`](../../crates) folder of this repository; the engine of the [Allowit SDK](https://github.com/allowit-hq/allowit-sdk) composes this crate on the agent's behalf.
 
 Run its checks with:
 
