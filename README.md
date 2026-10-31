@@ -17,8 +17,9 @@ leading canonical calls, supplied by the owner as `rules`, skips absent params a
 eight canonical keys. `scripts/contract_admin.py` derives `rules` from the source. Only an error
 that the policy returns denies; a caught error lets the policy continue. After approval the wallet
 and the server run the same `allowit::post_flight`, which updates the standard state keys and
-applies the policy's `allowit::set_state` writes. Simple and Common store only standard keys, so
-their post-flight denies every policy write, on the server as onchain. The server uses
+applies the policy's `allowit::set_state` writes. Simple and Common never add or change a policy
+key, so their post-flight denies every policy write, on the server as onchain. Policy keys left by
+earlier Custom code stay unchanged. The server uses
 `allowit = { default-features = false, features = ["std"] }` and builds with `overflow-checks = true`.
 
 The owner controls wallet upgrades, configuration, pause, recovery and exact passthrough calls.

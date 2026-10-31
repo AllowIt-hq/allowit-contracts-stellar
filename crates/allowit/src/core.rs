@@ -106,8 +106,8 @@ mod types {
     /// Which params a wallet admits and which policy state it stores.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum AllowitTier {
-        /// Simple and Common: the canonical params only, and only the standard state keys,
-        /// because only the canonical prefix runs onchain.
+        /// Simple and Common: the canonical params only. Only the canonical prefix runs onchain,
+        /// so the policy adds or changes no state key; keys left by earlier Custom code stay.
         Standard,
         /// Custom: any bounded params, and every key the compiled policy writes.
         Custom,
@@ -720,8 +720,9 @@ fn decode(
 /// day over, count the call, add spent and gross amounts, mark an unpriced request, then apply the
 /// policy's buffered writes. It clears the write buffer first, even when it fails.
 ///
-/// A `Standard` wallet stores only the standard keys, so any policy write is `Unsupported`: the
-/// host and the chain then store the same state for every tier. A result with more than
+/// A `Standard` wallet never adds or changes a policy key, so any policy write is `Unsupported`.
+/// Policy keys left by earlier Custom code stay unchanged on both backends, so the host and the
+/// chain store the same state for every tier. A result with more than
 /// `MAX_STATE_KEYS` keys or `MAX_STATE_BYTES` encoded bytes, that later operations could not
 /// decode, or whose totals leave no room for one more call or unit, is `InvalidState`, so a
 /// policy write cannot make every later standard update fail or outgrow the wallet's entry.

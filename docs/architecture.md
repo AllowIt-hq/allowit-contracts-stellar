@@ -314,7 +314,8 @@ buffer back.
 
 `AllowitTier` selects what a wallet stores. Custom compiles its whole policy, so its
 `AllowitTier::Custom` post-flight applies every write. Simple and Common run only the standard
-prefix onchain, which never writes, so they store only the standard keys. Their
+prefix onchain, which never writes, so they never add or change a policy key. Policy keys left by
+earlier Custom code stay unchanged and still count toward the bounds. Their
 `AllowitTier::Standard` post-flight therefore denies any policy write with `Unsupported`, on the
 host as onchain: the server never approves an operation whose state the chain would drop. For every
 tier, the state that `evaluate` returns is exactly the state the wallet stores, and the wallet's

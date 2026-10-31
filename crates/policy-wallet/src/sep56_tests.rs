@@ -1015,9 +1015,11 @@ impl AllowitOrderProbe {
     }
 }
 
-/// The order seen from outside: when the wallet first calls out, the replay marker that admission
-/// writes after the post-flight state and nonce is already stored, and no funds have moved. A
-/// mutant that runs any effect before admission's state write fails here.
+/// The order seen from outside: when the wallet first calls out, the replay marker is already
+/// stored and no funds have moved. The probe sees only the persistent marker, because the host
+/// writes the wallet's instance storage, which holds the state and nonce, when its frame exits.
+/// `admit_stores_before_effects` pins that the state and nonce are stored before any effect; the
+/// two tests together catch a mutant that moves either write after an external call.
 #[test]
 fn the_first_external_call_sees_admission_stored_and_no_funds_moved() {
     for wasm in [SIMPLE, COMMON] {
