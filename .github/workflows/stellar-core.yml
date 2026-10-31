@@ -1,0 +1,36 @@
+name: Stellar core
+on:
+  push:
+    branches: [main]
+    paths:
+      - "stellar/core/**"
+      - ".github/workflows/stellar-core.yml"
+  pull_request:
+    paths:
+      - "stellar/core/**"
+      - ".github/workflows/stellar-core.yml"
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: stellar-core-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  stellar-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stellar/core -> target
+      - run: cargo fmt --manifest-path stellar/core/Cargo.toml --check
+      - run: cargo test --locked --manifest-path stellar/core/Cargo.toml
+      - run: cargo clippy --locked --manifest-path stellar/core/Cargo.toml --all-targets -- -D warnings
