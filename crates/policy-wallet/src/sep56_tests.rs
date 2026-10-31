@@ -880,3 +880,87 @@ fn deposit_effect_failure_after_the_state_write_rolls_back_state_nonce_and_repla
     assert_eq!(f.history().calls, 1);
     assert_eq!(f.client().state().nonce, 1);
 }
+
+/// Run `admit` alone, as `execute` does before any token or vault call, and check that it
+/// already stored post-flight state, the next nonce and the replay marker without moving funds.
+fn admit_stores_before_effects<P: AllowitPolicy>(wasm: &[u8]) {
+    let f = Fixture::new(wasm, false);
+    let v = vault(&f, 0, None);
+    allow_recipient(&f, &v);
+    let shares = AllowitSep56TestVaultClient::new(&f.env, &v);
+    for i in 0..2 {
+        let e = if i == 0 {
+            f.execution(10)
+        } else {
+            request(&f, &v, 50, 50)
+        };
+        let before = f.client().state();
+        f.env.as_contract(&f.wallet, || {
+            let state = state(&f.env).unwrap();
+            let operation = decode_operation(&f.env, &e, &state).unwrap();
+            let expense = decode_expense(&f.env, e.expense.as_ref()).unwrap();
+            let now = f.env.ledger().timestamp();
+            let ctx = rule_input(
+                &f.env,
+                &state,
+                &operation,
+                expense.as_ref(),
+                now,
+                e.expires_at,
+            );
+            let want = allowit::post_flight(&ctx).unwrap();
+            admit::<P>(&f.env, e.clone(), expense.as_ref(), state, &operation).unwrap();
+            let stored = load(&f.env, None).unwrap();
+            assert_eq!(stored.policy_state, want);
+            assert_eq!(stored.nonce, before.nonce + 1);
+            let marker = Key::Operation(e.operation_id.clone());
+            assert!(f.env.storage().persistent().has(&marker));
+        });
+        // No token or vault call has run yet.
+        assert_eq!(f.balance(), 1000, "{i}");
+        assert_eq!(shares.balance(&f.wallet), 0, "{i}");
+        assert_eq!(f.history().calls, before.nonce + 1, "{i}");
+    }
+}
+
+#[test]
+fn admit_writes_post_flight_state_nonce_and_replay_marker_before_any_external_call() {
+    admit_stores_before_effects::<AllowitSimple>(SIMPLE);
+    admit_stores_before_effects::<AllowitCommon>(COMMON);
+}
+
+#[test]
+fn policy_and_kernel_denials_win_over_failing_effects_because_admission_runs_first() {
+    let f = Fixture::new(COMMON, false);
+    // The wrong-asset vault fails its first effect check; the wallet cannot fund 5000.
+    let v = vault(&f, 0, Some(f.recipient.clone()));
+    let before = f.client().state();
+    assert_eq!(
+        execute(&f, &request(&f, &v, 50, 50)),
+        Err(Ok(AllowitWalletError::PolicyDenied))
+    );
+    assert_eq!(
+        execute(&f, &f.execution(5000)),
+        Err(Ok(AllowitWalletError::PolicyDenied))
+    );
+    assert_eq!(f.client().state(), before);
+    // Control: once the recipient rule admits the vault, its effect fails on its own.
+    allow_recipient(&f, &v);
+    assert_eq!(
+        execute(&f, &request(&f, &v, 50, 50)),
+        Err(Ok(AllowitWalletError::UnsupportedAsset))
+    );
+    // Simple has no rules: a kernel denial still wins over the unfunded transfer.
+    let f = Fixture::new(SIMPLE, false);
+    let mut stale = f.execution(5000);
+    stale.nonce += 1;
+    assert_eq!(
+        execute(&f, &stale),
+        Err(Ok(AllowitWalletError::StaleRequest))
+    );
+    // Control: admitted, the same transfer fails on its own.
+    assert_eq!(
+        execute(&f, &f.execution(5000)),
+        Err(Ok(AllowitWalletError::InsufficientFunds))
+    );
+}
