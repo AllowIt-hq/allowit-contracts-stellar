@@ -100,7 +100,8 @@ pub struct AllowitPolicyAuthorization {
     pub server_signature: BytesN<64>,
 }
 
-/// Wallet error codes. Rule denials collapse to `PolicyDenied`.
+/// Wallet error codes, all below 100; `AllowitError` codes start at 101. Rule denials collapse to
+/// `PolicyDenied`.
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]

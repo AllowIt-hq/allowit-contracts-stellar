@@ -82,6 +82,7 @@ ALLOWED_KEYWORDS = frozenset((
 INTEGERS = tuple(sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 128))
 # Primitive types whose width or representation differs between the backends.
 NOT_PORTABLE = frozenset(("usize", "isize", "f16", "f32", "f64", "f128"))
+# `AllowitError` variants in code order; their contract error codes are 101 onward.
 ERRORS = ("MissingParam", "TransactionCapExceeded", "SpentCapExceeded", "DaySpentCapExceeded", "DayTotalCapExceeded",
           "CallCapExceeded", "RecipientNotAllowed", "TokenNotAllowed", "Expired", "Unpriced", "InvalidParam",
           "InvalidState", "Overflow", "Unsupported", "OperationNotAllowed", "Panicked")

@@ -466,9 +466,9 @@ panic is a hard stop: the run denies and its writes are discarded. `allowit::par
 another type or range. `panic!`, `assert!`, `unreachable!` and integer overflow panic too.
 
 Onchain a panic aborts the wallet call, which rolls back every write. A failed typed read aborts
-with `panic_with_error` and its `AllowitError` code: 1 for `MissingParam` and 11 for
-`InvalidParam`. The wallet's own errors share that contract error space, where 1 is
-`InvalidState` and 11 is `Overflow`. On the host, `allowit::evaluate` catches the panic, discards
+with `panic_with_error` and its `AllowitError` code: 101 for `MissingParam` and 111 for
+`InvalidParam`. `AllowitError` codes start at 101 and wallet error codes stay below 100, so a
+client never reads one as the other. On the host, `allowit::evaluate` catches the panic, discards
 the writes and returns the failed read's error, or `Panicked` for any other panic. The evaluator
 process keeps running.
 

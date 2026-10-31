@@ -129,44 +129,45 @@ mod types {
     }
 
     error! {
-        /// Rule denial or invalid input.
+        /// Rule denial or invalid input. Codes start at 101, so they never share a contract error
+        /// code with the wallet's own errors.
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         #[repr(u32)]
         pub enum AllowitError {
             /// The rule's param is unset.
-            MissingParam = 1,
+            MissingParam = 101,
             /// The amount exceeds `transaction_cap`.
-            TransactionCapExceeded = 2,
+            TransactionCapExceeded = 102,
             /// Lifetime expenses would exceed `spent_cap`.
-            SpentCapExceeded = 3,
+            SpentCapExceeded = 103,
             /// Expenses of the UTC day would exceed `day_spent_cap`.
-            DaySpentCapExceeded = 4,
+            DaySpentCapExceeded = 104,
             /// Gross amounts and gas of the UTC day would exceed `day_total_cap`.
-            DayTotalCapExceeded = 5,
+            DayTotalCapExceeded = 105,
             /// This operation would exceed `call_cap`.
-            CallCapExceeded = 6,
+            CallCapExceeded = 106,
             /// The destination is not in `recipients`.
-            RecipientNotAllowed = 7,
+            RecipientNotAllowed = 107,
             /// The asset is not in `tokens`.
-            TokenNotAllowed = 8,
+            TokenNotAllowed = 108,
             /// The params or the request have expired.
-            Expired = 9,
+            Expired = 109,
             /// Selected expense accounting has an unpriced liability.
-            Unpriced = 10,
+            Unpriced = 110,
             /// A param of the wrong type or range, a nonpositive amount, negative request units,
             /// or a key or value outside its bounds.
-            InvalidParam = 11,
+            InvalidParam = 111,
             /// Read state is negative, of another type, or belongs to a later day.
-            InvalidState = 12,
+            InvalidState = 112,
             /// An accounting sum leaves its integer range.
-            Overflow = 13,
+            Overflow = 113,
             /// A server-only function this evaluator does not provide, or a policy write that a
             /// standard wallet cannot store.
-            Unsupported = 14,
+            Unsupported = 114,
             /// The operation is not in `operations`.
-            OperationNotAllowed = 15,
+            OperationNotAllowed = 115,
             /// The policy panicked on the host evaluator. Onchain a panic aborts the call instead.
-            Panicked = 16,
+            Panicked = 116,
         }
     }
 }

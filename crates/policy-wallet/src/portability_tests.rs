@@ -70,7 +70,7 @@ const ERRORS: [AllowitError; 16] = [
 ];
 /// The wallet error of a rule error code.
 fn wallet_error(code: u32) -> u32 {
-    let error = ERRORS[code as usize - 1];
+    let error = ERRORS[code as usize - 101];
     assert_eq!(error as u32, code);
     AllowitWalletError::from(error) as u32
 }
