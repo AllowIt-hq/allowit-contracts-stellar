@@ -17,7 +17,9 @@ leading canonical calls, supplied by the owner as `rules`, skips absent params a
 nine canonical keys. `scripts/contract_admin.py` derives `rules` from the source. Only an error
 that the policy returns denies; a caught error lets the policy continue. `allowit::operations`
 admits only the op names in the owner's `operations` param and returns the op name for a `match`.
-After approval the wallet
+`allowit::param(ctx, key)` and `allowit::arg(ctx, key)` return the typed value of an owner param
+or an agent arg and panic when it is missing or mistyped. A panic denies the run and discards its
+writes. After approval the wallet
 and the server run the same `allowit::post_flight`, which updates the standard state keys and
 applies the policy's `allowit::set_state` writes. Simple and Common never add or change a policy
 key, so their post-flight denies every policy write, on the server as onchain. Policy keys left by

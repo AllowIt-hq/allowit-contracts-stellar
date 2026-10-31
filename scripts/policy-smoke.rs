@@ -174,10 +174,7 @@ fn approval_reads_execution_params_and_custom_params() {
         catching::execute(&c),
         Err(AllowitError::TransactionCapExceeded)
     );
-    assert_eq!(
-        allowit::param(&c, vectors::INVOICE_CAP),
-        Ok(AllowitValue::Int(9))
-    );
+    assert_eq!(allowit::param::<i128>(&c, vectors::INVOICE_CAP), 9);
     put(&mut c.request.args, vectors::INVOICE, None);
     assert_eq!(catching::execute(&c), Ok(()));
 }
@@ -209,6 +206,76 @@ fn approval_evaluate_keeps_no_write_of_a_denied_run_on_a_reused_env() {
     assert_eq!(next.get("seen"), None);
     allowit::set_state(&c, "seen", 1u64).unwrap();
     assert_eq!(allowit::evaluate(&c, policy::execute, custom), Ok(next));
+}
+/// The documented per-op policy on the host: a transfer within the owner's `payment_cap`.
+fn per_op(ctx: &AllowitContext) -> allowit::Result {
+    match allowit::operations(ctx, ctx.params.get(allowit::OPERATIONS))? {
+        "transfer" => {
+            // "at most the payment cap per transfer"
+            let amount: i128 = allowit::arg(ctx, "amount");
+            let cap: i128 = allowit::param(ctx, "payment_cap");
+            if amount > cap {
+                panic!("transfer above payment_cap");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+/// Records a write, then runs `per_op`.
+fn writing_per_op(c: &AllowitContext) -> allowit::Result {
+    allowit::set_state(c, "seen", 1u64)?;
+    per_op(c)
+}
+#[test]
+fn approval_typed_reads_return_the_binding_type_and_a_policy_panic_denies_without_writes() {
+    let mut c = context();
+    put(&mut c.params, "payment_cap", int(10));
+    put(&mut c.request.args, "amount", int(10));
+    let recipients: Vec<Address> = allowit::param(&c, allowit::RECIPIENTS);
+    let amount: u32 = allowit::arg(&c, "amount");
+    let cap: u64 = allowit::param(&c, "payment_cap");
+    assert_eq!(recipients, vec![c.request.recipient.clone()]);
+    assert_eq!((amount, cap), (10, 10));
+    let custom = AllowitTier::Custom;
+    let next = allowit::evaluate(&c, writing_per_op, custom).unwrap();
+    assert_eq!(next.get("seen"), Some(&AllowitValue::Int(1)));
+    // A panic is a hard stop: the run denies, its write is discarded and the evaluator goes on.
+    // A failed typed read denies with its error, any other panic with `Panicked`.
+    let cases: [(&str, Option<AllowitValue>, AllowitError); 4] = [
+        ("amount", int(11), AllowitError::Panicked),
+        ("amount", None, AllowitError::MissingParam),
+        (
+            "amount",
+            Some(AllowitValue::Bool(true)),
+            AllowitError::InvalidParam,
+        ),
+        ("payment_cap", None, AllowitError::MissingParam),
+    ];
+    for (key, value, error) in cases {
+        let mut bad = c.clone();
+        let map = if key == "amount" {
+            &mut bad.request.args
+        } else {
+            &mut bad.params
+        };
+        put(map, key, value);
+        assert_eq!(
+            allowit::evaluate(&bad, writing_per_op, custom),
+            Err(error),
+            "{key}"
+        );
+        let after = allowit::post_flight(&bad, custom).unwrap();
+        assert_eq!(after.get("seen"), None, "{key}");
+    }
+    assert_eq!(allowit::evaluate(&c, writing_per_op, custom), Ok(next));
+    // A rule error stays catchable: `operations` returns it.
+    put(
+        &mut c.params,
+        allowit::OPERATIONS,
+        Some(operations(&Ops::List(vec!["deposit"]))),
+    );
+    assert_eq!(per_op(&c), Err(AllowitError::OperationNotAllowed));
 }
 #[test]
 fn limits_empty_keys_are_invalid_param_as_onchain() {

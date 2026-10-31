@@ -164,7 +164,7 @@ fn rules_return_exact_passing_constraints_after_this_operation() {
 }
 
 #[test]
-fn rules_read_any_key_and_param_returns_the_value_or_missing_param() {
+fn rules_read_any_key_and_param_returns_the_typed_value() {
     let env = Env::default();
     let mut ctx = fixture(&env);
     // A rule may read a custom key: the policy defines it.
@@ -173,11 +173,18 @@ fn rules_read_any_key_and_param_returns_the_value_or_missing_param() {
         transaction_cap(&ctx, ctx.params.get("vendor_cap")),
         Err(AllowitError::TransactionCapExceeded)
     );
-    assert_eq!(param(&ctx, "vendor_cap"), Ok(AllowitValue::Int(39)));
-    assert_eq!(param(&ctx, "other"), Err(AllowitError::MissingParam));
+    assert_eq!(param::<i128>(&ctx, "vendor_cap"), 39);
+    assert_eq!(param::<u32>(&ctx, "vendor_cap"), 39);
+    assert_eq!(
+        param::<AllowitValue>(&ctx, "vendor_cap"),
+        AllowitValue::Int(39)
+    );
+    let tokens: soroban_sdk::Vec<Address> = param(&ctx, TOKENS);
+    assert_eq!(tokens, vec![&env, ctx.request.asset.clone()]);
+    let names: soroban_sdk::Vec<AllowitValue> = param(&ctx, OPERATIONS);
+    assert_eq!(names, vec![&env, text_value(&env, "transfer")]);
     // A key that no map can hold is unset, the same on both backends.
     assert_eq!(ctx.params.get("vendor cap"), None);
-    assert_eq!(param(&ctx, ""), Err(AllowitError::MissingParam));
     // Execution params reach policy through the request.
     set(&mut ctx, "vendor_cap", None);
     ctx.request
@@ -185,7 +192,64 @@ fn rules_read_any_key_and_param_returns_the_value_or_missing_param() {
         .0
         .set(Symbol::new(&env, "invoice"), AllowitValue::Int(7));
     assert_eq!(ctx.request.args.get("invoice"), Some(AllowitValue::Int(7)));
+    assert_eq!(arg::<u64>(&ctx, "invoice"), 7);
     assert_eq!(ctx.params.get("vendor_cap"), None);
+}
+
+/// A policy step as a contract call, so a typed read that fails aborts it as it aborts a wallet.
+/// Its own module keeps `Result` the standard one for the generated client.
+mod policy_step {
+    use crate::{AllowitContext, AllowitMap, AllowitParams, AllowitRequest, arg, param};
+    use soroban_sdk::{Env, Map, contract, contractimpl};
+    #[contract]
+    pub struct Policy;
+    #[contractimpl]
+    impl Policy {
+        /// The headroom of the agent's `amount` arg under the owner's `swap_cap` param.
+        pub fn headroom(env: Env, params: AllowitMap, request: AllowitRequest) -> i128 {
+            let state = Map::new(&env);
+            let params = AllowitParams(params);
+            let ctx = AllowitContext {
+                env,
+                params,
+                state,
+                request,
+            };
+            let amount: i128 = arg(&ctx, "amount");
+            let cap: i128 = param(&ctx, "swap_cap");
+            cap - amount
+        }
+    }
+}
+use policy_step::{Policy, PolicyClient};
+
+#[test]
+fn a_failed_typed_read_aborts_the_contract_call_with_its_allowit_error() {
+    let env = Env::default();
+    let id = env.register(Policy, ());
+    let client = PolicyClient::new(&env, &id);
+    let mut ctx = fixture(&env);
+    set(&mut ctx, "swap_cap", int(50));
+    let amount = Symbol::new(&env, "amount");
+    ctx.request
+        .args
+        .0
+        .set(amount.clone(), AllowitValue::Int(20));
+    assert_eq!(client.headroom(&ctx.params.0, &ctx.request), 30);
+    let code = |error: AllowitError| Err(Ok(soroban_sdk::Error::from(error)));
+    let call = |c: &AllowitContext| client.try_headroom(&c.params.0, &c.request);
+    // A missing key is `MissingParam` and a value of another type or range `InvalidParam`.
+    let mut bad = ctx.clone();
+    bad.request.args.0.remove(amount.clone());
+    assert_eq!(call(&bad), code(AllowitError::MissingParam));
+    let mut bad = ctx.clone();
+    bad.request.args.0.set(amount, AllowitValue::Bool(true));
+    assert_eq!(call(&bad), code(AllowitError::InvalidParam));
+    let mut bad = ctx.clone();
+    set(&mut bad, "swap_cap", None);
+    assert_eq!(call(&bad), code(AllowitError::MissingParam));
+    set(&mut bad, "swap_cap", Some(text_value(&env, "50")));
+    assert_eq!(call(&bad), code(AllowitError::InvalidParam));
 }
 
 #[test]

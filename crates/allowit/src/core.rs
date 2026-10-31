@@ -1,8 +1,8 @@
 // Shared types and rules, included once per backend. The including module supplies `Address`,
 // `AllowitEnv`, `Map`, `String`, `Symbol` and `Vec`, the type macros `value!`, `error!` and
-// `params!`, and the map primitives `lookup`, `insert`, `count`, `text_len`, `text_bytes`,
-// `each_value`, `each_item`, `record`, `take_writes` and `merge`. Field types keep those names so
-// Soroban contract specs name native types.
+// `params!`, the map primitives `lookup`, `insert`, `count`, `text_len`, `text_bytes`,
+// `each_value`, `each_item`, `record`, `take_writes` and `merge`, and the panic primitives `fail`
+// and `guarded`. Field types keep those names so Soroban contract specs name native types.
 
 /// UTC day length in seconds.
 pub const DAY: u64 = 86_400;
@@ -165,6 +165,8 @@ mod types {
             Unsupported = 14,
             /// The operation is not in `operations`.
             OperationNotAllowed = 15,
+            /// The policy panicked on the host evaluator. Onchain a panic aborts the call instead.
+            Panicked = 16,
         }
     }
 }
@@ -177,10 +179,11 @@ pub type Result<T = ()> = core::result::Result<T, AllowitError>;
 
 /// Names used by authored policy.
 pub mod prelude {
-    /// The types that `use allowit::prelude::*` imports.
+    /// The types that `use allowit::prelude::*` imports. `String` and `Vec` are the backend
+    /// types that `param` and `arg` read text and lists as.
     pub use super::{
         Address, AllowitContext, AllowitError, AllowitOperation, AllowitRequest, AllowitValue,
-        Result,
+        Result, String, Vec,
     };
 }
 
@@ -317,8 +320,11 @@ macro_rules! scalars {
 scalars!(
     i128 => Int(core::convert::identity, Ok),
     u64 => Int(i128::from, |n| u64::try_from(n).map_err(|_| AllowitError::InvalidParam)),
+    u32 => Int(i128::from, |n| u32::try_from(n).map_err(|_| AllowitError::InvalidParam)),
     bool => Bool(core::convert::identity, Ok),
-    Address => Addr(core::convert::identity, Ok)
+    Address => Addr(core::convert::identity, Ok),
+    String => Str(core::convert::identity, Ok),
+    Vec<AllowitValue> => List(core::convert::identity, Ok)
 );
 
 /// Standard values of a state map. An absent key reads as zero or false.
@@ -763,9 +769,38 @@ pub fn operations(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<&
     }
 }
 
-/// The value of owner param `key`, such as a custom `vendor_cap`. Unset is `MissingParam`.
-pub fn param(ctx: &AllowitContext, key: &str) -> Result<AllowitValue> {
-    ctx.params.get(key).ok_or(AllowitError::MissingParam)
+/// Owner param `key` as `T`, the type of its binding:
+/// `let cap: i128 = allowit::param(ctx, "swap_cap");`. `T` is `i128`, `u64`, `u32`, `bool`,
+/// `Address`, `String`, `Vec<AllowitValue>`, `Vec<Address>` or `AllowitValue`. An unset key panics
+/// with `MissingParam` and a value of another type or range with `InvalidParam`: the run stops and
+/// denies, and its writes are discarded.
+#[track_caller]
+pub fn param<T: TryFrom<AllowitValue>>(ctx: &AllowitContext, key: &str) -> T {
+    typed(ctx, ctx.params.get(key), key)
+}
+
+/// The agent's execution param `key` of this request, from `ctx.request.args`, as `T`:
+/// `let amount: i128 = allowit::arg(ctx, "amount");`. It panics as `param` does.
+#[track_caller]
+pub fn arg<T: TryFrom<AllowitValue>>(ctx: &AllowitContext, key: &str) -> T {
+    typed(ctx, ctx.request.args.get(key), key)
+}
+
+/// `value` of `key` as `T`, or a panic with `MissingParam` or `InvalidParam`. The host panic names
+/// the policy's call site.
+#[track_caller]
+fn typed<T: TryFrom<AllowitValue>>(
+    ctx: &AllowitContext,
+    value: Option<AllowitValue>,
+    key: &str,
+) -> T {
+    let Some(value) = value else {
+        fail(&ctx.env, AllowitError::MissingParam, key)
+    };
+    match T::try_from(value) {
+        Ok(value) => value,
+        Err(_) => fail(&ctx.env, AllowitError::InvalidParam, key),
+    }
 }
 
 /// The current value of a state key, before this operation, or `None`. Writes of this run apply
@@ -857,8 +892,9 @@ pub fn post_flight(ctx: &AllowitContext, tier: AllowitTier) -> Result<AllowitMap
 /// One policy evaluation, the server's entry point: clear stale writes, check the request's args
 /// and, for a `Standard` wallet, its params as the wallet does, run `execute`, then `post_flight`
 /// for the wallet's tier on approval. Args or params that the wallet rejects are `InvalidParam`.
-/// A denial discards the policy's writes, so no write outlives it. The result is exactly the
-/// state the wallet stores.
+/// A panic of `execute` denies: on the host with the error of a failed `param` or `arg` read, or
+/// `Panicked`. A denial discards the policy's writes, so no write outlives it. The result is
+/// exactly the state the wallet stores.
 pub fn evaluate(
     ctx: &AllowitContext,
     execute: impl FnOnce(&AllowitContext) -> Result,
@@ -871,7 +907,7 @@ pub fn evaluate(
     if tier == AllowitTier::Standard {
         check_params(&ctx.params.0, tier)?;
     }
-    let run = execute(ctx);
+    let run = guarded(&ctx.env, || execute(ctx));
     if run.is_err() {
         take_writes(&ctx.env);
     }

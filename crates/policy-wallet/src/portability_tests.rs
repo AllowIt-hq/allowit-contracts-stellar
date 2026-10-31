@@ -50,7 +50,7 @@ mod vectors {
 use vectors::{Ops, Outcome, Vector};
 
 /// Every rule error, indexed by its code minus one.
-const ERRORS: [AllowitError; 15] = [
+const ERRORS: [AllowitError; 16] = [
     AllowitError::MissingParam,
     AllowitError::TransactionCapExceeded,
     AllowitError::SpentCapExceeded,
@@ -66,6 +66,7 @@ const ERRORS: [AllowitError; 15] = [
     AllowitError::Overflow,
     AllowitError::Unsupported,
     AllowitError::OperationNotAllowed,
+    AllowitError::Panicked,
 ];
 /// The wallet error of a rule error code.
 fn wallet_error(code: u32) -> u32 {

@@ -51,6 +51,9 @@ MACRO_NAMES = re.compile(r"\b(?:include|include_str|include_bytes|env|option_env
 # and other built-in macros read the build environment or source location.
 MACROS = frozenset(("assert", "assert_eq", "assert_ne", "panic", "matches", "unreachable"))
 MACRO_CALL = re.compile(r"(?:r#)?\b([A-Za-z_]\w*)\s*!(?!=)")
+# The argument index of each allowed macro's optional message. A message must be one string literal,
+# whose placeholders `plain_braces` checks; the format arguments after it are ordinary code.
+MESSAGE = {"panic": 0, "unreachable": 0, "assert": 1, "assert_eq": 2, "assert_ne": 2}
 # Attributes that authored code may use. Every other attribute rejects, such as `path`, `cfg`,
 # `unsafe(...)`, `link_section`, `export_name`, `track_caller` or `doc`.
 ATTRIBUTES = frozenset(("allow", "expect", "warn", "deny", "forbid", "inline", "cold", "must_use"))
@@ -81,7 +84,7 @@ INTEGERS = tuple(sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 1
 NOT_PORTABLE = frozenset(("usize", "isize", "f16", "f32", "f64", "f128"))
 ERRORS = ("MissingParam", "TransactionCapExceeded", "SpentCapExceeded", "DaySpentCapExceeded", "DayTotalCapExceeded",
           "CallCapExceeded", "RecipientNotAllowed", "TokenNotAllowed", "Expired", "Unpriced", "InvalidParam",
-          "InvalidState", "Overflow", "Unsupported", "OperationNotAllowed")
+          "InvalidState", "Overflow", "Unsupported", "OperationNotAllowed", "Panicked")
 VALUES = ("Int", "Bool", "Str", "Addr", "List")
 ENUMS = {"AllowitOperation": ("sep41_transfer", "sep56_deposit"), "AllowitError": ERRORS, "AllowitRule": PARAM_KEYS,
          "AllowitValue": VALUES}
@@ -93,12 +96,14 @@ SERVER_TYPES = ("AllowitPrice", "AllowitFetch", "AllowitInternetSearch", "Allowi
                 "AllowitRequestScreening", "AllowitSystemOne")
 STRUCT_FIELDS = frozenset(("from", "to", "amount", "price", "slip", "method", "url", "data", "pubkey", "query", "id",
                            "deny_below", "allow_above"))
-ALLOWIT_FUNCTIONS = PARAM_KEYS + ("param", "get_state", "set_state") + SERVER_FUNCTIONS
+ALLOWIT_FUNCTIONS = PARAM_KEYS + ("param", "arg", "get_state", "set_state") + SERVER_FUNCTIONS
 # `AllowitParams` is absent on purpose: naming it would reach the backend map, whose keys and
 # methods differ. Params and args are read only with `.get(key)`; the host backend also keeps that
 # map private, so the std-only compile rejects `.0` on any params or args value.
+# `String` and `Vec` are the backend text and list types that `param` and `arg` read; like a list from
+# `AllowitValue::List`, they admit only comparison, `clone`, matching and `for`.
 ALLOWIT_TYPES = ("AllowitContext", "AllowitError", "AllowitOperation", "AllowitRequest", "AllowitRule", "AllowitValue",
-                 "Address", "Result", "DAY") + tuple(key.upper() for key in PARAM_KEYS) + SERVER_TYPES
+                 "Address", "Result", "String", "Vec", "DAY") + tuple(key.upper() for key in PARAM_KEYS) + SERVER_TYPES
 TYPES = frozenset(ALLOWIT_TYPES + ("Option", "Some", "None", "Ok", "Err"))
 # Tuple constructors, which coerce to function pointers unless called.
 CONSTRUCTORS = frozenset(("Some", "Ok", "Err", "Option::Some", "Result::Ok", "Result::Err")
@@ -367,6 +372,18 @@ def allowlisted(code):
         i += 1
 
 
+def macro_args(tokens, i):
+    """Return the top-level comma-separated token groups of the macro arguments that open at tokens[i]."""
+    groups, depth = [[]], 0
+    for token in tokens[i + 1:after_brackets(tokens, i) - 1]:
+        depth += (token in OPEN) - (token in CLOSE)
+        if depth == 0 and token == ",":
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    return groups
+
+
 def portable(code):
     """Raise ValueError for macros, attributes, context patterns, backend map access and indexing
     that could behave differently in `AllowitCustomPolicy` and on the host, then apply the allowlist."""
@@ -385,6 +402,14 @@ def portable(code):
     if MAP_FIELD.search(code):
         reject("the map inside params or args; read them with `.get(key)`")
     tokens = TOKEN.findall(code)
+    # Literals are `0` here: a present message must be exactly one of them.
+    for k in range(len(tokens) - 2):
+        name = tokens[k].removeprefix("r#")
+        if name in MESSAGE and tokens[k + 1] == "!" and tokens[k + 2] in OPEN:
+            args = macro_args(tokens, k + 2)
+            message = args[MESSAGE[name]] if len(args) > MESSAGE[name] else []
+            if message not in ([], ["0"]):
+                reject("a `{}!` message that is not one string literal".format(name))
     for before, token in zip(tokens, tokens[1:]):
         if token == "[" and (before in (")", "]", "?") or before[:1].isdigit()
                              or IDENT.fullmatch(before) and before not in RUST_KEYWORDS):

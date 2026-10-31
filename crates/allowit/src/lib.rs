@@ -28,6 +28,13 @@
 //! continue. `operations` admits the request's op only when the owner's `operations` param names
 //! it, and returns the op name, such as `"transfer"`, for a `match`.
 //!
+//! `param` and `arg` read an owner param or an agent arg as the type of its binding:
+//! `let cap: i128 = allowit::param(ctx, "swap_cap");`. They panic when the key is unset
+//! (`MissingParam`) or the value has another type or range (`InvalidParam`). A panic, also from
+//! `panic!`, `assert!`, `unreachable!` or an integer overflow, is a hard stop: the run denies and
+//! its writes are discarded. Onchain the contract call aborts, with the `AllowitError` code for a
+//! failed read. On the host `evaluate` catches the panic and returns that error or `Panicked`.
+//!
 //! After approval, the wallet and the server run the same `post_flight`: it rolls the UTC day
 //! over, counts the call, adds spent and gross amounts, marks unpriced operations, then applies
 //! the policy's own `set_state` writes, and denies a result whose standard keys do not decode or
@@ -39,8 +46,8 @@
 //! standard contract runs the leading canonical calls, supplied by the owner as `rules`, through
 //! `preflight`, which skips absent params.
 //!
-//! Portable authored code uses rule calls, `param`, `get_state` and `set_state`, typed scalar
-//! fields and enum comparisons. `scripts/policy_source.py` admits only an allowlist of names,
+//! Portable authored code uses rule calls, `param`, `arg`, `get_state` and `set_state`, typed
+//! scalar fields and enum comparisons. `scripts/policy_source.py` admits only an allowlist of names,
 //! paths and methods that give the same result on both backends.
 //!
 //! Types and rule logic are written once in `core.rs` and compiled per backend. Each backend binds
@@ -96,8 +103,8 @@ compile_error!(
 /// Onchain backend. Params, state, request facts and errors are Soroban contract types.
 #[cfg(feature = "soroban")]
 pub mod soroban {
-    pub use soroban_sdk::Address;
-    use soroban_sdk::{Env as AllowitEnv, Map, String, Symbol, Vec};
+    pub use soroban_sdk::{Address, String, Vec};
+    use soroban_sdk::{Env as AllowitEnv, Map, Symbol};
     /// Make a `core.rs` value type a Soroban contract type.
     macro_rules! value {
         ($item:item) => {
@@ -164,6 +171,34 @@ pub mod soroban {
         Some(bytes)
     }
 
+    /// Abort the whole contract call with contract error `error`. Every write of the call rolls back.
+    fn fail(env: &AllowitEnv, error: AllowitError, _key: &str) -> ! {
+        env.panic_with_error(error)
+    }
+
+    /// Run the policy. A panic aborts the whole contract call, which rolls back every write.
+    fn guarded(_env: &AllowitEnv, run: impl FnOnce() -> Result) -> Result {
+        run()
+    }
+
+    /// Read a `List` of `Addr` values as addresses; any other value is `InvalidParam`.
+    impl TryFrom<AllowitValue> for Vec<Address> {
+        /// A value of another type.
+        type Error = AllowitError;
+        /// The addresses of a `List` of `Addr`.
+        fn try_from(value: AllowitValue) -> Result<Self> {
+            let AllowitValue::List(items) = value else {
+                return Err(AllowitError::InvalidParam);
+            };
+            let mut addresses = Vec::new(items.env());
+            each_item(&items, |item| {
+                addresses.push_back(Address::try_from(item)?);
+                Ok(())
+            })?;
+            Ok(addresses)
+        }
+    }
+
     /// Run `check` on each value of `map`. An empty key or a value that does not decode is
     /// `InvalidParam`. A `Symbol` already holds at most 32 ASCII letters, digits or underscores,
     /// so an empty key is the only one that the host rejects and a `Symbol` admits.
@@ -220,7 +255,8 @@ pub mod soroban {
 /// Host backend for the offchain server and SDK evaluator. Addresses are StrKey strings.
 #[cfg(feature = "std")]
 pub mod host {
-    use alloc::{collections::BTreeMap, string::String, vec::Vec};
+    use alloc::collections::BTreeMap;
+    pub use alloc::{string::String, vec::Vec};
     use std::sync::{Arc, Mutex, MutexGuard};
 
     /// Exact Stellar account or contract identity, held as its StrKey text. It compares only for
@@ -248,10 +284,12 @@ pub mod host {
     type Symbol = String;
 
     /// Host environment of policy evaluations. It buffers the policy's `set_state` writes for
-    /// `post_flight`; clones share the buffer. `evaluate` clears it before a run and on denial.
+    /// `post_flight` and records the error of a failed `param` or `arg` read; clones share both.
+    /// `evaluate` clears them before a run and the writes on denial.
     #[derive(Clone, Debug)]
     pub struct AllowitEnv {
         writes: Arc<Mutex<AllowitMap>>,
+        failure: Arc<Mutex<Option<AllowitError>>>,
     }
 
     impl AllowitEnv {
@@ -260,12 +298,20 @@ pub mod host {
         pub fn new() -> Self {
             Self {
                 writes: Arc::new(Mutex::new(BTreeMap::new())),
+                failure: Arc::new(Mutex::new(None)),
             }
         }
 
         /// The write buffer. A panic while it was held leaves no partial write, so it stays usable.
         fn buffer(&self) -> MutexGuard<'_, AllowitMap> {
             self.writes
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+        }
+
+        /// The error of the last failed `param` or `arg` read.
+        fn failure(&self) -> MutexGuard<'_, Option<AllowitError>> {
+            self.failure
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
         }
@@ -339,6 +385,34 @@ pub mod host {
     /// The bytes of a text value, or `None` beyond `MAX_TEXT` bytes.
     fn text_bytes<'a>(text: &'a String, _buf: &'a mut [u8; MAX_TEXT as usize]) -> Option<&'a [u8]> {
         (text.len() <= MAX_TEXT as usize).then_some(text.as_bytes())
+    }
+
+    /// Record `error` for `evaluate` and panic with a message that names it and `key`.
+    #[track_caller]
+    fn fail(env: &AllowitEnv, error: AllowitError, key: &str) -> ! {
+        *env.failure() = Some(error);
+        panic!("allowit: {error:?} for `{key}`")
+    }
+
+    /// Run the policy and turn a panic into a denial: the recorded error of a failed `param` or
+    /// `arg` read, or `Panicked`. The process keeps running.
+    fn guarded(env: &AllowitEnv, run: impl FnOnce() -> Result) -> Result {
+        env.failure().take();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+            .unwrap_or_else(|_| Err(env.failure().take().unwrap_or(AllowitError::Panicked)))
+    }
+
+    /// Read a `List` of `Addr` values as addresses; any other value is `InvalidParam`.
+    impl TryFrom<AllowitValue> for Vec<Address> {
+        /// A value of another type.
+        type Error = AllowitError;
+        /// The addresses of a `List` of `Addr`.
+        fn try_from(value: AllowitValue) -> Result<Self> {
+            match value {
+                AllowitValue::List(items) => items.into_iter().map(Address::try_from).collect(),
+                _ => Err(AllowitError::InvalidParam),
+            }
+        }
     }
 
     /// Run `check` on each value of `map`. A key that no Soroban map could hold is `InvalidParam`.

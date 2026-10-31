@@ -78,15 +78,15 @@ code through an allowlist, not a list of known hazards. Every identifier must be
   `bool` and `Ordering` methods that take and return no pointer-width value, such as `is_some`,
   `unwrap_or`, `checked_add`, `saturating_sub`, `min` and `max`, and `get` on `params` and `args`
   only;
-- a listed path: the `allowit` rules, `param`, `get_state`, `set_state`, the canonical key
+- a listed path: the `allowit` rules, `param`, `arg`, `get_state`, `set_state`, the canonical key
   constants, the server-only functions and their request types, the `AllowitOperation`,
   `AllowitError`, `AllowitRule` and `AllowitValue` variants, `Option` and `Result` variants,
   `MAX`, `MIN`, `from` and `try_from` of the fixed-width integers, and `core::cmp::{min, max,
   Ordering}`;
 - a listed type (`AllowitContext`, `AllowitError`, `AllowitOperation`, `AllowitRequest`,
-  `AllowitRule`, `AllowitValue`, `Address`, `Result`, `Option`, `DAY` and the variants `Some`,
-  `None`, `Ok`, `Err`), a canonical key constant, a server request type, a constant the file
-  defines or an `allowit` type it imports;
+  `AllowitRule`, `AllowitValue`, `Address`, `Result`, `String`, `Vec`, `Option`, `DAY` and the
+  variants `Some`, `None`, `Ok`, `Err`), a canonical key constant, a server request type, a
+  constant the file defines or an `allowit` type it imports;
 - a field name of a server request struct expression, such as `query:`;
 - a lowercase name the file declares: a function or constant name, a function parameter, or a
   `let`, `for` or match-arm binding;
@@ -108,6 +108,8 @@ Beside the allowlist, the tooling rejects:
 - Every macro other than `assert!`, `assert_eq!`, `assert_ne!`, `panic!`, `matches!` and
   `unreachable!`. `core::arch::global_asm!` is safe code without `unsafe` that emits native code.
   Linked into the offchain evaluator, it could run before `main`, while the Soroban compile rejects it.
+- A macro message that is not one string literal. The message is optional; the format arguments
+  after it are ordinary checked code.
 - A string literal whose value holds a brace other than the placeholders `{}` and `{:?}` and the
   escapes `{{` and `}}`. The allowed macros read their message as a format string, and a width or
   precision count, such as `{:1$}`, `{:.*}` or `{:a$}`, is a `usize`: it makes an unsuffixed
@@ -124,8 +126,8 @@ Beside the allowlist, the tooling rejects:
   name: on a list or a string, `get` would take a pointer-width index on the host. A struct expression or pattern of
   `AllowitContext`, which would reach `state`, and struct update syntax `..` reject. Soroban and
   heap vectors have different methods with the same names, for example `append` drains its argument
-  only on the host, so a list from `AllowitValue::List` admits only comparison, `clone`, matching
-  and `for`.
+  only on the host, so a list from `AllowitValue::List`, and a `Vec` or `String` that `param` or
+  `arg` returns, admits only comparison, `clone`, matching and `for`.
 - Indexing (`x[i]`), whose index Rust infers as `usize`.
 
 `scripts/policy_source.py` implements these checks; `check-policy-bindings.py` and the owner packet
@@ -170,9 +172,10 @@ returns, and deep recursion overflows the stack, which aborts the whole process 
 cannot catch a stack overflow. For Simple and Common wallets, the host run is the only evaluation
 of the full policy. The offchain server must therefore evaluate each policy in an isolated worker
 process with CPU-time, wall-clock, stack and memory limits. A timeout, crash, abort or panic of the
-worker counts as a denial. The worker must build with `panic = "unwind"` if it catches panics in
-process; otherwise the process boundary turns every panic into a denial. One owner's policy must
-not be able to stop or slow evaluations for other wallets.
+worker counts as a denial. `allowit::evaluate` catches a policy panic in process with
+`catch_unwind`, which needs `panic = "unwind"`; with `panic = "abort"` the process boundary turns
+the panic into a denial. One owner's policy must not be able to stop or slow evaluations for other
+wallets.
 
 `allowit` has two backends that share one rule implementation. Feature `soroban` (default) uses
 Soroban `Address`, `Vec`, `Map`, `Env` and contract types. Feature `std` uses heap strings, maps
@@ -247,8 +250,12 @@ Rules are checks: `allowit::<rule>(ctx, Option<AllowitValue>) -> allowit::Result
 the value, then returns only its passing constraint, or an `allowit::AllowitError`. An unset param is
 `MissingParam`; a value of the wrong type or range is `InvalidParam`. Policy code calls rules
 unguarded, so an unset param denies. A rule error that the policy catches denies nothing: the
-policy decides. Custom keys reach policy as `ctx.params.get("vendor_cap")` or as
-`allowit::param(ctx, "vendor_cap")`, which returns the value or `MissingParam`.
+policy decides. Custom keys reach policy as `ctx.params.get("vendor_cap")` or as a typed read
+`let cap: i128 = allowit::param(ctx, "vendor_cap");`, and agent args as
+`let amount: i128 = allowit::arg(ctx, "amount");`. A typed read returns the type of its binding:
+`i128`, `u64`, `u32`, `bool`, `Address`, `String`, `Vec<AllowitValue>`, `Vec<Address>` or
+`AllowitValue`. It panics when the key is unset or the value has another type or range: the
+run denies and its writes are discarded.
 
 The owner sets params at install and changes them with `deploy_policy`, without code redeployment.
 The canonical keys are `allowit::TRANSACTION_CAP`, `SPENT_CAP`, `DAY_SPENT_CAP`, `DAY_TOTAL_CAP`,
@@ -386,8 +393,9 @@ read the same current state and only `post_flight` charges, so a rule cannot cha
 
 Rule denials, including `OperationNotAllowed`, map to `PolicyDenied`. `MissingParam` and
 `InvalidParam` map to `InvalidParam`. `InvalidState` maps to `InvalidState`, `Overflow` to
-`Overflow` and `Unsupported` to `UnsupportedOperation`. A failed call rolls back its events, so
-only the host evaluator and the shared engine return the specific rule error.
+`Overflow` and `Unsupported` to `UnsupportedOperation`. `Panicked` arises only on the host. A
+failed call rolls back its events, so only the host evaluator and the shared engine return the
+specific rule error.
 
 `AllowitState.policy_state` records every delegated success independently of selected or unset
 rules. With cost bounds it records conservative expenses and gas. Without them it records raw gross

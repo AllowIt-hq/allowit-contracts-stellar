@@ -807,7 +807,8 @@ class ContractAdmin(unittest.TestCase):
             "fn g(ctx: &AllowitContext) { for _ in ctx.request.args . 0.clone() {} }\n",
             "fn g(ctx: &AllowitContext) { let p = allowit::AllowitParams(ctx.request.args.clone().0); let _ = p; }\n",
             "fn g(ctx: &AllowitContext) -> bool { matches!(ctx.params.get(\"k\"), Some(AllowitValue::List(v)) if v.get(0).is_some()) }\n",
-            "fn g(ctx: &AllowitContext) -> bool { matches!(allowit::param(ctx, \"k\"), Ok(AllowitValue::Str(v)) if v.len() > 1) }\n",
+            "fn g(ctx: &AllowitContext) -> bool { matches!(allowit::param::<AllowitValue>(ctx, \"k\"), AllowitValue::Str(v) if v.len() > 1) }\n",
+            "fn g(ctx: &AllowitContext) -> bool { let v: Vec<Address> = allowit::param(ctx, \"k\"); v.len() > 1 }\n",
             "fn g(ctx: &AllowitContext) -> bool { ctx.params.get(\"k\").map(AllowitValue::List).is_some() }\n",
             "use allowit::recipients;\nfn g(ctx: &AllowitContext) { let _ = recipients(ctx, ctx.params.get(allowit::RECIPIENTS)); }\n",
             "fn g(ctx: &AllowitContext) { let AllowitContext { state, .. } = ctx.clone(); let _ = state; }\n",
@@ -844,8 +845,10 @@ class ContractAdmin(unittest.TestCase):
                    "fn d(c: &AllowitContext) -> &AllowitContext { c }\n"
                    "use allowit::AllowitRule;\nfn e(r: AllowitRule) -> bool { r == AllowitRule::tokens || r == allowit::AllowitRule::recipients }\n"
                    "fn f(ctx: &AllowitContext) -> allowit::Result { let c = ctx.clone(); allowit::tokens(&c, c.params.get(allowit::TOKENS))?; Ok(()) }\n"
-                   "fn vendor_cap_of(c: &AllowitContext) -> allowit::Result<i128> { allowit::recipients(c, c.params.get(allowit::TOKENS))?; match allowit::param(c, \"vendor_cap\")? "
+                   "fn vendor_cap_of(c: &AllowitContext) -> allowit::Result<i128> { allowit::recipients(c, c.params.get(allowit::TOKENS))?; match allowit::param(c, \"vendor_cap\") "
                    "{ AllowitValue::Int(cap) => Ok(cap), AllowitValue::List(items) => { let mut n = 0i128; for _ in items { n += 1; } Ok(n) } _ => Err(AllowitError::InvalidParam) } }\n"
+                   "fn typed(c: &AllowitContext) -> bool { let v: Vec<Address> = allowit::param(c, \"vendors\"); let memo: String = allowit::arg(c, \"memo\"); "
+                   "let n: u32 = allowit::arg(c, \"n\"); for vendor in v { if vendor == c.request.recipient { return memo == memo.clone() && n > 0u32; } } false }\n"
                    "fn ask(c: &AllowitContext) -> allowit::Result<u32> { allowit::systemone(c, &allowit::AllowitSystemOne { id: \"a\", query: \"b\", deny_below: 1u32, allow_above: 2u32 }) }\n"
                    "fn h(pair: [u8; 2]) -> u64 { let [x, y] = pair; u64::from(x) + u64::from(y) }\n"
                    "fn i(c: &AllowitContext) -> u64 { let held = &c.env; let _ = held; let mut n = 0u64; for x in 0..3u64 { n = n.max(x + c.request.now); } n }\n"
@@ -857,6 +860,39 @@ class ContractAdmin(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.rs"
             policy.write_text(allowed + source("", head))
+            ca.host_compile(policy)
+
+    def test_policy_source_admits_literal_panic_messages_and_the_documented_per_op_policy(self):
+        head = HEAD + CALL("recipients")
+        # A message is optional; when present it is one string literal, followed by format arguments.
+        for body in ('    panic!();\n', '    panic!("swap above swap_cap");\n', '    unreachable!("op {}", ctx.request.amount);\n',
+                     '    assert!(ctx.request.amount > 0i128);\n', '    assert!(ctx.request.amount > 0i128, "amount {:?}", ctx.request.amount,);\n',
+                     '    assert_eq!(ctx.request.amount, 1i128, "one");\n', '    assert_ne!(ctx.request.now, 0u64);\n'):
+            with self.subTest(body=body):
+                self.assertEqual(ca.standard_prefix(source(body, head)), ["recipients"])
+        for body in ('    let m = "x";\n    panic!(m);\n', '    panic!(ctx.request.amount);\n',
+                     '    assert!(ctx.request.unpriced, ctx.request.amount);\n', '    unreachable!(r#panic());\n',
+                     '    assert_eq!(ctx.request.amount, 1i128, ctx.request.now);\n', '    assert_ne!(1u8, 2u8, ("x"));\n'):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "string literal"):
+                ca.standard_prefix(source(body, head))
+        pool = "custom:" + StrKey.encode_contract(bytes([3]) * 32)
+        documented = (HEAD.replace("allowit::Result {\n", "allowit::Result {\n")
+                      + "    match allowit::operations(ctx, ctx.params.get(allowit::OPERATIONS))? {\n"
+                      + '        "' + pool + '.swap" => {\n'
+                      + '            // "at most 50 XLM per swap"\n'
+                      + '            let amount: i128 = allowit::arg(ctx, "amount");\n'
+                      + '            let cap: i128 = allowit::param(ctx, "swap_cap");\n'
+                      + '            if amount > cap { panic!("swap above swap_cap"); }\n'
+                      + "        }\n"
+                      + '        "' + pool + '.claim" => {}\n'
+                      + "        _ => {}\n    }\n    Ok(())\n}\n")
+        self.assertEqual(ca.standard_prefix(documented), [])
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            policy.write_text(documented)
+            ca.host_compile(policy)
+            # The standard prefix statement compiles too.
+            policy.write_text(source(CALL("operations")))
             ca.host_compile(policy)
 
     def test_policy_source_rejects_pointer_width_and_address_probes(self):
