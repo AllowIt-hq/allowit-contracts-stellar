@@ -166,7 +166,8 @@ mod types {
             Unsupported = 114,
             /// The operation is not in `operations`.
             OperationNotAllowed = 115,
-            /// The policy panicked on the host evaluator. Onchain a panic aborts the call instead.
+            /// The host evaluator returns it for a caught panic. A policy may also return it.
+            /// Onchain a panic aborts the call instead.
             Panicked = 116,
         }
     }

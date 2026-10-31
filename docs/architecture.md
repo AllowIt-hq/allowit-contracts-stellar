@@ -394,7 +394,8 @@ read the same current state and only `post_flight` charges, so a rule cannot cha
 
 Rule denials, including `OperationNotAllowed`, map to `PolicyDenied`. `MissingParam` and
 `InvalidParam` map to `InvalidParam`. `InvalidState` maps to `InvalidState`, `Overflow` to
-`Overflow` and `Unsupported` to `UnsupportedOperation`. `Panicked` arises only on the host. A
+`Overflow` and `Unsupported` to `UnsupportedOperation`. The host evaluator returns `Panicked` for a
+caught panic. A policy may also return it; onchain it then maps to `PolicyDenied`. A
 failed call rolls back its events, so only the host evaluator and the shared engine return the
 specific rule error.
 
