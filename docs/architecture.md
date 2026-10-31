@@ -207,8 +207,8 @@ custom param with `InvalidParam`.
 Separate tests check that every tier stores exactly the state that the server's `evaluate`
 returned, and that execution params reach the Custom policy, fail authorization when changed after
 signing, reject beyond their bounds and leave the standard tiers unaffected. Vectors that the
-kernel cannot produce, such as a deposit into the transfer-only custom contract, a negative cap or
-more than 16 args, run only on the two backends. Kernel violations
+kernel cannot produce, such as a deposit into the transfer-only custom contract, a negative cap, an
+invalid `operations` value or more than 16 args, run only on the two backends. Kernel violations
 (another asset, payment to the wallet, request expiry, stale nonce, replay and pause) reject with the
 same kernel error in every contract.
 
@@ -252,19 +252,21 @@ policy decides. Custom keys reach policy as `ctx.params.get("vendor_cap")` or as
 
 The owner sets params at install and changes them with `deploy_policy`, without code redeployment.
 The canonical keys are `allowit::TRANSACTION_CAP`, `SPENT_CAP`, `DAY_SPENT_CAP`, `DAY_TOTAL_CAP`,
-`CALL_CAP`, `RECIPIENTS`, `TOKENS` and `EXPIRY`, each the name of its rule.
+`CALL_CAP`, `RECIPIENTS`, `TOKENS`, `EXPIRY` and `OPERATIONS`, each the name of its rule.
 `allowit::check_params` checks every owner write. Simple and Common admit only the canonical keys,
 each with the type its rule decodes: a nonnegative `Int` cap, an `Int` in the `u64` range for
-`call_cap` and `expiry`, and a `List` of `Addr` for `recipients` and `tokens`. Custom admits up to
-32 keys, whose meaning its policy defines. Every value holds at most 64 nested values, and every
-text at most 256 bytes. Nothing checks that a rule reads its own key.
+`call_cap` and `expiry`, a `List` of `Addr` for `recipients` and `tokens`, and `Str` `*` or a
+`List` of `Str` op names for `operations`. Custom admits up to 32 keys, whose meaning its policy
+defines. Every value holds at most 64 nested values, and every text at most 256 bytes. Nothing
+checks that a rule reads its own key.
 
 Params, args and state also have byte budgets: `MAX_PARAM_BYTES`, `MAX_ARG_BYTES` and
 `MAX_STATE_BYTES`, 16 KiB each. Both backends count a map's encoded size the same way: 40 bytes per
 key, 80 per value and each text padded to four bytes. This count is at least the XDR size. The
 wallet stores params and policy state in its one instance entry, so the two budgets keep that
-entry far below the network's contract data entry limit, 64 KiB in current settings. Every
-standard params map fits its budget.
+entry far below the network's contract data entry limit, 64 KiB in current settings. Full
+allowlists fit beside every other canonical param and 28 `operations` entries of the longest form;
+a larger standard map is `InvalidParam`.
 
 The agent supplies execution params per call in `AllowitExecutionRequest.args`, at most 16 keys
 with the same key and value bounds. An empty key, which a Soroban `Symbol` can hold, is
@@ -345,6 +347,7 @@ compile, because the Soroban backend has none of them.
 | `recipients` | `List` of `Addr`: permitted destinations, including vaults; empty denies | Matched recipient |
 | `tokens` | `List` of `Addr`: exact permitted SAC identities; empty denies | Matched asset |
 | `expiry` | `Int` in the `u64` range: exclusive Unix timestamp; request expiry cannot exceed it | `expiry - now` |
+| `operations` | `Str` `*` for every op, or `List` of `Str` op names; empty denies | The request's op name |
 
 `today_spent` and `today_total` are the daily values when `state.day == now / 86400`, and zero for
 an earlier day. A later day is `InvalidState`. Each rule checks only the facts it reads. A negative
@@ -352,6 +355,15 @@ cap is `InvalidParam`, as are a nonpositive `transaction_cap` amount and negativ
 unpriced request denies `spent_cap`; unpriced state of the day or an unpriced request denies both
 daily caps (`Unpriced`). A sum outside its integer range is `Overflow`. Standard configuration
 rejects negative caps.
+
+The op names are `transfer`, `swap`, `deposit` and `redeem`, plus three custom-call forms:
+`custom` admits any custom call, `custom.<function>` that function on any contract, and
+`custom:<contract>.<function>` that function on that contract instance. A function is 1 to 32
+ASCII letters, digits or underscores, and a contract a `C` StrKey. The native operations map to
+`transfer` (SEP-41 transfer) and `deposit` (SEP-56 deposit). `operations` returns the request's op
+name, so a policy can `match` it; an op outside the list is `OperationNotAllowed`. Any other value,
+such as `Str` `transfer` or an unknown name, is `InvalidParam`. Even transfers need the param: a
+policy that should only swap or run custom code leaves `transfer` out.
 
 ## Standard prefix
 
@@ -372,10 +384,10 @@ with `deploy_policy` without code redeployment. `scripts/contract_admin.py` warn
 rejecting the packet. The preflight runner propagates the first rule error. Repeated rules
 read the same current state and only `post_flight` charges, so a rule cannot charge twice.
 
-Rule denials map to `PolicyDenied`. `MissingParam` and `InvalidParam` map to `InvalidParam`.
-`InvalidState` maps to `InvalidState`, `Overflow` to `Overflow` and `Unsupported` to
-`UnsupportedOperation`. A failed call rolls back its events, so only the host
-evaluator and the shared engine return the specific rule error.
+Rule denials, including `OperationNotAllowed`, map to `PolicyDenied`. `MissingParam` and
+`InvalidParam` map to `InvalidParam`. `InvalidState` maps to `InvalidState`, `Overflow` to
+`Overflow` and `Unsupported` to `UnsupportedOperation`. A failed call rolls back its events, so
+only the host evaluator and the shared engine return the specific rule error.
 
 `AllowitState.policy_state` records every delegated success independently of selected or unset
 rules. With cost bounds it records conservative expenses and gas. Without them it records raw gross

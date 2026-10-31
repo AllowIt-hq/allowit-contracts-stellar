@@ -47,10 +47,10 @@ mod vectors {
     use super::std::{self, format, string::String, vec, vec::Vec};
     include!("../../../scripts/policy-vectors.rs");
 }
-use vectors::{Outcome, Vector};
+use vectors::{Ops, Outcome, Vector};
 
 /// Every rule error, indexed by its code minus one.
-const ERRORS: [AllowitError; 14] = [
+const ERRORS: [AllowitError; 15] = [
     AllowitError::MissingParam,
     AllowitError::TransactionCapExceeded,
     AllowitError::SpentCapExceeded,
@@ -65,6 +65,7 @@ const ERRORS: [AllowitError; 14] = [
     AllowitError::InvalidState,
     AllowitError::Overflow,
     AllowitError::Unsupported,
+    AllowitError::OperationNotAllowed,
 ];
 /// The wallet error of a rule error code.
 fn wallet_error(code: u32) -> u32 {
@@ -141,6 +142,20 @@ fn list(env: &Env, universe: &[Address], items: &Option<List<usize>>) -> Option<
     }
     Some(AllowitValue::List(out))
 }
+/// The `operations` value of `ops`.
+fn operations(env: &Env, ops: &Ops) -> AllowitValue {
+    let text = |name: &str| AllowitValue::Str(soroban_sdk::String::from_str(env, name));
+    match ops {
+        Ops::Text(name) => text(name),
+        Ops::List(names) => {
+            let mut out = Vec::new(env);
+            for name in names {
+                out.push_back(text(name));
+            }
+            AllowitValue::List(out)
+        }
+    }
+}
 /// A key => value map of `entries`, without the absent ones.
 fn map(env: &Env, entries: &[(&str, Option<AllowitValue>)]) -> Map<Symbol, AllowitValue> {
     let mut out = Map::new(env);
@@ -165,6 +180,10 @@ fn params(env: &Env, universe: &[Address], v: &Vector) -> Map<Symbol, AllowitVal
             (allowit::RECIPIENTS, list(env, universe, &v.recipients)),
             (allowit::TOKENS, list(env, universe, &v.tokens)),
             (allowit::EXPIRY, v.expiry.map(AllowitValue::from)),
+            (
+                allowit::OPERATIONS,
+                v.operations.as_ref().map(|ops| operations(env, ops)),
+            ),
             (vectors::INVOICE_CAP, int(v.invoice_cap)),
         ],
     )
@@ -279,6 +298,7 @@ fn soroban_outcome(env: &Env, contract: &Address, universe: &[Address], v: &Vect
             allowit::recipients(&c, p(allowit::RECIPIENTS)).map(index),
             allowit::tokens(&c, p(allowit::TOKENS)).map(index),
             allowit::expiry(&c, p(allowit::EXPIRY)).map(|v| v.to_string()),
+            allowit::operations(&c, p(allowit::OPERATIONS)).map(|v| v.to_string()),
         ]
         .into_iter()
         .map(|r| r.map_err(code))
@@ -329,9 +349,23 @@ fn sample_prefix() -> List<AllowitRule> {
     rules
 }
 
+/// Whether every tier's owner configuration admits an `operations` value: `*` or a list of op names.
+fn operations_valid(ops: &Ops) -> bool {
+    let name = |name: &&str| {
+        ["transfer", "swap", "deposit", "redeem", "custom"].contains(name)
+            || name.starts_with("custom.")
+            || name.starts_with("custom:")
+    };
+    match ops {
+        Ops::Text(text) => *text == "*",
+        Ops::List(names) => names.iter().all(name),
+    }
+}
+
 /// Whether the kernel and owner configuration can produce the vector: a transfer of the installed
 /// asset whose expense bounds, when priced, attest principal plus gas, with args that the kernel
-/// admits. The kernel rejects more args with `InvalidInvocation` before any policy runs.
+/// admits and params that every tier admits. The kernel rejects more args with
+/// `InvalidInvocation` before any policy runs.
 fn realizable(v: &Vector) -> bool {
     let cost = if v.priced {
         v.gas_units >= 0 && v.spent_units == v.amount + v.gas_units
@@ -345,6 +379,7 @@ fn realizable(v: &Vector) -> bool {
         && v.expires_at > v.now
         && cost
         && v.caps.iter().flatten().all(|cap| *cap >= 0)
+        && v.operations.as_ref().is_none_or(operations_valid)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -557,7 +592,8 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
             || v.call_cap.is_none()
             || v.recipients.is_none()
             || v.tokens.is_none()
-            || v.expiry.is_none();
+            || v.expiry.is_none()
+            || v.operations.is_none();
         if !unset && v.invoice_cap.is_none() {
             assert_eq!(expected(Tier::Common), expected(Tier::Custom), "{}", v.name);
         }
@@ -585,7 +621,7 @@ fn one_vector_set_has_matching_outcomes_on_host_custom_standard_and_simple() {
             }
         }
     }
-    assert_eq!(realized, 43);
+    assert_eq!(realized, 48);
     // The deployed catching Wasm let these continue after a caught rule error and wrote its key.
     for name in ["over_day_spent_cap", "over_day_spent_cap_counted_once"] {
         assert!(caught.contains(&name), "{name} {caught:?}");

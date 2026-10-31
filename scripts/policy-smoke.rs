@@ -16,7 +16,7 @@ use allowit::{
     AllowitEnv, AllowitMap, AllowitParams, AllowitRule, AllowitStandardState, AllowitTier, DAY,
     RULES,
 };
-use vectors::{Outcome, Vector};
+use vectors::{Ops, Outcome, Vector};
 
 const NOW: u64 = 3 * DAY + 10;
 /// The state map of standard values `s`.
@@ -49,6 +49,14 @@ fn list(items: Vec<Address>) -> AllowitValue {
 fn int(n: impl Into<i128>) -> Option<AllowitValue> {
     Some(AllowitValue::Int(n.into()))
 }
+/// The `operations` value of `ops`.
+fn operations(ops: &Ops) -> AllowitValue {
+    let text = |name: &str| AllowitValue::Str(name.to_string());
+    match ops {
+        Ops::Text(name) => text(name),
+        Ops::List(names) => AllowitValue::List(names.iter().map(|name| text(name)).collect()),
+    }
+}
 /// Current state before a 10-unit priced transfer that passes every rule with exact headroom.
 fn context() -> AllowitContext {
     let recipient = Address::new("GRECIPIENT");
@@ -64,6 +72,10 @@ fn context() -> AllowitContext {
             (allowit::RECIPIENTS, Some(list(vec![recipient.clone()]))),
             (allowit::TOKENS, Some(list(vec![asset.clone()]))),
             (allowit::EXPIRY, int(NOW + 100)),
+            (
+                allowit::OPERATIONS,
+                Some(operations(&Ops::List(vec!["transfer"]))),
+            ),
         ]),
         state: map(&AllowitStandardState {
             calls: 1,
@@ -346,6 +358,7 @@ fn host_context(v: &Vector) -> AllowitContext {
             (allowit::RECIPIENTS, addresses(&v.recipients)),
             (allowit::TOKENS, addresses(&v.tokens)),
             (allowit::EXPIRY, v.expiry.map(AllowitValue::from)),
+            (allowit::OPERATIONS, v.operations.as_ref().map(operations)),
             (vectors::INVOICE_CAP, v.invoice_cap.map(AllowitValue::Int)),
         ]),
         state,
@@ -418,6 +431,7 @@ fn host_outcome(v: &Vector) -> Outcome {
             allowit::recipients(&c, p(allowit::RECIPIENTS)).map(index),
             allowit::tokens(&c, p(allowit::TOKENS)).map(index),
             allowit::expiry(&c, p(allowit::EXPIRY)).map(|v| v.to_string()),
+            allowit::operations(&c, p(allowit::OPERATIONS)).map(|v| v.to_string()),
         ]
         .into_iter()
         .map(|r| r.map_err(code))
@@ -444,7 +458,7 @@ fn vectors_print_host_outcomes() {
     }
     let base = host_outcome(&all[0]);
     assert_eq!(base.policy, Ok(()));
-    assert_eq!(base.preflight, vec![Ok(()); 8]);
+    assert_eq!(base.preflight, vec![Ok(()); 9]);
     assert_eq!(base.next, Ok("1/45/false/2/45/43/false/-".to_string()));
     assert_eq!(base.catching_standard, base.next);
     assert_eq!((&base.common, &base.simple), (&base.next, &base.next));
@@ -465,4 +479,16 @@ fn vectors_print_host_outcomes() {
     assert!(few.next.is_ok());
     assert_eq!(few.simple, Err(invalid_param as u32));
     assert_eq!(few.catching_standard, Err(invalid_param as u32));
+    // A policy that allows only deposits denies a transfer and admits a deposit.
+    let not_allowed = Err(AllowitError::OperationNotAllowed as u32);
+    let only_deposits = named("only_deposits");
+    assert_eq!(only_deposits.policy, not_allowed);
+    assert_eq!(only_deposits.common.map(drop), not_allowed);
+    assert_eq!(named("deposit_only_deposits").policy, Ok(()));
+    assert_eq!(named("any_operation").policy, Ok(()));
+    assert_eq!(named("custom_calls_only").policy, not_allowed);
+    assert_eq!(named("empty_operations").policy, not_allowed);
+    for name in ["operations_not_a_list", "unknown_operation"] {
+        assert_eq!(named(name).rules[8], Err(invalid_param as u32), "{name}");
+    }
 }

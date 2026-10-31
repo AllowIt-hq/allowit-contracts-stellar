@@ -1,8 +1,8 @@
 // Shared types and rules, included once per backend. The including module supplies `Address`,
 // `AllowitEnv`, `Map`, `String`, `Symbol` and `Vec`, the type macros `value!`, `error!` and
-// `params!`, and the map primitives `lookup`, `insert`, `count`, `text_len`, `each_value`,
-// `each_item`, `record`, `take_writes` and `merge`. Field types keep those names so Soroban
-// contract specs name native types.
+// `params!`, and the map primitives `lookup`, `insert`, `count`, `text_len`, `text_bytes`,
+// `each_value`, `each_item`, `record`, `take_writes` and `merge`. Field types keep those names so
+// Soroban contract specs name native types.
 
 /// UTC day length in seconds.
 pub const DAY: u64 = 86_400;
@@ -100,6 +100,8 @@ mod types {
             tokens,
             /// `expiry`: exclusive Unix timestamp of the params.
             expiry,
+            /// `operations`: permitted op names.
+            operations,
         }
     }
 
@@ -161,6 +163,8 @@ mod types {
             /// A server-only function this evaluator does not provide, or a policy write that a
             /// standard wallet cannot store.
             Unsupported = 14,
+            /// The operation is not in `operations`.
+            OperationNotAllowed = 15,
         }
     }
 }
@@ -197,6 +201,8 @@ pub const RECIPIENTS: &str = "recipients";
 pub const TOKENS: &str = "tokens";
 /// Canonical param key of `expiry`: `Int` in the `u64` range.
 pub const EXPIRY: &str = "expiry";
+/// Canonical param key of `operations`: `Str` `*`, or a `List` of `Str` op names.
+pub const OPERATIONS: &str = "operations";
 
 // Bounds of params, args and state values. The byte budgets bound a map's encoded size by
 // `KEY_BYTES` per key plus `VALUE_BYTES` per value plus each text padded to four bytes, which is
@@ -219,7 +225,8 @@ pub const KEY_BYTES: u32 = 40;
 /// Encoded-size bound of one value besides its text: the variant tag and the largest scalar, an
 /// account `Addr`.
 pub const VALUE_BYTES: u32 = 80;
-/// Most encoded bytes of stored params. Every standard params map fits.
+/// Most encoded bytes of stored params. Full allowlists fit beside the other canonical params and
+/// 28 `operations` entries of the longest form.
 pub const MAX_PARAM_BYTES: u32 = 16 * 1024;
 /// Most encoded bytes of one request's args.
 pub const MAX_ARG_BYTES: u32 = 16 * 1024;
@@ -243,7 +250,7 @@ pub const UNPRICED: &str = "unpriced";
 pub const DAY_UNPRICED: &str = "day_unpriced";
 
 /// Every canonical rule, in param key order.
-pub const RULES: [AllowitRule; 8] = [
+pub const RULES: [AllowitRule; 9] = [
     AllowitRule::transaction_cap,
     AllowitRule::spent_cap,
     AllowitRule::day_spent_cap,
@@ -252,6 +259,7 @@ pub const RULES: [AllowitRule; 8] = [
     AllowitRule::recipients,
     AllowitRule::tokens,
     AllowitRule::expiry,
+    AllowitRule::operations,
 ];
 
 /// Param keys of the canonical rules.
@@ -267,6 +275,7 @@ impl AllowitRule {
             AllowitRule::recipients => RECIPIENTS,
             AllowitRule::tokens => TOKENS,
             AllowitRule::expiry => EXPIRY,
+            AllowitRule::operations => OPERATIONS,
         }
     }
 }
@@ -360,7 +369,13 @@ impl AllowitStandardState {
 
 /// A key is 1 to 32 ASCII letters, digits or underscores, as a Soroban `Symbol` requires.
 fn key_ok(key: &str) -> bool {
-    (1..=32).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    symbol_ok(key.as_bytes())
+}
+
+/// Whether `name` is 1 to 32 ASCII letters, digits or underscores: a `Symbol` such as a key or a
+/// contract function name.
+fn symbol_ok(name: &[u8]) -> bool {
+    (1..=32).contains(&name.len()) && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 /// The typed value of state `key`, or `None`. An invalid key is `InvalidParam`; a value of
@@ -451,6 +466,7 @@ fn canonical_value(rule: AllowitRule, value: AllowitValue) -> Result {
     match rule {
         AllowitRule::call_cap | AllowitRule::expiry => int::<u64>(value).map(|_| ()),
         AllowitRule::recipients | AllowitRule::tokens => each_address(value, |_| ()),
+        AllowitRule::operations => each_op(value, |_| ()),
         _ => cap(value).map(|_| ()),
     }
 }
@@ -502,6 +518,73 @@ fn allowed(value: Option<AllowitValue>, wanted: &Address, denied: AllowitError) 
         Ok(wanted.clone())
     } else {
         Err(denied)
+    }
+}
+
+/// Op names of `operations` besides the forms `custom.<function>` and
+/// `custom:<contract>.<function>`.
+const OPERATION_NAMES: [&[u8]; 5] = [b"transfer", b"swap", b"deposit", b"redeem", b"custom"];
+
+/// The op name of the request's native operation.
+fn operation_name(request: &AllowitRequest) -> &'static str {
+    match request.operation {
+        AllowitOperation::sep41_transfer => "transfer",
+        AllowitOperation::sep56_deposit => "deposit",
+    }
+}
+
+/// Whether `name` is an op name: one of `OPERATION_NAMES`, `custom.<function>` or
+/// `custom:<contract>.<function>`, where a function is a `Symbol` and a contract a `C` StrKey.
+pub(crate) fn op_name_ok(name: &[u8]) -> bool {
+    if let Some(function) = name.strip_prefix(b"custom.") {
+        return symbol_ok(function);
+    }
+    match name
+        .strip_prefix(b"custom:")
+        .and_then(|call| call.split_at_checked(56))
+    {
+        Some((contract, function)) => {
+            contract[0] == b'C'
+                && contract
+                    .iter()
+                    .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(b))
+                && function.strip_prefix(b".").is_some_and(symbol_ok)
+        }
+        None => OPERATION_NAMES.contains(&name),
+    }
+}
+
+/// Whether allowed entry `entry` admits op `op`: `*` admits every op, `custom` every custom call,
+/// `custom.<function>` that function on any contract, and any other entry only itself.
+pub(crate) fn admits(entry: &[u8], op: &[u8]) -> bool {
+    let function = op
+        .strip_prefix(b"custom:")
+        .and_then(|call| call.rsplit(|b| *b == b'.').next());
+    entry == b"*"
+        || entry == op
+        || function.is_some() && (entry == b"custom" || entry.strip_prefix(b"custom.") == function)
+}
+
+/// Run `seen` on each entry of a set `operations` value: `Str` `*`, or a `List` of `Str` op names.
+/// Any other value is `InvalidParam`.
+fn each_op(value: Option<AllowitValue>, mut seen: impl FnMut(&[u8])) -> Result {
+    let mut buf = [0; MAX_TEXT as usize];
+    match value.ok_or(AllowitError::MissingParam)? {
+        AllowitValue::Str(text) if text_bytes(&text, &mut buf) == Some(b"*".as_slice()) => {
+            seen(b"*");
+            Ok(())
+        }
+        AllowitValue::List(items) => each_item(&items, |item| match item {
+            AllowitValue::Str(text) => match text_bytes(&text, &mut buf) {
+                Some(name) if op_name_ok(name) => {
+                    seen(name);
+                    Ok(())
+                }
+                _ => Err(AllowitError::InvalidParam),
+            },
+            _ => Err(AllowitError::InvalidParam),
+        }),
+        _ => Err(AllowitError::InvalidParam),
     }
 }
 
@@ -662,6 +745,24 @@ pub fn expiry(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<u64> 
     }
 }
 
+/// Require the request's operation in the `operations` value in `value`. `Str` `*` admits every
+/// op. A `List` of `Str` op names admits `transfer`, `swap`, `deposit` or `redeem` by name,
+/// `custom` any custom call, `custom.<function>` that function on any contract and
+/// `custom:<contract>.<function>` that function on that contract. An empty list denies.
+///
+/// Returns the request's op name for a `match`: `"transfer"` for a SEP-41 transfer and
+/// `"deposit"` for a SEP-56 deposit.
+pub fn operations(ctx: &AllowitContext, value: Option<AllowitValue>) -> Result<&str> {
+    let op = operation_name(&ctx.request);
+    let mut found = false;
+    each_op(value, |entry| found |= admits(entry, op.as_bytes()))?;
+    if found {
+        Ok(op)
+    } else {
+        Err(AllowitError::OperationNotAllowed)
+    }
+}
+
 /// The value of owner param `key`, such as a custom `vendor_cap`. Unset is `MissingParam`.
 pub fn param(ctx: &AllowitContext, key: &str) -> Result<AllowitValue> {
     ctx.params.get(key).ok_or(AllowitError::MissingParam)
@@ -699,6 +800,7 @@ pub fn preflight(ctx: &AllowitContext, rule: AllowitRule) -> Result {
         AllowitRule::recipients => recipients(ctx, value).map(|_| ()),
         AllowitRule::tokens => tokens(ctx, value).map(|_| ()),
         AllowitRule::expiry => expiry(ctx, value).map(|_| ()),
+        AllowitRule::operations => operations(ctx, value).map(|_| ()),
     }
 }
 

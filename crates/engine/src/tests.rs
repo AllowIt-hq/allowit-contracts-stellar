@@ -42,6 +42,7 @@ fn fixture(env: &Env) -> AllowitContext {
         },
     };
     let int = |n: i128| Some(AllowitValue::Int(n));
+    let text = |op: &str| AllowitValue::Str(soroban_sdk::String::from_str(env, op));
     let list = |a: &Address| Some(AllowitValue::List(vec![env, AllowitValue::Addr(a.clone())]));
     for (key, value) in [
         (allowit::TRANSACTION_CAP, int(100)),
@@ -52,6 +53,10 @@ fn fixture(env: &Env) -> AllowitContext {
         (allowit::RECIPIENTS, list(&recipient)),
         (allowit::TOKENS, list(&asset)),
         (allowit::EXPIRY, int(1_000)),
+        (
+            allowit::OPERATIONS,
+            Some(AllowitValue::List(vec![env, text("transfer")])),
+        ),
     ] {
         set(&mut ctx, key, value);
     }
@@ -147,6 +152,17 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
                     (900, Ok(900))
                 );
             }
+            AllowitRule::operations => {
+                let v = allowit::operations(c, p(allowit::OPERATIONS));
+                let op = client.operations(&c.params.0, &c.state, &c.request);
+                assert_eq!(
+                    (op, v),
+                    (
+                        soroban_sdk::String::from_str(&env, "transfer"),
+                        Ok("transfer")
+                    )
+                );
+            }
         }
     }
     set(
@@ -162,6 +178,15 @@ fn compiled_engine_returns_bundled_pass_values_and_rule_errors() {
     assert_eq!(
         client.try_spent_cap(&ctx.params.0, &ctx.state, &ctx.request),
         Err(Ok(AllowitError::MissingParam))
+    );
+    let deposits = AllowitValue::List(vec![
+        &env,
+        AllowitValue::Str(soroban_sdk::String::from_str(&env, "deposit")),
+    ]);
+    set(&mut ctx, allowit::OPERATIONS, Some(deposits));
+    assert_eq!(
+        client.try_operations(&ctx.params.0, &ctx.state, &ctx.request),
+        Err(Ok(AllowitError::OperationNotAllowed))
     );
     // A failed rule reads and writes no more ledger entries than a passing one, so a failure at
     // apply time that simulation did not see stays within the simulated footprint.

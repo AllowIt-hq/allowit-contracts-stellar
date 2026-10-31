@@ -81,10 +81,11 @@ underscores. An absent key is unset. The tool infers each value's `AllowitValue`
 `Int`, a boolean `Bool`, a G or C address `Addr`, other text `Str` and a list `List`. A one-key
 object such as `{"Str": "GA..."}` names the type explicitly. A value holds at most 64 nested values,
 and a text at most 256 bytes. All params encode in at most 16 KiB, counted as the wallet counts
-them: 40 bytes per key, 80 per value and each text padded to four bytes. Every standard params map
-fits. Simple and Common admit only the canonical keys `transaction_cap`,
+them: 40 bytes per key, 80 per value and each text padded to four bytes. Full allowlists fit beside
+every other canonical param and 28 `operations` entries of the longest form. Simple and Common admit only the canonical keys `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`
-(unsigned 64-bit integers), `recipients` and `tokens` (address lists). Custom admits its policy's
+(unsigned 64-bit integers), `recipients` and `tokens` (address lists), and `operations` (`"*"` or
+a list of op names, such as `["transfer"]`). Custom admits its policy's
 own keys, such as `vendor_cap`. A Custom policy state holds at most 39 keys, the seven standard keys
 and 32 policy keys, and 16 KiB counted the same way. No call deletes a state key, and
 `deploy_policy` keeps the state, so a policy write past either bound denies every operation that

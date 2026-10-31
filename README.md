@@ -14,8 +14,10 @@ at install and changes them by signed update; the agent supplies args per call. 
 looked-up value, so it may read any key, and returns its passing constraint or an error. The offchain
 server and `AllowitCustomPolicy` compile the file verbatim. The standard contract runs only its
 leading canonical calls, supplied by the owner as `rules`, skips absent params and admits only the
-eight canonical keys. `scripts/contract_admin.py` derives `rules` from the source. Only an error
-that the policy returns denies; a caught error lets the policy continue. After approval the wallet
+nine canonical keys. `scripts/contract_admin.py` derives `rules` from the source. Only an error
+that the policy returns denies; a caught error lets the policy continue. `allowit::operations`
+admits only the op names in the owner's `operations` param and returns the op name for a `match`.
+After approval the wallet
 and the server run the same `allowit::post_flight`, which updates the standard state keys and
 applies the policy's `allowit::set_state` writes. Simple and Common never add or change a policy
 key, so their post-flight denies every policy write, on the server as onchain. Policy keys left by

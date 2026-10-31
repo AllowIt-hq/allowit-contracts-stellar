@@ -1,8 +1,8 @@
 extern crate std;
 use super::*;
 use allowit::{
-    AllowitStandardState, CALL_CAP, DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, RECIPIENTS, SPENT_CAP,
-    TOKENS, TRANSACTION_CAP,
+    AllowitStandardState, CALL_CAP, DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, OPERATIONS, RECIPIENTS,
+    SPENT_CAP, TOKENS, TRANSACTION_CAP,
 };
 use allowit_wallet_protocol::AllowitPolicyInvocation;
 use ed25519_dalek::{Signer, SigningKey};
@@ -31,6 +31,14 @@ pub(super) fn addresses(env: &Env, items: &[&Address]) -> AllowitValue {
     let mut list = Vec::new(env);
     for item in items {
         list.push_back(AllowitValue::Addr((*item).clone()));
+    }
+    AllowitValue::List(list)
+}
+/// A `List` of `Str` op names, an `operations` value.
+pub(super) fn op_names(env: &Env, names: &[&str]) -> AllowitValue {
+    let mut list = Vec::new(env);
+    for name in names {
+        list.push_back(AllowitValue::Str(String::from_str(env, name)));
     }
     AllowitValue::List(list)
 }
@@ -155,6 +163,7 @@ impl Fixture {
             (RECIPIENTS, addresses(&env, &[&recipient])),
             (TOKENS, addresses(&env, &[&asset])),
             (EXPIRY, AllowitValue::Int(1_000_000)),
+            (OPERATIONS, op_names(&env, &["transfer", "deposit"])),
         ] {
             params.set(Symbol::new(&env, key), value);
         }

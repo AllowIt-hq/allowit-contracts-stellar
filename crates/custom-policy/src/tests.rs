@@ -5,9 +5,10 @@ extern crate std;
 use super::*;
 use allowit::{
     AllowitOperation, AllowitParams, AllowitRequest, AllowitStandardState, AllowitValue, CALL_CAP,
-    DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, RECIPIENTS, SPENT_CAP, TOKENS, TRANSACTION_CAP,
+    DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, OPERATIONS, RECIPIENTS, SPENT_CAP, TOKENS,
+    TRANSACTION_CAP,
 };
-use soroban_sdk::{Address, Bytes, Map, Symbol, testutils::Address as _, vec};
+use soroban_sdk::{Address, Bytes, Map, String, Symbol, testutils::Address as _, vec};
 
 /// Set one param of `ctx`, or unset it with `None`.
 fn set(ctx: &mut AllowitContext, key: &str, value: Option<AllowitValue>) {
@@ -55,6 +56,10 @@ fn custom_runner_maps_the_policy_result() {
             AllowitValue::Addr(a.clone()),
         ]))
     };
+    let ops = |name: &str| {
+        let name = AllowitValue::Str(String::from_str(&env, name));
+        Some(AllowitValue::List(vec![&env, name]))
+    };
     for (key, value) in [
         (TRANSACTION_CAP, int(10)),
         (SPENT_CAP, int(15)),
@@ -64,6 +69,7 @@ fn custom_runner_maps_the_policy_result() {
         (RECIPIENTS, list(&recipient)),
         (TOKENS, list(&asset)),
         (EXPIRY, int(100)),
+        (OPERATIONS, ops("transfer")),
     ] {
         set(&mut ctx, key, value);
     }
@@ -80,6 +86,13 @@ fn custom_runner_maps_the_policy_result() {
     assert_eq!(
         AllowitCustom::check(&unset, &rules),
         Err(AllowitWalletError::InvalidParam)
+    );
+    // Only payments: a policy that allows only deposits denies this transfer.
+    let mut deposits = ctx.clone();
+    set(&mut deposits, OPERATIONS, ops("deposit"));
+    assert_eq!(
+        AllowitCustom::check(&deposits, &rules),
+        Err(AllowitWalletError::PolicyDenied)
     );
 }
 

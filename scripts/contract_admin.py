@@ -154,6 +154,9 @@ def wallet_layout(state):
 
 CAPS = {"transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap"}
 LISTS = {"recipients", "tokens"}
+# One `operations` entry, as `allowit` checks it: a plain op name, `custom.<function>` or
+# `custom:<contract>.<function>`.
+OPERATION = re.compile(r"transfer|swap|deposit|redeem|custom|custom\.[A-Za-z0-9_]{1,32}|custom:C[A-Z2-7]{55}\.[A-Za-z0-9_]{1,32}")
 # Bounds that the wallet contract enforces: `allowit::MAX_PARAMS`, `MAX_ITEMS`, `MAX_TEXT` and
 # `MAX_PARAM_BYTES`. A value's encoded size counts `VALUE_BYTES` per value plus each text padded to
 # four bytes, and each key `KEY_BYTES`. A Custom policy state also holds at most
@@ -205,9 +208,9 @@ def param_value(item, count):
 def params(value, tier=None):
     """Validate owner params and return their pinned CLI spec JSON, a key => AllowitValue object.
     Keys are 1 to 32 ASCII letters, digits or underscores, at most 32 of them. Simple and Common
-    admit only the 8 canonical keys, each with its rule's type: nonnegative caps, unsigned 64-bit
-    `call_cap` and `expiry`, and address lists. All params encode in at most MAX_PARAM_BYTES. An
-    absent key is unset."""
+    admit only the 9 canonical keys, each with its rule's type: nonnegative caps, unsigned 64-bit
+    `call_cap` and `expiry`, address lists, and `operations` as "*" or a list of op names. All params
+    encode in at most MAX_PARAM_BYTES. An absent key is unset."""
     standard = tier in ("simple", "common")
     limit = len(PARAM_KEYS) if standard else MAX_PARAMS
     if not isinstance(value, dict) or len(value) > limit:
@@ -228,6 +231,10 @@ def params(value, tier=None):
         if key in LISTS:
             if any("Addr" not in entry for entry in encoded.get("List", [{}])):
                 raise ValueError("Param " + key + " must be a list of addresses")
+        elif key == "operations":
+            names = [entry.get("Str", "") for entry in encoded.get("List", [{}])]
+            if encoded != {"Str": "*"} and not all(OPERATION.fullmatch(name) for name in names):
+                raise ValueError('Param operations must be "*" or a list of op names')
         elif not 0 <= int(encoded.get("Int", -1)) < 2**(127 if key in CAPS else 64):
             raise ValueError("Param " + key + " must be a nonnegative integer in its range")
     return result

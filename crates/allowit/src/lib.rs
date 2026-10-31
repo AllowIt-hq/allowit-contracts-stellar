@@ -25,7 +25,8 @@
 //! value of the wrong type or range is `InvalidParam`. Rules add the request's own contribution to
 //! the current values and return their passing constraint or an `AllowitError`. Only an error that
 //! the policy propagates with `?` ends the run. A policy may catch a rule error, read it and
-//! continue.
+//! continue. `operations` admits the request's op only when the owner's `operations` param names
+//! it, and returns the op name, such as `"transfer"`, for a `match`.
 //!
 //! After approval, the wallet and the server run the same `post_flight`: it rolls the UTC day
 //! over, counts the call, adds spent and gross amounts, marks unpriced operations, then applies
@@ -154,6 +155,13 @@ pub mod soroban {
     /// The byte length of a text value.
     fn text_len(text: &String) -> u32 {
         text.len()
+    }
+
+    /// The bytes of a text value, copied into `buf`, or `None` beyond `MAX_TEXT` bytes.
+    fn text_bytes<'a>(text: &'a String, buf: &'a mut [u8; MAX_TEXT as usize]) -> Option<&'a [u8]> {
+        let bytes = buf.get_mut(..text.len() as usize)?;
+        text.copy_into_slice(bytes);
+        Some(bytes)
     }
 
     /// Run `check` on each value of `map`. An empty key or a value that does not decode is
@@ -326,6 +334,11 @@ pub mod host {
     /// The byte length of a text value.
     fn text_len(text: &String) -> u32 {
         u32::try_from(text.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The bytes of a text value, or `None` beyond `MAX_TEXT` bytes.
+    fn text_bytes<'a>(text: &'a String, _buf: &'a mut [u8; MAX_TEXT as usize]) -> Option<&'a [u8]> {
+        (text.len() <= MAX_TEXT as usize).then_some(text.as_bytes())
     }
 
     /// Run `check` on each value of `map`. A key that no Soroban map could hold is `InvalidParam`.

@@ -211,6 +211,16 @@ class ContractAdmin(unittest.TestCase):
                         {"tokens": ["not-an-address"]}, {"recipients": [[KEYS[1]]]}):
             with self.subTest(params=invalid), self.assertRaises(ValueError):
                 ca.params(invalid, "common")
+        # `operations` is "*" or a list of op names, which may be empty.
+        pool = "custom:" + StrKey.encode_contract(bytes([3]) * 32)
+        for valid in ("*", [], ["transfer", "swap", "deposit", "redeem", "custom", "custom.swap", pool + ".claim"]):
+            with self.subTest(operations=valid):
+                ca.params({"operations": valid}, "common")
+        self.assertEqual(ca.params({"operations": ["deposit"]}, "simple"), {"operations": {"List": [{"Str": "deposit"}]}})
+        for invalid in ("transfer", ["*"], ["pay"], ["Transfer"], [1], [KEYS[1]], 0, ["custom."], ["custom.a-b"],
+                        [pool], [pool + "." + "f" * 33], ["custom:" + KEYS[1] + ".swap"]):
+            with self.subTest(operations=invalid), self.assertRaisesRegex(ValueError, "operations"):
+                ca.params({"operations": invalid}, "common")
         for invalid in ({"bad key": 1}, {"k" * 33: 1}, {1: 1}, {"x": 1.5}, {"x": None}, {"x": {"Int": "1"}},
                         {"x": {"Map": 1}}, {"x": "y" * 257}, {"x": list(range(65))}, {"x": [list(range(64))]},
                         {"x": 2**127}, {"k" + str(i): i for i in range(33)}):
@@ -223,10 +233,13 @@ class ContractAdmin(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "16384 bytes"):
             ca.params({"a": texts, "b": "x" * 17}, "custom")
         # The largest standard params fit.
-        full = {key: 0 for key in ca.PARAM_KEYS} | {"recipients": [KEYS[1]] * 64, "tokens": [KEYS[2]] * 64}
-        self.assertEqual(len(ca.params(full, "common")), 8)
+        full = {key: 0 for key in ca.PARAM_KEYS} | {"recipients": [KEYS[1]] * 64, "tokens": [KEYS[2]] * 64,
+                                                    "operations": ["custom:C" + "A" * 55 + "." + "f" * 32] * 28}
+        self.assertEqual(len(ca.params(full, "common")), 9)
+        with self.assertRaisesRegex(ValueError, "16384 bytes"):
+            ca.params(dict(full, operations=full["operations"] * 2), "common")
         # The count error names the limit of the tier.
-        for tier, limit in (("common", 8), ("simple", 8), ("custom", 32)):
+        for tier, limit in (("common", 9), ("simple", 9), ("custom", 32)):
             with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "at most {} keys".format(limit)):
                 ca.params({"k" + str(i): i for i in range(limit + 1)}, tier)
         deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,

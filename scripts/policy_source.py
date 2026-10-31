@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWIT = ROOT / "crates/allowit/src"
 
 # Canonical param keys, which are also the canonical rule names. `allowit::<KEY>` names each key.
-PARAM_KEYS = ("transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap", "call_cap", "recipients", "tokens", "expiry")
+PARAM_KEYS = ("transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap", "call_cap", "recipients", "tokens", "expiry",
+              "operations")
 
 # One prefix statement after whitespace removal: `allowit::<rule>(ctx,ctx.params.get(allowit::<RULE>))?`.
 # rustfmt may add commas.
@@ -80,7 +81,7 @@ INTEGERS = tuple(sign + str(bits) for sign in "iu" for bits in (8, 16, 32, 64, 1
 NOT_PORTABLE = frozenset(("usize", "isize", "f16", "f32", "f64", "f128"))
 ERRORS = ("MissingParam", "TransactionCapExceeded", "SpentCapExceeded", "DaySpentCapExceeded", "DayTotalCapExceeded",
           "CallCapExceeded", "RecipientNotAllowed", "TokenNotAllowed", "Expired", "Unpriced", "InvalidParam",
-          "InvalidState", "Overflow", "Unsupported")
+          "InvalidState", "Overflow", "Unsupported", "OperationNotAllowed")
 VALUES = ("Int", "Bool", "Str", "Addr", "List")
 ENUMS = {"AllowitOperation": ("sep41_transfer", "sep56_deposit"), "AllowitError": ERRORS, "AllowitRule": PARAM_KEYS,
          "AllowitValue": VALUES}

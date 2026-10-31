@@ -37,6 +37,19 @@ pub fn state_key(i: usize) -> String {
     format!("key_{i}")
 }
 
+/// An `operations` param value.
+#[derive(Clone, Debug)]
+pub enum Ops {
+    /// `Str`: `*` admits every op; any other text is invalid.
+    Text(&'static str),
+    /// `List` of `Str` op names.
+    List(Vec<&'static str>),
+}
+
+/// An `operations` entry for one function of one contract: `custom:<contract>.<function>`.
+pub const POOL_CLAIM: &str =
+    "custom:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.claim";
+
 /// One rule input: params, current state before the operation, and request with its args.
 /// A `None` param is absent.
 #[derive(Clone, Debug)]
@@ -48,6 +61,7 @@ pub struct Vector {
     pub recipients: Option<Vec<usize>>,
     pub tokens: Option<Vec<usize>>,
     pub expiry: Option<u64>,
+    pub operations: Option<Ops>,
     /// The custom `invoice_cap` param, which only Custom wallets admit.
     pub invoice_cap: Option<i128>,
     pub calls: u64,
@@ -79,8 +93,8 @@ pub struct Vector {
     pub blob: Vec<usize>,
 }
 
-/// A vector that passes every rule with headroom left. After it, spent and day_spent are 45 and
-/// day_total is 43.
+/// A transfer vector that passes every rule with headroom left. After it, spent and day_spent are
+/// 45 and day_total is 43.
 pub fn base() -> Vector {
     Vector {
         name: "base",
@@ -89,6 +103,7 @@ pub fn base() -> Vector {
         recipients: Some(vec![RECIPIENT, VAULT]),
         tokens: Some(vec![ASSET]),
         expiry: Some(NOW + 1000),
+        operations: Some(Ops::List(vec!["transfer"])),
         invoice_cap: None,
         calls: 0,
         spent: 5,
@@ -216,12 +231,38 @@ pub fn vectors() -> Vec<Vector> {
         edit("unset_recipients", |v| v.recipients = None),
         edit("unset_tokens", |v| v.tokens = None),
         edit("unset_expiry", |v| v.expiry = None),
+        edit("unset_operations", |v| v.operations = None),
         edit("unset_everything", |v| {
             v.caps = [None; 4];
             v.call_cap = None;
             v.recipients = None;
             v.tokens = None;
             v.expiry = None;
+            v.operations = None;
+        }),
+        // A policy that allows only deposits denies a transfer, and admits a deposit.
+        edit("only_deposits", |v| {
+            v.operations = Some(Ops::List(vec!["deposit"]))
+        }),
+        edit("deposit_only_deposits", |v| {
+            v.deposit = true;
+            v.recipient = VAULT;
+            v.operations = Some(Ops::List(vec!["deposit"]));
+        }),
+        edit("any_operation", |v| v.operations = Some(Ops::Text("*"))),
+        // Custom-call forms never admit a native transfer.
+        edit("custom_calls_only", |v| {
+            let names = vec!["custom", "custom.swap", POOL_CLAIM, "swap", "redeem"];
+            v.operations = Some(Ops::List(names));
+        }),
+        edit("empty_operations", |v| {
+            v.operations = Some(Ops::List(Vec::new()))
+        }),
+        edit("operations_not_a_list", |v| {
+            v.operations = Some(Ops::Text("transfer"))
+        }),
+        edit("unknown_operation", |v| {
+            v.operations = Some(Ops::List(vec!["transfer", "pay"]))
         }),
         // A custom param alone changes nothing; an `invoice` arg applies the invoice cap.
         edit("invoice_cap_without_invoice", |v| v.invoice_cap = Some(39)),
@@ -234,13 +275,14 @@ pub fn vectors() -> Vec<Vector> {
             v.invoice_cap = Some(39);
         }),
         edit("invoice_without_cap", |v| v.invoice = true),
-        // A custom param beside fewer than eight canonical params: the standard tiers reject it.
+        // A custom param beside fewer than nine canonical params: the standard tiers reject it.
         edit("invoice_cap_beside_few_params", |v| {
             v.caps = [Some(100), None, None, None];
             v.call_cap = None;
             v.recipients = None;
             v.tokens = None;
             v.expiry = None;
+            v.operations = None;
             v.invoice_cap = Some(39);
         }),
         // Args at their bound pass; one more denies in `evaluate` as in the wallet kernel.

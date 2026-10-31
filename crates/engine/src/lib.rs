@@ -4,7 +4,7 @@
 //! `AllowitContext` carries the contract `Env`, so it is not a contract value. Each method takes
 //! the other context fields and builds the context with its own `Env`.
 use allowit::{AllowitContext, AllowitError, AllowitParams, AllowitRequest, AllowitValue};
-use soroban_sdk::{Address, Env, Map, Symbol, contract, contractimpl, panic_with_error};
+use soroban_sdk::{Address, Env, Map, String, Symbol, contract, contractimpl, panic_with_error};
 #[contract]
 pub struct AllowitEngine;
 /// Engine executable release, independent of parent administration. Version 3 takes the context
@@ -123,6 +123,17 @@ impl AllowitEngine {
     ) -> Result<u64, AllowitError> {
         let ctx = context(env, params, state, request);
         allowit::expiry(&ctx, ctx.params.get(allowit::EXPIRY))
+    }
+    /// Run `allowit::operations(&ctx, ctx.params.get(allowit::OPERATIONS))`; returns the request's op name.
+    pub fn operations(
+        env: Env,
+        params: Map<Symbol, AllowitValue>,
+        state: Map<Symbol, AllowitValue>,
+        request: AllowitRequest,
+    ) -> Result<String, AllowitError> {
+        let ctx = context(env.clone(), params, state, request);
+        let op = allowit::operations(&ctx, ctx.params.get(allowit::OPERATIONS))?;
+        Ok(String::from_str(&env, op))
     }
 }
 #[cfg(test)]

@@ -1,6 +1,6 @@
 extern crate std;
 use super::*;
-use soroban::read;
+use soroban::{admits, op_name_ok, read};
 use soroban_sdk::{
     Env, IntoVal, Map, String, Symbol, TryFromVal, Val, contract, contractimpl,
     testutils::Address as _, vec, xdr::ToXdr,
@@ -23,6 +23,7 @@ fn position(rule: AllowitRule) -> usize {
         AllowitRule::recipients => 5,
         AllowitRule::tokens => 6,
         AllowitRule::expiry => 7,
+        AllowitRule::operations => 8,
     }
 }
 
@@ -63,6 +64,20 @@ fn set(ctx: &mut AllowitContext, key: &str, value: Option<AllowitValue>) {
 /// An integer value.
 fn int(n: i128) -> Option<AllowitValue> {
     Some(AllowitValue::Int(n))
+}
+
+/// A text value.
+fn text_value(env: &Env, text: &str) -> AllowitValue {
+    AllowitValue::Str(String::from_str(env, text))
+}
+
+/// A `List` of `Str` op names, an `operations` value.
+fn ops(env: &Env, names: &[&str]) -> Option<AllowitValue> {
+    let mut out = soroban_sdk::Vec::new(env);
+    for name in names {
+        out.push_back(text_value(env, name));
+    }
+    Some(AllowitValue::List(out))
 }
 
 /// Current state before a 40-unit priced transfer: after it, spent and day_spent are 45 and
@@ -106,6 +121,7 @@ fn fixture(env: &Env) -> AllowitContext {
         (RECIPIENTS, Some(list(env, &[&recipient]))),
         (TOKENS, Some(list(env, &[&asset]))),
         (EXPIRY, int(999_999)),
+        (OPERATIONS, ops(env, &["transfer"])),
     ] {
         set(&mut ctx, key, value);
     }
@@ -128,6 +144,7 @@ fn rules_return_exact_passing_constraints_after_this_operation() {
     );
     assert_eq!(tokens(&ctx, p(TOKENS)), Ok(ctx.request.asset.clone()));
     assert_eq!(expiry(&ctx, p(EXPIRY)), Ok(999_999 - DAY - 100));
+    assert_eq!(operations(&ctx, p(OPERATIONS)), Ok("transfer"));
     for rule in RULES {
         assert_eq!(preflight(&ctx, rule), Ok(()));
     }
@@ -172,6 +189,86 @@ fn rules_read_any_key_and_param_returns_the_value_or_missing_param() {
 }
 
 #[test]
+fn operations_admit_named_ops_star_and_custom_forms() {
+    let env = Env::default();
+    let mut ctx = fixture(&env);
+    let pool = "custom:CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let not = Err(AllowitError::OperationNotAllowed);
+    // A transfer is `transfer`; a deposit is `deposit`.
+    assert_eq!(
+        operations(&ctx, ops(&env, &["deposit", "transfer"])),
+        Ok("transfer")
+    );
+    assert_eq!(
+        operations(&ctx, Some(text_value(&env, "*"))),
+        Ok("transfer")
+    );
+    assert_eq!(operations(&ctx, ops(&env, &[])), not);
+    let custom = std::format!("{pool}.swap");
+    for names in [
+        &["deposit", "swap", "redeem"][..],
+        &["custom", "custom.transfer", custom.as_str()][..],
+    ] {
+        assert_eq!(operations(&ctx, ops(&env, names)), not, "{names:?}");
+    }
+    ctx.request.operation = AllowitOperation::sep56_deposit;
+    assert_eq!(operations(&ctx, ops(&env, &["deposit"])), Ok("deposit"));
+    assert_eq!(operations(&ctx, ops(&env, &["transfer"])), not);
+    assert_eq!(operations(&ctx, None), Err(AllowitError::MissingParam));
+    // Custom forms: any custom call, one function on any contract, or one contract's function.
+    let swap = custom.as_bytes();
+    for entry in ["custom", "custom.swap", custom.as_str()] {
+        assert!(admits(entry.as_bytes(), swap), "{entry}");
+        assert!(!admits(entry.as_bytes(), b"transfer"), "{entry}");
+    }
+    let other = std::format!("{}B.swap", &pool[..pool.len() - 1]);
+    for entry in ["custom.claim", other.as_str(), "swap", "transfer"] {
+        assert!(!admits(entry.as_bytes(), swap), "{entry}");
+    }
+    assert!(admits(b"*", swap) && admits(b"*", b"deposit"));
+    // Only op names are valid entries.
+    for name in [
+        "transfer",
+        "swap",
+        "deposit",
+        "redeem",
+        "custom",
+        "custom.swap",
+        custom.as_str(),
+    ] {
+        assert!(op_name_ok(name.as_bytes()), "{name}");
+    }
+    let long = std::format!("custom.{}", "f".repeat(33));
+    let lower = custom.replacen("custom:C", "custom:c", 1);
+    let short = std::format!("{}.swap", &pool[..pool.len() - 1]);
+    for name in [
+        "",
+        "*",
+        "pay",
+        "Transfer",
+        "custom.",
+        "custom:",
+        "custom.a-b",
+        &long,
+        &lower,
+        &short,
+    ] {
+        assert!(!op_name_ok(name.as_bytes()), "{name}");
+    }
+    let bad = Err(AllowitError::InvalidParam);
+    let invalid = [
+        Some(text_value(&env, "transfer")),
+        ops(&env, &["*"]),
+        ops(&env, &["transfer", "pay"]),
+        Some(AllowitValue::List(vec![&env, AllowitValue::Int(1)])),
+        int(1),
+    ];
+    for value in invalid {
+        assert_eq!(operations(&ctx, value.clone()), bad, "{value:?}");
+    }
+}
+
+#[test]
 fn unset_params_deny_in_rules_and_skip_only_in_preflight() {
     let env = Env::default();
     let mut ctx = fixture(&env);
@@ -184,6 +281,7 @@ fn unset_params_deny_in_rules_and_skip_only_in_preflight() {
     assert_eq!(recipients(&ctx, None), Err(AllowitError::MissingParam));
     assert_eq!(tokens(&ctx, None), Err(AllowitError::MissingParam));
     assert_eq!(expiry(&ctx, None), Err(AllowitError::MissingParam));
+    assert_eq!(operations(&ctx, None), Err(AllowitError::MissingParam));
     // MissingParam precedes every request and state check.
     ctx.request.amount = 0;
     ctx.request.now = ctx.request.expires_at + 1;
@@ -378,6 +476,7 @@ fn preflight_enforces_every_present_param_with_its_rule_error() {
             ),
             AllowitRule::tokens => (Some(list(&env, &[&other])), AllowitError::TokenNotAllowed),
             AllowitRule::expiry => (int(now.into()), AllowitError::Expired),
+            AllowitRule::operations => (ops(&env, &["deposit"]), AllowitError::OperationNotAllowed),
         };
         set(&mut ctx, rule.key(), value);
         assert_eq!(preflight(&ctx, rule), Err(expected));
@@ -486,14 +585,17 @@ fn standard_params_admit_only_canonical_keys_with_their_types() {
     let text = AllowitValue::Str(String::from_str(&env, "x"));
     let address = AllowitValue::Addr(ctx.request.asset.clone());
     let too_big = AllowitValue::Int(i128::from(u64::MAX) + 1);
-    let bad: [(&str, AllowitValue); 7] = [
+    let bad: [(&str, AllowitValue); 10] = [
         ("vendor_cap", AllowitValue::Int(1)),
         (TRANSACTION_CAP, AllowitValue::Int(-1)),
         (DAY_TOTAL_CAP, text.clone()),
         (CALL_CAP, too_big.clone()),
         (EXPIRY, AllowitValue::Bool(true)),
-        (RECIPIENTS, address),
-        (TOKENS, AllowitValue::List(vec![&env, text])),
+        (RECIPIENTS, address.clone()),
+        (TOKENS, AllowitValue::List(vec![&env, text.clone()])),
+        (OPERATIONS, text),
+        (OPERATIONS, ops(&env, &["transfer", "pay"]).unwrap()),
+        (OPERATIONS, AllowitValue::List(vec![&env, address])),
     ];
     for (key, value) in bad {
         let mut params = ctx.params.0.clone();
@@ -502,7 +604,17 @@ fn standard_params_admit_only_canonical_keys_with_their_types() {
         // Custom admits any bounded key and value; its policy defines them.
         assert_eq!(check_params(&params, AllowitTier::Custom), Ok(()), "{key}");
     }
-    // A custom key beside fewer than eight canonical keys passes the count check and still
+    // `operations` is `*` or a list of op names, which may be empty.
+    for value in [
+        Some(text_value(&env, "*")),
+        ops(&env, &[]),
+        ops(&env, &["custom", "swap"]),
+    ] {
+        let mut params = ctx.params.0.clone();
+        params.set(Symbol::new(&env, OPERATIONS), value.unwrap());
+        assert_eq!(standard(&params), Ok(()));
+    }
+    // A custom key beside fewer than nine canonical keys passes the count check and still
     // rejects.
     let mut few = Map::new(&env);
     few.set(Symbol::new(&env, TRANSACTION_CAP), AllowitValue::Int(1));
@@ -571,8 +683,15 @@ fn params_args_and_state_stay_within_their_byte_budgets() {
     let full = list(&env, &full.iter().collect::<std::vec::Vec<_>>());
     standard.set(Symbol::new(&env, RECIPIENTS), full.clone());
     standard.set(Symbol::new(&env, TOKENS), full);
-    assert_eq!(standard.len(), 8);
+    assert_eq!(standard.len(), 9);
     assert_eq!(check_params(&standard, AllowitTier::Standard), Ok(()));
+    // Beside full allowlists, 28 `operations` entries of the longest form fit and 29 do not.
+    let longest = std::format!("custom:C{}.{}", "A".repeat(55), "f".repeat(32));
+    for (n, fits) in [(28, Ok(())), (29, invalid)] {
+        let names = std::vec![longest.as_str(); n];
+        standard.set(Symbol::new(&env, OPERATIONS), ops(&env, &names).unwrap());
+        assert_eq!(check_params(&standard, AllowitTier::Standard), fits, "{n}");
+    }
     // The seven standard keys take 7 * 120 bytes, `blob` 40 + 80 + 45 * 336 and `tail` 40 + 80
     // + 184: exactly 16 KiB.
     assert_eq!(MAX_STATE_BYTES, 16 * 1024);
