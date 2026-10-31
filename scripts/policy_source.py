@@ -278,7 +278,8 @@ def allowlisted(code):
     if not code.isascii():
         reject("a non-ASCII identifier")
     tokens = TOKEN.findall(code)
-    local_fns = {tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "fn"}
+    # Raw identifiers name the same function, so `fn r#f` is the local function `f`.
+    local_fns = {tokens[k + 1].removeprefix("r#") for k in range(len(tokens) - 1) if tokens[k] == "fn"}
     local_names = declared(tokens)
     for name in sorted(local_names & FIELD_NAMES):
         reject("the name `{}` for a binding or function; it is reserved for the context field".format(name))
@@ -491,8 +492,9 @@ def _host_allowit(rustc, digest):
 
 
 def _rustc(rustc, args, what):
-    # Function pointer comparisons depend on code layout and optimization, so they deny.
-    command = [rustc, "--edition=2024", "-C", "overflow-checks=on", "-D", "unpredictable_function_pointer_comparisons"] + args
+    # Function pointer comparisons depend on code layout and optimization. Forbid, so that no
+    # source `#[allow]`, `#[expect]` or `#[warn]` can lower the level.
+    command = [rustc, "--edition=2024", "-C", "overflow-checks=on", "-F", "unpredictable_function_pointer_comparisons"] + args
     try:
         result = subprocess.run(command, capture_output=True, text=True)
     except FileNotFoundError:

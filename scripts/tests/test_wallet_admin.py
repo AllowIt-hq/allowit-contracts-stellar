@@ -903,6 +903,25 @@ class ContractAdmin(unittest.TestCase):
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
                 ca.standard_prefix(source(body, head))
 
+    def test_policy_source_rejects_raw_function_values_and_lowered_pointer_lints(self):
+        # Review probe: identical functions may merge in release Wasm only, so `a == b` is false on
+        # the host and true onchain, and the spending cap runs on one backend only.
+        same = ("fn r#one() {}\nfn r#two() {}\n#[allow(unpredictable_function_pointer_comparisons)]\n"
+                "fn same() -> bool { let a = if true { r#one } else { r#two }; "
+                "let b = if true { r#two } else { r#one }; a == b }\n")
+        text = same + source("    if same() {\n        allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?;\n    }\n",
+                             HEAD + CALL("recipients"))
+        # The gate reads `fn r#one` as the local function `one`, so its use as a value rejects.
+        with self.assertRaisesRegex(ValueError, "the function `one` as a value"):
+            ca.standard_prefix(text)
+        # The std-only compile forbids the lint, so no source attribute lowers it.
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            for attribute in ("allow", "expect", "warn"):
+                with self.subTest(attribute=attribute), self.assertRaisesRegex(ValueError, "E0453"):
+                    policy.write_text(text.replace("#[allow(", "#[{}(".format(attribute)))
+                    ca.host_compile(policy)
+
     def test_policy_source_reads_params_and_args_only_through_their_context_fields(self):
         head = HEAD + CALL("recipients")
         # Review probes: a list bound to `args` or `params` takes a pointer-width index, so the

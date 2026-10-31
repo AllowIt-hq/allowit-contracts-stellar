@@ -136,8 +136,9 @@ compiles:
 
 - The std-only compile builds the file as a module of a `no_std` crate whose only dependency is
   `allowit` with only the `std` feature, as the offchain server uses it, with overflow checks on
-  and `-D unpredictable_function_pointer_comparisons`: a function pointer `==` that the lexical
-  checks miss fails there, because its result changes with the optimization level. A path into `soroban_sdk`, a wallet crate or any other crate fails there. So does a call to a
+  and `-F unpredictable_function_pointer_comparisons`: a function pointer `==` that the lexical
+  checks miss fails there, because its result changes with the optimization level. The lint is
+  forbidden, so a source `#[allow]`, `#[expect]` or `#[warn]` on it also fails. A path into `soroban_sdk`, a wallet crate or any other crate fails there. So does a call to a
   Soroban `Env` or `Address` method, also through an alias such as `let e = &ctx.env;`, an
   address comparison with `<`, `min`, `max`, `sort` or `binary_search`, and a `std` prelude item
   such as `vec!`. On the host, `Address` is a StrKey newtype that compares only for equality:
