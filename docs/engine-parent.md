@@ -2,11 +2,11 @@
 
 The engine parent owns one shared engine's executable reference. Its owner can replace the engine
 code, transfer parent administration, and upgrade the parent. This authority controls shared checks.
-It does not control wallet custody code, wallet owner operations, Grant, Spent, or server signing keys.
+It does not control wallet custody code, wallet owner operations, params, policy state, or server signing keys.
 
 ## State and creation
 
-`ParentState` contains three native fields:
+`AllowitParentState` contains three native fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -48,9 +48,15 @@ authorization, missing uploaded Wasm, and host deployment failures can also reje
 calls roll back the state, version and executable changes together.
 
 The reference update changes the code used by subsequent engine calls. It does not replace the
-engine address or authorize wallet spending. Each new engine release must preserve the interface
-and state interpretation required by its callers. A code hash identifies the exact executable.
-The parent administration version does not identify its release semantics.
+engine address or authorize wallet spending. An engine release that changes the interface or state
+interpretation breaks the callers that rely on the old one. Engine release 3 changes the
+interface: it takes the `AllowitContext` fields `params`, `state` and `request` and returns each
+rule's pass value. It replaces the shipped release 1 interface, whose methods take
+`(request: EngineRequest, state: EngineState)`. Release 2 was never released. `upgrade_engine` from
+a deployed release 1 engine to release 3 therefore breaks every onchain caller of release 1.
+Wallets in this repository do not call the engine; migrate or retire other callers before that
+upgrade. A code hash identifies the exact executable. The parent administration version does not
+identify its release semantics.
 
 ## Lifetime and recovery
 

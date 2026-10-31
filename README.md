@@ -9,67 +9,97 @@
 [![Soroban SDK 28.0.0](https://img.shields.io/badge/Soroban%20SDK-28.0.0-black?style=flat-square)](Cargo.toml)
 [![Stellar CLI 28.1.0](https://img.shields.io/badge/Stellar%20CLI-28.1.0-black?style=flat-square)](https://developers.stellar.org/docs/tools/cli/stellar-cli)
 
-[Overview](#overview) • [Three wallets](#three-policy-wallets) • [Roles](#who-holds-which-key) • [How a transfer happens](#how-a-transfer-happens) • [Quick start](#quick-start) • [Operate a wallet](#operate-a-wallet) • [Docs](#documentation)
+[Overview](#overview) • [Three wallets](#three-policy-wallets) • [Policy source](#write-a-policy) • [Roles](#who-holds-which-key) • [How an operation happens](#how-an-operation-happens) • [Quick start](#quick-start) • [Operate a wallet](#operate-a-wallet) • [Docs](#documentation)
 
 </div>
 
-**Go on. On your terms.** Allowit lets your AI agents spend and invest, within a policy you set. This repository holds the Soroban smart contracts that enforce that policy on Stellar: owner-controlled wallets that move funds only when the agent and an independent server both sign, and only when the owner's rules say yes.
+**Go on. On your terms.** Allowit lets your AI agents spend and invest, within a policy you set. This repository holds the Soroban smart contracts that enforce that policy on Stellar: owner-controlled wallets that move funds only when the agent and an independent server both sign, and only when the owner's policy says yes.
 
 ## Overview
 
-A policy wallet is a Soroban contract that holds one native Stellar asset. The owner decides who may ask it to pay, how much, to whom and until when. Every delegated transfer needs two signatures, the agent's and the server's, and passes the wallet's own policy checks before a single stroop moves. The owner keeps the keys to everything else: pause, reconfigure, recover funds, upgrade the code.
+A policy wallet is a Soroban contract that holds one native Stellar asset. The owner decides who may ask it to pay or deposit, how much, to whom and until when. Every delegated SEP-41 transfer and SEP-56 vault deposit needs two signatures, the agent's and the server's, and passes the wallet's own checks before a single stroop moves. The owner keeps the keys to everything else: pause, reconfigure, recover funds, upgrade the code and make exact passthrough calls.
 
-Three wallet implementations share one custody core (`crates/policy-wallet`) and one owner interface. They differ only in where the business rules run.
+Three wallet implementations share one custody core (`crates/policy-wallet`) and one owner interface. They differ only in where the policy runs.
 
 > [!NOTE]
 > Amounts, limits and usage are tracked in the asset's native base units. Only the installed asset can be held and moved. The wallet refuses to pay itself and refuses to pay the asset's issuer, because an issuer payment burns tokens.
 
 ## Three policy wallets
 
-| Wallet | Who approves a transfer | Where the rules run |
+| Wallet | Who approves an operation | Where the policy runs |
 | --- | --- | --- |
-| `SimplePolicyEngine` | Agent and server | Off chain. The server checks the authored policy before it signs. The contract enforces custody invariants only. |
-| `CommonPolicyEngine` | Agent and server | On chain, from a canonical rule set. The owner selects an ordered list of rules and the Grant values they read. |
-| `CustomPolicy` | Agent and server | On chain, compiled. Bespoke policy source becomes its own contract through the [Allowit SDK](https://github.com/allowit-hq/allowit-sdk), on the same custody mixins. |
+| `AllowitSimplePolicyEngine` | Agent and server | Offchain. The server checks the authored policy before it signs. The contract enforces custody invariants only. |
+| `AllowitCommonPolicyEngine` | Agent and server | Onchain, from the standard prefix: the leading canonical rule calls of the authored policy, which the owner approves as `rules`. |
+| `AllowitCustomPolicy` | Agent and server | Onchain, compiled. The complete authored policy file compiles verbatim into its own contract, on the same custody mixins. |
 
 Pick **Simple** when your server already runs the whole policy and you want the lightest contract. Pick **Common** when you want standard limits enforced by the ledger itself. Pick **Custom** when the policy needs logic the canonical rules do not cover.
 
 ### The canonical rules
 
-Common wallets enforce exactly the rules the owner lists, in that order, and nothing else. An empty list means no on-chain business checks, like Simple. Each rule reads one named value from the owner-signed **Grant** and may update the wallet's running **Spent** map.
+The canonical rules live in `crates/allowit`. Each rule reads one value that the policy looks up in the owner's `params` map, and returns its passing constraint or an error. The standard contract admits only these nine keys, runs only the rules the owner lists, in that order, and skips a rule whose param is absent. An empty list means no onchain business checks, like Simple.
 
-| Rule | Grant values it reads | What it does |
-| --- | --- | --- |
-| `transaction_cap` | `per_transfer` | Caps a single transfer |
-| `daily_cap` | `daily_limit` | Caps the total per UTC day |
-| `total_cap` | `total_limit` | Caps the lifetime total |
-| `call_cap` | `max_calls` | Caps the number of transfers; zero denies all |
-| `recipient` | `recipients` | Allows only listed addresses; an empty list denies all |
-| `expiry` | `expires_at` | Denies from a Unix timestamp on, and requires each request to expire no later than it |
-| `token` | `token` | Requires a specific asset label |
+| Rule and param key | What it does |
+| --- | --- |
+| `transaction_cap` | Caps the gross amount of one operation |
+| `spent_cap` | Caps cumulative irreversible expenses |
+| `day_spent_cap` | Caps irreversible expenses per UTC day |
+| `day_total_cap` | Caps gross amounts plus attributable gas per UTC day |
+| `call_cap` | Caps the number of successful operations; zero denies all |
+| `recipients` | Allows only listed destinations, including deposit vaults; an empty list denies all |
+| `tokens` | Allows only listed underlying asset contracts; an empty list denies all |
+| `expiry` | Denies from a Unix timestamp on, and requires each request to expire no later than it |
+| `operations` | Allows only listed op names, such as `transfer` or `deposit`, and returns the op name for a `match` |
 
-The rules live in `crates/rules` and are shared by the Common wallet, compiled Custom policies and the standalone engine contract. Details, value types and Spent keys are in [docs/architecture.md](docs/architecture.md).
+Value types, the standard state keys and error mapping are in [docs/architecture.md](docs/architecture.md).
+
+## Write a policy
+
+Policy source is ordinary synchronous Rust against `crates/allowit`. The offchain server and `AllowitCustomPolicy` compile the same file verbatim:
+
+```rust
+use allowit::prelude::*;
+/// Let my agent pay our invoices. Cap every payment, cap its total spending and pay only vendors
+/// I approve.
+pub fn execute(ctx: &AllowitContext) -> allowit::Result {
+    // "Cap every payment"
+    allowit::transaction_cap(ctx, ctx.params.get(allowit::TRANSACTION_CAP))?;
+    // "cap its total spending"
+    allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?;
+    // "pay only vendors I approve"
+    allowit::recipients(ctx, ctx.params.get(allowit::RECIPIENTS))?;
+    Ok(())
+}
+```
+
+- `execute(ctx)` takes only the context. `AllowitContext` is plain data: the backend `env`, the owner's `params`, the current policy `state` and the `request`.
+- `params` and `request.args` are key => `AllowitValue` maps. The owner sets params at install and changes them by signed update. The agent supplies args per call.
+- A rule takes the looked-up value, so it may read any key, such as a custom `vendor_cap`.
+- Only an error that the policy returns denies. A policy may catch a rule error and continue.
+- `allowit::param(ctx, key)` and `allowit::arg(ctx, key)` return the typed value of an owner param or an agent arg. They panic when the key is missing or mistyped. A panic denies the run and discards its writes.
+- After approval the wallet and the server run the same `allowit::post_flight`. It updates the standard state keys and applies the policy's `allowit::set_state` writes. Simple and Common never add or change a policy key, so their post-flight denies every policy write, on the server as onchain. Policy keys left by earlier Custom code stay unchanged.
+
+`scripts/policy_source.py` admits policy code through an allowlist, so the same file behaves the same offchain and onchain. `scripts/contract_admin.py` derives the standard `rules` from the source file. The server uses `allowit = { default-features = false, features = ["std"] }` and builds with `overflow-checks = true`. The full authoring rules are in [docs/architecture.md](docs/architecture.md).
 
 ## Who holds which key
 
 A wallet knows three addresses, and they must all be different.
 
 - **Owner.** Creates the wallet and signs every configuration change. The owner alone can `deploy_policy`, `set_pause`, `recover` funds and `invoke` any contract call through the wallet. None of these need the agent or the server.
-- **Agent.** The AI agent, or whatever acts for you. It co-signs transfers, through `execute` or an x402 authorization, and nothing else.
-- **Server.** An independent signer that co-signs every transfer. It is a second pair of eyes on every transfer, not a shared checker contract and not an administrator.
+- **Agent.** The AI agent, or whatever acts for you. It co-signs delegated operations, through `execute` or an x402 authorization, and nothing else.
+- **Server.** An independent signer that co-signs every delegated operation. It is a second pair of eyes, not a shared checker contract and not an administrator.
 
 A separate **engine parent** contract can manage the code of a shared rule-checking engine. It holds no custody authority: it cannot touch a wallet's funds, configuration or signers. See [docs/engine-parent.md](docs/engine-parent.md).
 
 > [!TIP]
-> No Soroban contract yet? A classic G-address account can get Simple-style authorization with plain multisig: owner weight 3, agent and server weight 1, thresholds 2/2/3. `scripts/wallet_admin.py` prepares exactly that. Classic reserves still apply, and custom on-chain policy code needs a contract wallet.
+> No Soroban contract yet? A classic G-address account can get Simple-style authorization with plain multisig: owner weight 3, agent and server weight 1, thresholds 2/2/3. `scripts/wallet_admin.py` prepares exactly that. Classic reserves still apply, and custom onchain policy code needs a contract wallet.
 
-## How a transfer happens
+## How an operation happens
 
-1. The agent builds an `ExecutionRequest`: the wallet's policy identity, a fresh operation id, the wallet's current nonce and deployment version, an expiry, and the exact SEP-41 transfer arguments (`token`, `from`, `to`, `amount`).
+1. The agent builds an `AllowitExecutionRequest`: the wallet's policy identity and source hash, a fresh operation id, the wallet's current nonce and deployment version, an expiry, the exact SEP-41 transfer or SEP-56 deposit arguments, optional expense bounds and its per-call `args`.
 2. Agent and server both authorize `execute`.
-3. The wallet checks everything before it checks the policy: the installed module, entrypoint and argument schema; canonical argument encoding; the installed asset and the wallet as source; no replay of the operation id; not paused; nonce and deployment version current; not expired; positive amount; recipient is neither the wallet nor the issuer.
-4. The wallet runs its local policy (Simple, the selected Common rules, or the compiled Custom code) against the Grant and the current Spent.
-5. The token transfer, the new Spent, the nonce and the receipt commit together. A `TransferReceipt` comes back. If anything fails, nothing moves.
+3. The wallet checks everything before it runs the policy: the installed module, entrypoint and argument schema; canonical argument encoding; the installed asset and the wallet as source; no replay of the operation id; not paused; nonce and deployment version current; not expired; positive amount; recipient is neither the wallet nor the issuer.
+4. The wallet runs its local policy (custody checks only on Simple, the standard prefix on Common, the compiled file on Custom) against the params and the current policy state.
+5. The post-flight state, the next nonce and the replay marker are written, then the token transfer or vault deposit runs. A deposit grants the vault exactly one `transfer` of the checked amount and checks the returned shares. Everything commits together and a receipt comes back. If anything fails, nothing moves.
 
 ### x402 delegation
 
@@ -88,12 +118,12 @@ You need:
 git clone https://github.com/allowit-hq/allowit-contracts-stellar.git
 cd allowit-contracts-stellar
 
-python3 scripts/check-policy.py     # verify the portable policy bundle hash
-scripts/build-contracts.sh          # reproduce the generated policy and build every Wasm
-cargo test --workspace --locked     # authorization and custody regressions
+python3 scripts/check-policy-bindings.py  # verify the custom policy argument schema binding
+scripts/build-contracts.sh                # build the test fixtures and every Wasm
+cargo test --workspace --locked           # authorization, custody and portability regressions
 ```
 
-The build leaves five contracts in `target/wasm32v1-none/release/`:
+The build leaves these contracts in `target/wasm32v1-none/release/`, plus the `allowit_sep56_test_vault.wasm` test vault:
 
 ```
 allowit_simple_policy_engine.wasm
@@ -106,7 +136,7 @@ allowit_engine_parent.wasm
 Write a public manifest of source hashes and artifact hashes with `python3 scripts/artifacts.py --output PATH`.
 
 > [!TIP]
-> `scripts/build-contracts.sh` regenerates `crates/custom-policy/src/generated_policy.rs` with the Allowit SDK revision pinned in `scripts/policy-codegen.json` and fails if the bytes differ. It fetches an isolated checkout of that revision unless `ALLOWIT_SDK_PATH` points at a clean checkout of it. `STELLAR_BIN` selects the Stellar CLI executable.
+> The `AllowitCustomPolicy` sample source is `crates/custom-policy/policy/policy.rs`. Its contract compiles that file verbatim as a module, and `build.rs` binds `SOURCE_HASH` to its bytes. No SDK code generation is involved. `scripts/policy-smoke.rs` compiles the sample against the host backend with plain `rustc`. `cargo test` builds and runs it, then compares its outcomes on the shared vectors in `scripts/policy-vectors.rs` with the Soroban backend and the custom, standard and simple Wasm. `STELLAR_BIN` selects the Stellar CLI executable.
 
 The administration tools need the pinned Python Stellar SDK. Keep it in a virtual environment:
 
@@ -123,8 +153,10 @@ The owner interface is the same on all three wallets:
 ```
 __constructor(config)                         owner
 state()                                       anyone
+policy_state()                                anyone
 policy_binding()                              anyone
-policy_spent()                                anyone
+policy_binding_for(argument_schema_digest)    anyone
+deposit_receipt(operation_id)                 anyone
 execute(execution)                            agent and server
 deploy_policy(deployment)                     owner, plus the new owner if it changes
 set_pause(paused, deployment_version)         owner
@@ -132,53 +164,52 @@ recover(recipient, amount)                    owner
 invoke(contract, function, args, auth)        owner
 ```
 
-`PolicyConfig` names the `owner`, `agent`, `server`, `asset`, `policy_instance`, `source_digest`, ordered `rules`, `grant` and `x402_enabled`. The asset and the policy identity are fixed for the life of the wallet. Everything else changes through `deploy_policy`, which also accepts an optional new Wasm hash. Both `deploy_policy` and `set_pause` must target exactly the next `deployment_version`. Pause, Spent and the execution nonce survive every deployment.
+`AllowitPolicyConfig` names the `owner`, `agent`, `server`, `asset`, `policy_instance`, `source_digest`, ordered `rules`, `params` and `x402_enabled`. The asset and the policy identity are fixed for the life of the wallet. Everything else changes through `deploy_policy`, which also accepts an optional new Wasm hash. With no new Wasm hash, params change without code redeployment. Both `deploy_policy` and `set_pause` must target exactly the next `deployment_version`. Pause, policy state and the execution nonce survive every deployment.
 
-`scripts/contract_admin.py` prepares unsigned transactions for `upload`, `deploy-parent`, `deploy-wallet` and `admin`. It simulates, assembles fees and authorization entries, and hands you XDR to review and sign with your own keys. Its `read` action runs a read-only simulation of `state`, `engine`, `policy_binding` or `policy_spent`. It never signs, submits or retries. `scripts/wallet_admin.py` prepares and verifies classic-account multisig (`inspect`, `verify-wallet`, `verify-admin`, `setup-wallet`, `shutdown-wallet`, `setup-admin`) and also never signs or submits. Both tools run from the virtual environment above.
+`scripts/contract_admin.py` prepares unsigned transactions for `upload`, `deploy-parent`, `deploy-wallet` and `admin`. It simulates, assembles fees and authorization entries, and hands you XDR to review and sign with your own keys. Its `read` action runs a read-only simulation of `state`, `engine` or `policy_binding`. It never signs, submits or retries. `scripts/wallet_admin.py` prepares and verifies classic-account multisig (`inspect`, `verify-wallet`, `verify-admin`, `setup-wallet`, `shutdown-wallet`, `setup-admin`) and also never signs or submits. Both tools run from the virtual environment above. Save signed bytes before broadcast and reconcile the original transaction hash after uncertainty.
 
 ```sh
 /tmp/allowit-admin/bin/python scripts/contract_admin.py read --network testnet --contract "$WALLET" --source "$OWNER" --method policy_binding
 ```
 
-The step-by-step guide, including Grant encoding and owner handoffs, is in [docs/admin.md](docs/admin.md). Release packets for mainnet are covered in [docs/mainnet.md](docs/mainnet.md).
+The step-by-step guide, including params encoding and owner handoffs, is in [docs/admin.md](docs/admin.md). Release packets for mainnet are covered in [docs/mainnet.md](docs/mainnet.md).
 
 ## Project structure
 
 ```
 crates/
-  protocol/               Shared request, receipt, Grant and Spent types
-  rules/                  The seven canonical rules
+  allowit/                Portable policy core, canonical rules and the host and Soroban backends
+  protocol/               Shared request, receipt and binding types
   policy-wallet/          Custody core, owner operations and the policy_wallet! macro
-  simple-policy-engine/   SimplePolicyEngine contract
-  common-policy-engine/   CommonPolicyEngine contract
-  custom-policy/          CustomPolicy contract with its authored and generated policy
+  simple-policy-engine/   AllowitSimplePolicyEngine contract
+  common-policy-engine/   AllowitCommonPolicyEngine contract
+  custom-policy/          AllowitCustomPolicy contract and its sample policy source
   engine/                 Standalone shared rule engine contract
   engine-parent/          Upgrade parent for the shared engine
-policy/                   Portable policy bundle shared byte for byte with the Solana contracts
-scripts/                  Build, verification, administration and release tooling
+  test-vault/             SEP-56 vault for deposit tests
+scripts/                  Build, policy checks, smoke vectors, administration and release tooling
 docs/                     Architecture, engine parent, administration, mainnet
 ```
 
 ## Part of Allowit
 
 - [allowit.xyz](https://allowit.xyz) tells the story and holds the official narrative.
-- [allowit-sdk](https://github.com/allowit-hq/allowit-sdk) is the policy language, compiler and runtime. Its `stellar-native` target produces the generated policy module in this repository.
-- [allowit-contracts-solana](https://github.com/allowit-hq/allowit-contracts-solana) is the Solana sibling. It carries the same `policy/` bundle.
+- [allowit-sdk](https://github.com/allowit-hq/allowit-sdk) is the policy language and runtime. The `crates/allowit` core with its host backend becomes its `sdk/core`, for the offchain server and SDK evaluator.
+- [allowit-contracts-solana](https://github.com/allowit-hq/allowit-contracts-solana) is the Solana sibling.
 - [allowit-cli](https://github.com/allowit-hq/allowit-cli) is the Go CLI for evaluating and executing actions under a policy.
 
 ## Documentation
 
-- [Architecture and authoring](docs/architecture.md): wallets, rules, configuration, x402 and owner operations.
+- [Architecture and authoring](docs/architecture.md): wallets, policy source, rules, configuration, x402, deposits and owner operations.
 - [Engine parent](docs/engine-parent.md): shared engine state, calls and lifetime.
 - [Setup and administration](docs/admin.md): preparing, reviewing and signing wallet transactions.
 - [Mainnet preparation](docs/mainnet.md): bounded, unsigned release packets.
 
 ## Contributing
 
-Pull requests run the portable policy checks and the chain-free smoke tests. The full Wasm build and `cargo test --workspace --locked` run on a schedule and on demand. Before you open a pull request:
+Pull requests run the portable policy checks and the chain-free policy smoke tests. The full Wasm build and `cargo test --workspace --locked` run on a schedule and on demand. Before you open a pull request:
 
 ```sh
-python3 scripts/check-policy.py
 python3 scripts/check-policy-bindings.py
 cargo fmt --all --check
 scripts/build-contracts.sh

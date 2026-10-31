@@ -1,0 +1,21 @@
+[package]
+name = "allowit"
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["soroban"]
+# Onchain backend: Soroban host values, contract types and contract errors.
+soroban = ["dep:soroban-sdk"]
+# Host backend for the offchain server and SDK evaluator: heap strings and vectors.
+std = []
+
+[dependencies]
+soroban-sdk = { workspace = true, optional = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
