@@ -62,7 +62,7 @@ Restore archived dependencies through separate reviewed transactions.
 Prepare `deploy-wallet --source "$OWNER" --config JSON --wasm PATH --wasm-hash HASH --tier TIER --policy-source FILE`.
 Select `allowit_simple_policy_engine.wasm`, `allowit_common_policy_engine.wasm`, or a reviewed
 `allowit_custom_policy.wasm`. Config contains exactly `owner`, `agent`, `server`, `asset`,
-`policy_instance`, `source_digest`, `rules`, `grant`, and `x402_enabled`.
+`policy_instance`, `source_digest`, `rules`, `params`, and `x402_enabled`.
 The asset is an immutable native SAC. Identity and source digests are nonzero 32-byte hex strings.
 `rules` contains the ordered standard prefix of canonical rule names. The tool derives it from the
 authored `--policy-source` file and rejects any other list: Common binds the source's prefix,
@@ -70,18 +70,24 @@ Simple and Custom bind an empty list. `--tier custom` also requires `source_dige
 SHA-256 of that file. Owner `deploy_policy` packets take the same two options for the target tier.
 Every tier requires one self-contained, portable source file. The tooling rejects every
 construct listed in [One portable policy source](architecture.md#one-portable-policy-source), such
-as macros other than the assertion and `matches!` macros, writes to `ctx.env`, list access outside
-the `recipients` and `tokens` rules, indexing and pointer-width methods. It also runs the std-only
+as macros other than the assertion and `matches!` macros, writes to `ctx.env`, the map inside params
+and args, list methods, indexing and pointer-width methods. Simple and Common store only standard
+state, so the tool rejects their packets when the source calls `allowit::set_state`. It also runs the std-only
 compile described there, so it needs `rustc`. For `--tier custom`, also build the
 reviewed custom Wasm from the same file, which is the Soroban compile.
 
-Grant JSON is the typed Grant. Its only fields are the canonical rule names `transaction_cap`,
+Params JSON is an object of key => value, at most 32 keys of 1 to 32 ASCII letters, digits or
+underscores. An absent key is unset. The tool infers each value's `AllowitValue` type: an integer is
+`Int`, a boolean `Bool`, a G or C address `Addr`, other text `Str` and a list `List`. A one-key
+object such as `{"Str": "GA..."}` names the type explicitly. A value holds at most 64 nested values,
+and a text at most 256 bytes. Simple and Common admit only the canonical keys `transaction_cap`,
 `spent_cap`, `day_spent_cap`, `day_total_cap` (nonnegative integers), `call_cap`, `expiry`
-(unsigned 64-bit integers), `recipients` and `tokens` (address lists). A missing field or null is
-unset. The standard preflight skips an unset selected rule; full policy code denies it. The tool
-accepts such a packet and prints a warning.
-Legacy names such as `per_transfer`, `daily_limit` or `max_calls` reject. Negative caps reject at
-configuration. Code changes defer the new tier validation to delegated admission.
+(unsigned 64-bit integers), `recipients` and `tokens` (address lists). Custom admits its policy's
+own keys, such as `vendor_cap`. The standard preflight skips an absent selected rule; full policy
+code denies it. The tool accepts such a packet and prints a warning.
+Legacy names such as `per_transfer`, `daily_limit` or `max_calls` reject on the standard tiers.
+Negative caps reject at standard configuration. Code changes defer the new tier validation to
+delegated admission.
 Duplicate JSON keys reject. Fund the wallet only with its
 installed asset. `recover` transfers only that asset.
 
@@ -90,9 +96,9 @@ installed asset. `recover` transfers only that asset.
 admin source and three `--member` values.
 
 A deployment argument contains exactly `deployment_version`, `owner`, `agent`, `server`,
-`source_digest`, `rules`, `grant`, `x402_enabled`, and `wasm_hash`. The target version is current plus
+`source_digest`, `rules`, `params`, `x402_enabled`, and `wasm_hash`. The target version is current plus
 one. Use null for unchanged code. A non-null `wasm_hash` also requires `--wasm PATH` with that hash;
-the tool refuses Wasm without `allowit_custody_layout` metadata equal to 3. Code for another custody
+the tool refuses Wasm without `allowit_custody_layout` metadata equal to 4. Code for another custody
 layout cannot read the stored State, so such a change, including a rollback to an earlier release,
 locks custody permanently. Recover funds before any change across layouts. Deployment preserves
 pause and policy state. A changed owner must also authorize. Enabled x402 requires distinct G-agent and G-server keys and both signatures.
@@ -116,17 +122,17 @@ hash after an uncertain response. The tool never signs, submits, restores or ret
 
 Use `read --contract POLICY_WALLET_ADDRESS --source "$OWNER" --method policy_binding` to inspect the contract
 release, policy instance, module/source digests and argument schema. `state` returns the custody
-State, including the typed Grant and `policy_state`; `policy_state` returns the current policy state
-map alone. Archived data requires native restoration and is never reinitialized.
+State, including `params` and `policy_state`; `policy_state` returns the current policy state map
+alone. Archived data requires native restoration and is never reinitialized.
 The SDK rejects unavailable or ambiguous state observations before new signing. Owner pause,
 deployment and recovery do not depend on shared engine availability.
 
-Wallets with layout `contract_version` 1 (Map Grant) or 2 (accounting history struct) cannot
-execute under layout 3, and their accounting does not migrate. Owner `recover` and `invoke` still
-work after an in-place upgrade, because they read only the fields they keep; `deploy_policy` rejects
-an earlier layout with `InvalidState`. Drain such a wallet with `recover` and deploy a new one.
-`contract_admin.py` builds `deploy_policy` packets only for layout 3; read an earlier state with that
-release's tooling. `recover` does not read `state()`, so the tool also drains an upgraded wallet.
+Wallets with layout `contract_version` 1 (text-keyed params map), 2 (accounting history struct) or
+3 (typed canonical params and raw state values) cannot execute under layout 4, and their accounting
+does not migrate. Owner `recover` and `invoke` still work after an in-place upgrade, because they
+read only the fields they keep; `deploy_policy` rejects an earlier layout with `InvalidState`. Drain
+such a wallet with `recover` and deploy a new one. `contract_admin.py` builds `deploy_policy`
+packets only for layout 4; read an earlier state with that release's tooling. `recover` does not read `state()`, so the tool also drains an upgraded wallet.
 
 Normal operations do not migrate state. An incompatible change uses this explicit maintenance
 sequence: pause, deploy and run a migration contract, deploy the new contract using the migrated

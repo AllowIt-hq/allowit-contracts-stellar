@@ -1,7 +1,7 @@
 # Policy wallet engines
 
 Wallets keep one immutable underlying Stellar Asset Contract (SAC). The owner selects code, agent,
-independent server signer and Grant. `AllowitSimplePolicyEngine` relies on agent/server
+independent server signer and params. `AllowitSimplePolicyEngine` relies on agent/server
 authorization. `AllowitCommonPolicyEngine` is the standard implementation for an owner-approved
 initial preflight prefix. `AllowitCustomPolicy` compiles a complete authored policy into its
 contract. Shared checkers have no custody.
@@ -9,12 +9,12 @@ contract. Shared checkers have no custody.
 ## Public names
 
 Every public type that authored policy, SDK integrations or contract specs name carries the
-`Allowit` prefix: `AllowitContext`, `AllowitEnv`, `AllowitGrant`, `AllowitRule`, `AllowitError`,
-`AllowitExecutionRequest`, `AllowitPolicyDeployment`, `AllowitState` and the others. The contract
+`Allowit` prefix: `AllowitContext`, `AllowitEnv`, `AllowitParams`, `AllowitValue`, `AllowitRule`,
+`AllowitError`, `AllowitExecutionRequest`, `AllowitPolicyDeployment`, `AllowitState` and the others. The contract
 structs and their generated clients carry it too: `AllowitSimplePolicyEngine`,
 `AllowitCommonPolicyEngine`, `AllowitCustomPolicy`, `AllowitEngine`, `AllowitEngineParent`, and
 `AllowitEngineClient` and the other `*Client` types. Namespaced items keep their short names, such
-as `allowit::Result` and `allowit::spent_cap`.
+as `allowit::Result`, `allowit::spent_cap` and `allowit::TRANSACTION_CAP`.
 
 Encodings carry struct field names and enum variant symbols, not type names. The prefix therefore
 leaves signed encodings, the standard prefix digest test vector and the stored layout unchanged.
@@ -32,14 +32,18 @@ use allowit::prelude::*;
 /// I approve.
 pub fn execute(ctx: &AllowitContext) -> allowit::Result {
     // "Cap every payment"
-    allowit::transaction_cap(ctx, &ctx.grant.transaction_cap)?;
+    allowit::transaction_cap(ctx, ctx.params.get(allowit::TRANSACTION_CAP))?;
     // "cap its total spending"
-    allowit::spent_cap(ctx, &ctx.grant.spent_cap)?;
+    allowit::spent_cap(ctx, ctx.params.get(allowit::SPENT_CAP))?;
     // "pay only vendors I approve"
-    allowit::recipients(ctx, &ctx.grant.recipients)?;
+    allowit::recipients(ctx, ctx.params.get(allowit::RECIPIENTS))?;
     Ok(())
 }
 ```
+
+`execute` takes only the context. Each rule call keeps the form
+`allowit::<rule>(ctx, ctx.params.get(<key>))?`: the policy looks up the param and the rule decodes
+the value. A rule may read any key, such as a custom `vendor_cap`.
 
 The function doc comment keeps the owner's original policy prompt. Each inline comment quotes the
 prompt clause that the next call implements.
@@ -47,7 +51,7 @@ prompt clause that the next call implements.
 `AllowitCustomPolicy` and the offchain server call `execute` directly. Only an error that the
 policy returns, usually with `?`, denies. A policy may catch a rule error, read it, record it in
 its own state and continue. The standard contract runs only its leading canonical calls, supplied
-by the owner as `rules`, and skips unset fields. `scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes
+by the owner as `rules`, and skips absent params. `scripts/contract_admin.py` derives `rules` from the source file. `scripts/policy_source.py` lexes
 Rust comments, including nested block comments, and literals first, so they cannot add or hide calls.
 
 Policy source names `allowit` only as the path root `allowit::`. Any other occurrence of the
@@ -69,25 +73,29 @@ code through an allowlist, not a list of known hazards. Every identifier must be
 
 - an allowed keyword: `fn`, `const`, `let`, `mut`, `ref`, `pub`, `use`, `if`, `else`, `match`,
   `for`, `in`, `while`, `loop`, `break`, `continue`, `return`, `true` and `false`;
-- a listed field after `.`: `env`, `grant`, `request`, the Grant fields and the request fields;
+- a listed field after `.`: `env`, `params`, `request` and the request fields, including `args`;
 - a listed method after `.`: comparisons, `clone`, and the `Option`, `Result`, fixed-width integer,
   `bool` and `Ordering` methods that take and return no pointer-width value, such as `is_some`,
-  `unwrap_or`, `checked_add`, `saturating_sub`, `min` and `max`;
-- a listed path: the `allowit` rules, `get_state`, `set_state`, the server-only functions and
-  types, the `AllowitOperation`, `AllowitError` and `AllowitRule` variants, `Option` and `Result`
-  variants, `MAX`, `MIN`, `from` and `try_from` of the fixed-width integers, and
-  `core::cmp::{min, max, Ordering}`;
-- a listed type (`AllowitContext`, `AllowitError`, `AllowitGrant`, `AllowitOperation`,
-  `AllowitRequest`, `AllowitRule`, `Address`, `Result`, `Option`, `DAY` and the variants
-  `Some`, `None`, `Ok`, `Err`), a constant the file defines or an `allowit` type it imports;
+  `unwrap_or`, `checked_add`, `saturating_sub`, `min` and `max`, and `get` on `params` and `args`
+  only;
+- a listed path: the `allowit` rules, `param`, `get_state`, `set_state`, the canonical key
+  constants, the server-only functions and their request types, the `AllowitOperation`,
+  `AllowitError`, `AllowitRule` and `AllowitValue` variants, `Option` and `Result` variants,
+  `MAX`, `MIN`, `from` and `try_from` of the fixed-width integers, and `core::cmp::{min, max,
+  Ordering}`;
+- a listed type (`AllowitContext`, `AllowitError`, `AllowitOperation`, `AllowitRequest`,
+  `AllowitRule`, `AllowitValue`, `Address`, `Result`, `Option`, `DAY` and the variants `Some`,
+  `None`, `Ok`, `Err`), a canonical key constant, a server request type, a constant the file
+  defines or an `allowit` type it imports;
+- a field name of a server request struct expression, such as `query:`;
 - a lowercase name the file declares: a function or constant name, a function parameter, or a
   `let`, `for` or match-arm binding;
 - a fixed-width primitive type: the `i` and `u` integers of 8 to 128 bits, `bool`, `char` and `str`.
 
 `use` admits only `use allowit::prelude::*;` and imports of `allowit` types. The allowlist
 therefore rejects, among others: `usize`, `isize` and float types and literals; casts (`as`);
-closures and function values, including function pointer types and the `Some`, `Ok` and `Err`
-constructors when not called, because they compare by code address; the prelude functions
+closures and function values, including function pointer types and the `Some`, `Ok`, `Err` and
+`AllowitValue` constructors when not called, because they compare by code address; the prelude functions
 `size_of`, `size_of_val`, `align_of`, `align_of_val` and `drop`, because type sizes differ
 between the backends (a host `Address` is a 24-byte string, onchain an 8-byte handle); raw pointers; qualified (`<T>::`) and generic type paths; modules, traits, impls, structs,
 enums, statics, `unsafe`, `extern` and paths into the including crate (`crate`, `super`, `self`);
@@ -107,11 +115,14 @@ Beside the allowlist, the tooling rejects:
   `\u{7b}` cannot spell a brace.
 - Every attribute other than `allow`, `expect`, `warn`, `deny`, `forbid`, `inline`, `cold` and
   `must_use`, for example `track_caller`, `doc` or `cfg`.
-- List access other than through the list rules. `recipients` and `tokens` may appear only in the
-  call `allowit::<list>(<ctx>, &<ctx>.grant.<list>)`, with the same list name twice, and as
-  `AllowitRule` variants. A struct expression or pattern of `AllowitGrant` or `AllowitContext` and
-  struct update syntax `..` reject. Soroban and heap vectors have different methods with the same
-  names: for example `append` drains its argument only on the host.
+- The map inside `params` and `args`, such as `ctx.params.0`, and the name `AllowitParams`. Soroban
+  maps key by `Symbol` and decode values on read, and heap maps have other methods, so params and
+  args are read only with `.get(key)`. `get` passes only on `params` and `args`: on a list or a
+  string it would take a pointer-width index on the host. A struct expression or pattern of
+  `AllowitContext`, which would reach `state`, and struct update syntax `..` reject. Soroban and
+  heap vectors have different methods with the same names, for example `append` drains its argument
+  only on the host, so a list from `AllowitValue::List` admits only comparison, `clone`, matching
+  and `for`.
 - Indexing (`x[i]`), whose index Rust infers as `usize`.
 
 `scripts/policy_source.py` implements these checks; `check-policy-bindings.py` and the owner packet
@@ -175,14 +186,20 @@ The portability test, `crates/policy-wallet/src/portability_tests.rs`, runs one 
    errors and post-flight state. The real custom Wasm must then return the mapped policy result.
    A fixture Wasm built with the `test-catching` feature compiles `src/catching_policy.rs`
    instead, and must return the mapped catching result. That policy catches a daily cap error,
-   counts it in its own state key and continues, at most twice.
+   counts it in its own state key and continues, at most twice. When the agent's args name an
+   `invoice`, it also caps the payment with the custom `invoice_cap` param.
 3. `AllowitCommonPolicyEngine`: the real standard Wasm, bound to the sample policy's prefix, must
-   return the mapped first prefix preflight error. It skips unset Grant fields.
-4. `AllowitSimplePolicyEngine`: the real simple Wasm runs no rules.
+   return the mapped first prefix preflight error. It skips absent params and rejects a custom
+   param with `InvalidParam`.
+4. `AllowitSimplePolicyEngine`: the real simple Wasm runs no rules and also rejects a custom param.
 
 Every contract then returns the shared post-flight result. Each vector holds the current state
-before the operation. The test seeds each Wasm with the vector's Grant and that state, and checks
-that each success stores exactly the post-flight state that the host computed. Vectors that the
+before the operation. The test seeds each Wasm with the vector's params, args and that state, and
+checks that each success stores exactly the post-flight state that the host computed. Both backends
+also agree that the standard post-flight denies the catching policy's write with `Unsupported`.
+Separate tests check that every tier stores exactly the state that the server's `evaluate`
+returned, and that execution params reach the Custom policy, fail authorization when changed after
+signing, reject beyond their bounds and leave the standard tiers unaffected. Vectors that the
 kernel cannot produce, such as a deposit into the transfer-only custom contract or a negative cap,
 run only on the two backends. Kernel violations
 (another asset, payment to the wallet, request expiry, stale nonce, replay and pause) reject with the
@@ -197,9 +214,9 @@ worktree for concurrent runs. The mainnet tooling rejects any artifact whose has
 fixture.
 
 Portable authored code beyond canonical calls uses typed scalar fields, enum comparisons such as
-`ctx.request.operation == AllowitOperation::sep56_deposit`, and its own state keys. Backend list
-methods differ (`len` returns `u32` onchain and `usize` on the host), so the tooling allows lists
-only as arguments of `recipients` and `tokens`.
+`ctx.request.operation == AllowitOperation::sep56_deposit`, matches on `AllowitValue`, and its own
+state keys. Backend list methods differ (`len` returns `u32` onchain and `usize` on the host), so
+the tooling admits no list method.
 
 `AllowitContext` is the complete rule input. It is plain data without methods. The wallet or server
 computes it:
@@ -207,26 +224,53 @@ computes it:
 | Field | Content |
 | --- | --- |
 | `env` | Backend environment: the contract's Soroban `Env` onchain, an `AllowitEnv` on the host |
-| `grant` | Typed owner `AllowitGrant`. Each field is an `Option`; `None` is unset |
+| `params` | The owner's constructor params, key => `AllowitValue`. An absent key is unset |
 | `state` | Current policy state before this operation: one free-form map of standard and policy-defined keys |
-| `request` | Typed `AllowitOperation`, immutable asset, recipient (deposit vault), amount, `now`, `expires_at`, and `spent_units` and `gas_units` from the validated expense bounds, or `unpriced` |
+| `request` | Typed `AllowitOperation`, immutable asset, recipient (deposit vault), amount, `now`, `expires_at`, `spent_units` and `gas_units` from the validated expense bounds, or `unpriced`, and the agent's `args` |
 
-Rules are checks: `allowit::<rule>(ctx, &Option<V>) -> allowit::Result<T>`. Each returns only
-its passing constraint, or an `allowit::AllowitError`. An unset field is `MissingGrant`. Policy code
-calls rules unguarded, so an unset parameter denies. A rule error that the policy catches denies
-nothing: the policy decides.
+Params, state and args share one value type, `AllowitValue`: `Int(i128)`, `Bool(bool)`,
+`Str(String)`, `Addr(Address)` and `List(Vec<AllowitValue>)`. Onchain a map is
+`Map<Symbol, AllowitValue>`, on the host `BTreeMap<String, AllowitValue>`. `params` and
+`request.args` are `AllowitParams`, which wraps that map and offers only
+`get(key) -> Option<AllowitValue>`. Values are owned on both backends, because Soroban maps decode
+them on read; a borrowed host value would bind differently in a `match`. A key that no map can
+hold, such as one with a space, is unset on both backends.
+
+Rules are checks: `allowit::<rule>(ctx, Option<AllowitValue>) -> allowit::Result<T>`. Each decodes
+the value, then returns only its passing constraint, or an `allowit::AllowitError`. An unset param is
+`MissingParam`; a value of the wrong type or range is `InvalidParam`. Policy code calls rules
+unguarded, so an unset param denies. A rule error that the policy catches denies nothing: the
+policy decides. Custom keys reach policy as `ctx.params.get("vendor_cap")` or as
+`allowit::param(ctx, "vendor_cap")`, which returns the value or `MissingParam`.
+
+The owner sets params at install and changes them with `deploy_policy`, without code redeployment.
+The canonical keys are `allowit::TRANSACTION_CAP`, `SPENT_CAP`, `DAY_SPENT_CAP`, `DAY_TOTAL_CAP`,
+`CALL_CAP`, `RECIPIENTS`, `TOKENS` and `EXPIRY`, each the name of its rule.
+`allowit::check_params` checks every owner write. Simple and Common admit only the canonical keys,
+each with the type its rule decodes: a nonnegative `Int` cap, an `Int` in the `u64` range for
+`call_cap` and `expiry`, and a `List` of `Addr` for `recipients` and `tokens`. Custom admits up to
+32 keys, whose meaning its policy defines. Every value holds at most 64 nested values, and every
+text at most 256 bytes. Nothing checks that a rule reads its own key.
+
+The agent supplies execution params per call in `AllowitExecutionRequest.args`, at most 16 keys
+with the same value bounds. The agent and server authorize the whole request, so a changed arg
+fails authorization. The wallet passes them to policy as `ctx.request.args` and never stores them.
+Canonical rules and the standard contract ignore them; Custom and offchain policy read them with
+`ctx.request.args.get("key")`.
 
 The state map holds the standard keys `spent`, `day_spent`, `day_total`, `calls`, `day`,
 `unpriced` and `day_unpriced`, and any keys the policy defines. `AllowitStandardState` decodes the
-standard keys in one place; an absent key is zero or false, and a value of another type is
-`InvalidState`. Policy code reads a key with `allowit::get_state(ctx, key)`, which sees the state
-before this operation, and records a write with `allowit::set_state(ctx, key, value)`. Values are
-`i128`, `u64` or `bool`; a key is 1 to 32 ASCII letters, digits or underscores. Writes are held in
-the environment: in contract temporary storage onchain and in `AllowitEnv` on the host. `ctx`
-stays plain data.
+standard keys in one place; an absent key is zero or false, and a value of another type or range,
+such as a negative `calls`, is `InvalidState`. Policy code reads a key with
+`allowit::get_state::<V>(ctx, key)`, which sees the state before this operation and decodes the
+`AllowitValue` as `V`: `i128`, `u64`, `bool`, `Address` or `AllowitValue`. It records a write with
+`allowit::set_state(ctx, key, value)`, where the value converts into an `AllowitValue` within the
+value bounds; a key is 1 to 32 ASCII letters, digits or underscores. Writes are held in the
+environment: in contract temporary storage onchain and in `AllowitEnv` on the host. `ctx` stays
+plain data.
 
-`allowit::post_flight(ctx)` computes the state after an approved operation. The wallet and the
-server run the same function. It rolls the UTC day over, adds one call, adds `spent_units` to
+`allowit::post_flight(ctx, tier)` computes the state after an approved operation. The wallet and
+the server run the same function. It rolls the UTC day over, adds one call, adds `spent_units` to
 `spent` and `day_spent`, adds the amount and `gas_units` to `day_total`, and marks `unpriced` and
 `day_unpriced` for a request without expense bounds. It then applies the policy's writes, which may
 replace a standard key: owner-signed code is trusted, and no key is reserved. A merged state whose
@@ -237,61 +281,71 @@ before any repair write applies. The operation denies instead, so no policy writ
 standard update fail.
 `post_flight` consumes the write buffer first, even when it fails.
 
-The server evaluates a policy with `allowit::evaluate(ctx, execute)`. It clears stale writes, runs
-`execute`, and runs `post_flight` on approval; a denial discards the policy's writes. So no write
-outlives its evaluation, also when the server reuses an `AllowitEnv`. Onchain, the wallet runs
-`post_flight` after its own policy check, and a denied transaction rolls the temporary buffer back.
+The server evaluates a policy with `allowit::evaluate(ctx, execute, tier)`. It clears stale
+writes, runs `execute`, and runs `post_flight` on approval; a denial discards the policy's writes.
+So no write outlives its evaluation, also when the server reuses an `AllowitEnv`. Onchain, the
+wallet runs `post_flight` after its own policy check, and a denied transaction rolls the temporary
+buffer back.
 
-Simple and Common wallets run only the standard prefix onchain, so their `post_flight` stores only
-the standard keys. The offchain suffix's `set_state` writes never reach the chain. The server keeps
-the state map of its last approved `evaluate` for each wallet and builds the next `ctx.state` with
-`allowit::offchain_state(kept, chain)`: the kept map overlaid by the wallet's `policy_state`. Every
-key the chain holds wins. Policy-defined keys therefore persist offchain, and the standard keys that
-onchain preflight reads are the same on both sides. A suffix write to a standard key lasts only
-until the next operation on these tiers; only Custom stores it. Custom stores every key, so its
-`policy_state` alone is the server's `ctx.state`.
+`AllowitTier` selects what a wallet stores. Custom compiles its whole policy, so its
+`AllowitTier::Custom` post-flight applies every write. Simple and Common run only the standard
+prefix onchain, which never writes, so they store only the standard keys. Their
+`AllowitTier::Standard` post-flight therefore denies any policy write with `Unsupported`, on the
+host as onchain: the server never approves an operation whose state the chain would drop. For every
+tier, the state that `evaluate` returns is exactly the state the wallet stores, and the wallet's
+`policy_state` alone is the server's next `ctx.state`. `scripts/contract_admin.py` rejects a Simple
+or Common packet whose source calls `allowit::set_state`; such a policy needs Custom.
 
-The server-only enrichment functions `price`, `fetch`, `internet_search`, `marketplace_search`,
-`systemone`, `request_screening` and `clear_systemone_context` exist only in the host backend.
-There they are stubs that return `Unsupported` until the server fills them. A Custom policy that
-calls one does not compile, because the Soroban backend has none of them.
+The server-only enrichment functions exist only in the host backend. Each takes the context and an
+owner-written request and returns its passing constraint:
+`price(ctx, &AllowitPrice { from, to, amount, price, slip })` the observed price,
+`fetch(ctx, &AllowitFetch { method, url, data, pubkey })` the verified response,
+`internet_search(ctx, &AllowitInternetSearch { query })` and
+`marketplace_search(ctx, &AllowitMarketplaceSearch { query })` their results,
+`request_screening(ctx, &AllowitRequestScreening { query, deny_below })` the passing score,
+`systemone(ctx, &AllowitSystemOne { id, query, deny_below, allow_above })` the passing confidence,
+and `clear_systemone_context(ctx)` nothing. Scores and confidences are basis points. There they are
+stubs that return `Unsupported` until the server fills them. A Custom policy that calls one does not
+compile, because the Soroban backend has none of them.
 
-| Rule and same-named Grant field | Native value | Pass value |
+| Rule and canonical param key | Param value | Pass value |
 | --- | --- | --- |
-| `transaction_cap` | Nonnegative `i128` gross units for one operation | `cap - amount` |
-| `spent_cap` | Nonnegative `i128` cumulative irreversible-expense ceiling | `cap - (spent + spent_units)` |
-| `day_spent_cap` | Nonnegative `i128` UTC-day irreversible-expense ceiling | `cap - (today_spent + spent_units)` |
-| `day_total_cap` | Nonnegative `i128` UTC-day gross amount plus separate gas | `cap - (today_total + amount + gas_units)` |
-| `call_cap` | `u64` successful operation count ceiling; zero denies | `cap - (calls + 1)` |
-| `recipients` | `Vec<Address>` permitted destinations, including vaults; empty denies | Matched recipient |
-| `tokens` | `Vec<Address>` exact permitted SAC identities; empty denies | Matched asset |
-| `expiry` | `u64` exclusive Unix timestamp; request expiry cannot exceed it | `expiry - now` |
+| `transaction_cap` | Nonnegative `Int` gross units for one operation | `cap - amount` |
+| `spent_cap` | Nonnegative `Int` cumulative irreversible-expense ceiling | `cap - (spent + spent_units)` |
+| `day_spent_cap` | Nonnegative `Int` UTC-day irreversible-expense ceiling | `cap - (today_spent + spent_units)` |
+| `day_total_cap` | Nonnegative `Int` UTC-day gross amount plus separate gas | `cap - (today_total + amount + gas_units)` |
+| `call_cap` | `Int` in the `u64` range: successful operation count ceiling; zero denies | `cap - (calls + 1)` |
+| `recipients` | `List` of `Addr`: permitted destinations, including vaults; empty denies | Matched recipient |
+| `tokens` | `List` of `Addr`: exact permitted SAC identities; empty denies | Matched asset |
+| `expiry` | `Int` in the `u64` range: exclusive Unix timestamp; request expiry cannot exceed it | `expiry - now` |
 
 `today_spent` and `today_total` are the daily values when `state.day == now / 86400`, and zero for
 an earlier day. A later day is `InvalidState`. Each rule checks only the facts it reads. A negative
-cap is `InvalidParameter`, as are a nonpositive `transaction_cap` amount and negative request
-units. A negative state value that a cap reads is `InvalidState`. Lifetime unpriced state or an
+cap is `InvalidParam`, as are a nonpositive `transaction_cap` amount and negative request units. A negative state value that a cap reads is `InvalidState`. Lifetime unpriced state or an
 unpriced request denies `spent_cap`; unpriced state of the day or an unpriced request denies both
-daily caps (`Unpriced`). A sum outside its integer range is `Overflow`. Deployment rejects negative
-caps.
+daily caps (`Unpriced`). A sum outside its integer range is `Overflow`. Standard configuration
+rejects negative caps.
 
 ## Standard prefix
 
 The standard prefix is the consecutive leading top-level statements of exactly the form
-`allowit::<rule>(ctx, &ctx.grant.<rule>)?;`: one canonical rule and its same-named Grant field.
-Any other statement ends it. Later statements run offchain or in `AllowitCustomPolicy`.
+`allowit::<rule>(ctx, ctx.params.get(allowit::<RULE>))?;`: one canonical rule and its own canonical
+key constant. Any other statement ends it, including a rule that reads another key. Later
+statements run offchain or in `AllowitCustomPolicy`.
 The standard contract receives the exact owner-approved ordered prefix as `rules: Vec<AllowitRule>`, never
 caller selectors. `AllowitRule` is a typed enum whose variants are the canonical names. Soroban decodes
-vector elements when read, so owner configuration decodes every rule and allowlist element before
-storing it: an unknown name aborts and a malformed element is `InvalidGrant`. It runs each call through `allowit::preflight` as `if grant.<rule>.is_some() { allowit::<rule>(ctx, &grant.<rule>)?; }`
-and discards pass values. This preflight runner is the only place an unset field skips its rule.
-The offchain full policy and `AllowitCustomPolicy` still run the unguarded call, so they deny it
-with `MissingGrant`. An unset prefix field is valid configuration: the owner can set or unset Grant
-values with `deploy_policy` without code redeployment. `scripts/contract_admin.py` warns about it
-without rejecting the packet. The preflight runner propagates the first rule error. Repeated rules
+vector and map elements when read, so owner configuration decodes every rule and param value before
+storing it: an unknown rule name aborts and a malformed element is `InvalidParam`. It runs each call
+through `allowit::preflight` as
+`if let Some(value) = ctx.params.get(rule.key()) { allowit::<rule>(ctx, Some(value))?; }` and
+discards pass values. This preflight runner is the only place an absent param skips its rule. The
+offchain full policy and `AllowitCustomPolicy` still run the unguarded call, so they deny it with
+`MissingParam`. An absent prefix param is valid configuration: the owner can set or remove params
+with `deploy_policy` without code redeployment. `scripts/contract_admin.py` warns about it without
+rejecting the packet. The preflight runner propagates the first rule error. Repeated rules
 read the same current state and only `post_flight` charges, so a rule cannot charge twice.
 
-Rule denials map to `PolicyDenied`. `MissingGrant` and `InvalidParameter` map to `InvalidGrant`.
+Rule denials map to `PolicyDenied`. `MissingParam` and `InvalidParam` map to `InvalidParam`.
 `InvalidState` maps to `InvalidState`, `Overflow` to `Overflow` and `Unsupported` to
 `UnsupportedOperation`. A failed call rolls back its events, so only the host
 evaluator and the shared engine return the specific rule error.
@@ -314,7 +368,7 @@ operation runs; the transaction fails and no state changes.
 Fixed standard `source_digest` is SHA-256 of canonical XDR containing the domain
 `allowit_std_prefix`, implementation kind, actual module hash, immutable SAC, transfer/deposit schema
 hashes and the ordered `Vec<AllowitRule>`. Each unit variant encodes as a one-symbol vector of its rule
-name; its Grant reference is always the same-named field. It excludes Grant values and full source.
+name; the param it reads is always its canonical key. It excludes param values and full source.
 The constructor and binding getter check it against the actual runtime module.
 
 Custom `source_digest` is the plain SHA-256 of the exact bytes of `crates/custom-policy/policy/policy.rs`.
@@ -328,28 +382,30 @@ Each execution separately carries `source_hash`, covered by agent/server authori
 digest. Offline updates do not replace already signed operation bytes or their recovery identity.
 
 `deploy_policy` changes owner configuration at exactly the next `deployment_version`.
-With `wasm_hash=None`, Grant values change without code redeployment. Prefix, policy state, custody,
-execution nonce and pause remain intact when only Grant changes. The new revision rejects old
+With `wasm_hash=None`, params change without code redeployment. Prefix, policy state, custody,
+execution nonce and pause remain intact when only params change. The new revision rejects old
 inflight packets. A changed prefix or executable requires a new owner binding.
 
 Owner packets bind their exact meaning. Struct decoding ignores extra keys and reads absent
 `Option` keys as `None`, so the constructor and `deploy_policy` require owner authorization for
-the canonical re-encoding of the decoded packet. Bindings name the authored entrypoint `execute`. A packet with legacy, extra or absent keys fails
+the canonical re-encoding of the decoded packet. A params map decodes as sent, so an absent key is
+unset. Bindings name the authored entrypoint `execute`. A packet with legacy, extra or absent keys fails
 authorization unless the owner signed that canonical form.
 
-`contract_version` 3 stores the typed Grant, `Vec<AllowitRule>` and the free-form
-`policy_state` map. Version 2 stored a typed accounting history struct, and version 1 an untyped
-Grant map and symbol rules. Execution, `state()`, `policy_state()` and `set_pause` accept only the
-exact canonical encoding of version 3, including the nested Grant. Owner `recover` and `invoke`
+`contract_version` 4 stores `params` and the free-form `policy_state` as key => `AllowitValue`
+maps, and `Vec<AllowitRule>`. Version 3 stored the canonical params as a typed struct and policy
+state of raw values, version 2 a typed accounting history struct, and version 1 a text-keyed params
+map and symbol rules. Execution, `state()`, `policy_state()` and `set_pause` accept only the exact
+canonical encoding of version 4. Owner `recover` and `invoke`
 decode a typed struct of only the fields they keep, so an in-place upgrade from an earlier layout
-never locks recovery. `deploy_policy` carries `policy_state` over; an earlier layout has none, so
-`deploy_policy` rejects it with `InvalidState`. No layout migrates implicitly: recover funds from an
-earlier layout and deploy a new wallet. A complete typed `deploy_policy` packet replaces Grant,
-rules and roles, keeps policy state, nonce, pause and asset, and writes version 3. Later versions
+never locks recovery. `deploy_policy` carries `policy_state` over; an earlier layout stores none or stores
+other values, so `deploy_policy` rejects it with `InvalidState`. No layout migrates implicitly: recover funds from an
+earlier layout and deploy a new wallet. A complete typed `deploy_policy` packet replaces params,
+rules and roles, keeps policy state, nonce, pause and asset, and writes version 4. Later versions
 reject even owner calls, because their kept fields may change meaning. New source and schema
 hashes need new owner bindings.
 
-Earlier code reads State only in its own layout, so a `deploy_policy` code change from version 3
+Earlier code reads State only in its own layout, so a `deploy_policy` code change from version 4
 to an earlier release permanently locks custody. Each
 wallet Wasm declares `allowit_custody_layout` metadata equal to `CONTRACT_VERSION`.
 `contract_admin.py` refuses a code change to Wasm that declares another layout or none. Recover
@@ -359,12 +415,12 @@ funds before any change across layouts. Every later layout bump needs the same r
 
 `AllowitContext` carries the contract `Env`, so it is not a contract value. The shared engine
 exposes each canonical rule as
-`<rule>(grant: AllowitGrant, state: Map<Symbol, Val>, request: AllowitRequest) -> Result<T, AllowitError>`,
+`<rule>(params: Map<Symbol, AllowitValue>, state: Map<Symbol, AllowitValue>, request: AllowitRequest) -> Result<T, AllowitError>`,
 where `state` is the current policy state.
 Callers use its generated `AllowitEngineClient`.
-It builds the context with its own `Env`, runs `allowit::<rule>(&ctx, &ctx.grant.<rule>)` and
-returns the same pass value or rule error.
-It holds no custody, Grant or policy state. No policy wallet, release tool or server in this repository
+It builds the context with its own `Env`, runs `allowit::<rule>(&ctx, ctx.params.get(allowit::<RULE>))`
+and returns the same pass value or rule error.
+It holds no custody, params or policy state. No policy wallet, release tool or server in this repository
 calls it; offchain evaluation uses `allowit` directly. It remains the engine parent's administered
 checker for onchain callers that cannot bundle `allowit`. Its tests match `AllowitRule` exhaustively, so a
 new rule fails to compile until the engine exposes it. The `test-deny` fixture aborts every rule
@@ -392,7 +448,8 @@ expenses and temporary loss. No automatic onchain refund authority follows from 
 
 `execute` and the owner-enabled x402 transfer hook require agent and server authority. The kernel
 checks source/module/schema, immutable asset, exact parties/amount, positive debit, pause, expiry,
-configuration version, execution nonce and single-use operation ID independently of business checks.
+configuration version, execution nonce, single-use operation ID and the execution params' bounds
+independently of business checks.
 The x402 hook decodes its execution like `execute` and admits only the canonical transfer profile.
 State, effects and receipts commit atomically. Denials and native failures roll them back.
 
