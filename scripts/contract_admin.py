@@ -155,6 +155,9 @@ def wallet_layout(state):
 CAPS = {"transaction_cap", "spent_cap", "day_spent_cap", "day_total_cap"}
 LISTS = {"recipients", "tokens"}
 # Bounds that the wallet contract enforces: `allowit::MAX_PARAMS`, `MAX_ITEMS` and `MAX_TEXT`.
+# A Custom policy state also holds at most `allowit::MAX_STATE_KEYS` (39) keys: the seven standard
+# keys and 32 policy keys. No call deletes a state key, and a redeployed policy keeps the state,
+# so a policy that writes a new key past that bound denies every operation that writes it.
 MAX_PARAMS, MAX_ITEMS, MAX_TEXT = 32, 64, 256
 VALUE_TYPES = ("Int", "Bool", "Str", "Addr", "List")
 PARAM_KEY = re.compile(r"[A-Za-z0-9_]{1,32}")
@@ -195,12 +198,13 @@ def param_value(item, count):
 
 def params(value, tier=None):
     """Validate owner params and return their pinned CLI spec JSON, a key => AllowitValue object.
-    Keys are 1 to 32 ASCII letters, digits or underscores, at most 32 of them. Simple and Common admit
-    only the canonical keys, each with its rule's type: nonnegative caps, unsigned 64-bit `call_cap`
-    and `expiry`, and address lists. An absent key is unset."""
+    Keys are 1 to 32 ASCII letters, digits or underscores, at most 32 of them. Simple and Common
+    admit only the 8 canonical keys, each with its rule's type: nonnegative caps, unsigned 64-bit
+    `call_cap` and `expiry`, and address lists. An absent key is unset."""
     standard = tier in ("simple", "common")
-    if not isinstance(value, dict) or len(value) > (len(PARAM_KEYS) if standard else MAX_PARAMS):
-        raise ValueError("Params must be an object of at most {} keys".format(MAX_PARAMS))
+    limit = len(PARAM_KEYS) if standard else MAX_PARAMS
+    if not isinstance(value, dict) or len(value) > limit:
+        raise ValueError("Params must be an object of at most {} keys".format(limit))
     result = {}
     for key, item in value.items():
         if not PARAM_KEY.fullmatch(key):

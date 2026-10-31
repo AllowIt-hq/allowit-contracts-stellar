@@ -216,6 +216,10 @@ class ContractAdmin(unittest.TestCase):
                         {"x": 2**127}, {"k" + str(i): i for i in range(33)}):
             with self.subTest(params=invalid), self.assertRaises((ValueError, TypeError)):
                 ca.params(invalid, "custom")
+        # The count error names the limit of the tier.
+        for tier, limit in (("common", 8), ("simple", 8), ("custom", 32)):
+            with self.subTest(tier=tier), self.assertRaisesRegex(ValueError, "at most {} keys".format(limit)):
+                ca.params({"k" + str(i): i for i in range(limit + 1)}, tier)
         deployment = {"deployment_version": 1, "owner": KEYS[0], "agent": KEYS[1], "server": KEYS[2], "source_digest": "22" * 32,
                       "rules": ["spent_cap", "recipients"], "params": values, "x402_enabled": False, "wasm_hash": None}
         ca.deployment(deployment)
@@ -886,6 +890,50 @@ class ContractAdmin(unittest.TestCase):
         for body in probes:
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
                 ca.standard_prefix(source(body, head))
+
+    def test_policy_source_reads_params_and_args_only_through_their_context_fields(self):
+        head = HEAD + CALL("recipients")
+        # Review probes: a list bound to `args` or `params` takes a pointer-width index, so the
+        # host stores width=Int(4294967296) where the chain stores Int(0).
+        probes = (
+            "    if let Some(AllowitValue::List(args)) = ctx.params.get(\"vendors\") {\n"
+            "        let i = 65_536;\n        let _ = args.get(i);\n        let wide = i.checked_mul(65_536).unwrap_or(0);\n"
+            "        allowit::set_state(ctx, \"width\", u64::try_from(wide).unwrap_or(0))?;\n    }\n",
+            "    match ctx.params.get(\"vendors\") {\n        Some(AllowitValue::List(params)) => {\n"
+            "            let n = 65536;\n            let _ = params.get(n);\n"
+            "            if n.checked_mul(n).is_some() {\n                return Err(AllowitError::Expired);\n            }\n"
+            "        }\n        _ => {}\n    }\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            for body in probes:
+                with self.subTest(body=body):
+                    policy.write_text(source(body, head))
+                    # Each passes the std-only compile, so only the gate rejects it.
+                    ca.host_compile(policy)
+                    with self.assertRaisesRegex(ValueError, "self-contained"):
+                        ca.standard_prefix(source(body, head))
+        # Any other binding named for the fields, or `get` on a value that is no field access.
+        for body in ("    let params = ctx.params.clone();\n    let _ = params.get(\"k\");\n",
+                     "    let p = ctx.request.args.clone();\n    let _ = p.get(\"k\");\n",
+                     "    for args in [0u8] {\n        let _ = args;\n    }\n"):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "self-contained"):
+                ca.standard_prefix(source(body, head))
+        fn = "fn f(params: &AllowitContext) -> bool {{ {} }}\n".format
+        with self.assertRaisesRegex(ValueError, "self-contained"):
+            ca.standard_prefix(fn("params.request.args.get(\"k\").is_some()") + source("", head))
+        # The map inside params or args is private on the host, through a clone or a binding too.
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.rs"
+            for body in ("    for (_, v) in ctx.params.clone().0 {\n        let _ = v;\n    }\n",
+                         "    let p = ctx.request.args.clone();\n    for (_, w) in p.0 {\n        let _ = w;\n    }\n"):
+                with self.subTest(body=body):
+                    policy.write_text(source(body, head))
+                    with self.assertRaisesRegex(ValueError, "std-only compile"):
+                        ca.host_compile(policy)
+        # Field reads stay valid.
+        valid = "    let _ = ctx.params.get(\"k\").or(ctx.request.args.get(\"memo\"));\n"
+        self.assertEqual(ca.standard_prefix(source(valid, head)), ["recipients"])
 
     def test_policy_source_rejects_closure_pointer_and_layout_probes(self):
         call = CALL

@@ -94,7 +94,8 @@ STRUCT_FIELDS = frozenset(("from", "to", "amount", "price", "slip", "method", "u
                            "deny_below", "allow_above"))
 ALLOWIT_FUNCTIONS = PARAM_KEYS + ("param", "get_state", "set_state") + SERVER_FUNCTIONS
 # `AllowitParams` is absent on purpose: naming it would reach the backend map, whose keys and
-# methods differ. Params and args are read only with `.get(key)`.
+# methods differ. Params and args are read only with `.get(key)`; the host backend also keeps that
+# map private, so the std-only compile rejects `.0` on any params or args value.
 ALLOWIT_TYPES = ("AllowitContext", "AllowitError", "AllowitOperation", "AllowitRequest", "AllowitRule", "AllowitValue",
                  "Address", "Result", "DAY") + tuple(key.upper() for key in PARAM_KEYS) + SERVER_TYPES
 TYPES = frozenset(ALLOWIT_TYPES + ("Option", "Some", "None", "Ok", "Err"))
@@ -118,9 +119,12 @@ PATHS = FUNCTION_PATHS | frozenset(
 # Context and request fields. `ctx.state` is read only through `allowit::get_state`.
 FIELDS = frozenset(("env", "params", "request", "operation", "asset", "recipient", "amount", "now", "expires_at",
                     "spent_units", "gas_units", "unpriced", "args"))
-# Methods allowed only on one receiver field: `get` reads params and args by key. On a list or a
-# string it would take a pointer-width index on the host.
+# Methods allowed only on one receiver field: `get` reads params and args by key, as in
+# `ctx.params.get` or `ctx.request.args.get`. The receiver must be that field access, and the file
+# must not declare these names: on a list or a string bound to `params` or `args`, `get` would take
+# a pointer-width index on the host.
 FIELD_METHODS = {"get": ("params", "args")}
+FIELD_NAMES = frozenset(name for fields in FIELD_METHODS.values() for name in fields)
 # Methods of `Option`, `Result`, fixed-width integers, `bool` and `Ordering` that take and return
 # no pointer-width value and no backend list.
 METHODS = frozenset((
@@ -276,6 +280,8 @@ def allowlisted(code):
     tokens = TOKEN.findall(code)
     local_fns = {tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "fn"}
     local_names = declared(tokens)
+    for name in sorted(local_names & FIELD_NAMES):
+        reject("the name `{}` for a binding or function; it is reserved for the context field".format(name))
     defined = {tokens[k + 1] for k in range(len(tokens) - 1) if tokens[k] == "const" and IDENT.fullmatch(tokens[k + 1])}
     i = 0
     while i < len(tokens):
@@ -319,8 +325,9 @@ def allowlisted(code):
             if after in ("(", "::"):
                 if name not in METHODS:
                     reject("the method `{}`, which is not on the portable allowlist".format(name))
-                if name in FIELD_METHODS and tokens[i - 2:i - 1] != [] and tokens[i - 2] not in FIELD_METHODS[name]:
-                    reject("the method `{}` other than on {}".format(name, " or ".join(FIELD_METHODS[name])))
+                if name in FIELD_METHODS and (i < 3 or tokens[i - 2] not in FIELD_METHODS[name] or tokens[i - 3] != "."):
+                    reject("the method `{}` other than on the field {}".format(
+                        name, " or ".join("`." + field + "`" for field in FIELD_METHODS[name])))
             elif name not in FIELDS:
                 reject("the field `{}`, which is not on the portable allowlist".format(name))
             i += 1
