@@ -423,7 +423,10 @@ On Stellar both rules follow from the wallet's authorization:
 - A custom call gets no nested authorization from the wallet, so a contract that it reaches cannot
   spend for the wallet.
 - A nested `__check_auth` of the wallet during its own operation calls a contract that is already
-  on the call stack. The Soroban host refuses that re-entry, and the transaction fails.
+  on the call stack. The Soroban host refuses that re-entry from a callee, and the transaction
+  fails. The host does allow an immediate re-entry: the wallet's own frame calls `require_auth` on
+  the wallet's address, and the host runs its `__check_auth`. The rule holds because the wallet
+  never does that; it calls `require_auth` only on the owner, agent and server.
 - The wallet holds no standing allowance. Each debit is one exact `transfer` authorization, and the
   wallet never approves a spender. A test checks that no transfer, x402 transfer or deposit leaves
   an allowance, also for a vault that tries to approve itself.
