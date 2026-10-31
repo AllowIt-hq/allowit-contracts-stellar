@@ -242,6 +242,15 @@ The server evaluates a policy with `allowit::evaluate(ctx, execute)`. It clears 
 outlives its evaluation, also when the server reuses an `AllowitEnv`. Onchain, the wallet runs
 `post_flight` after its own policy check, and a denied transaction rolls the temporary buffer back.
 
+Simple and Common wallets run only the standard prefix onchain, so their `post_flight` stores only
+the standard keys. The offchain suffix's `set_state` writes never reach the chain. The server keeps
+the state map of its last approved `evaluate` for each wallet and builds the next `ctx.state` with
+`allowit::offchain_state(kept, chain)`: the kept map overlaid by the wallet's `policy_state`. Every
+key the chain holds wins. Policy-defined keys therefore persist offchain, and the standard keys that
+onchain preflight reads are the same on both sides. A suffix write to a standard key lasts only
+until the next operation on these tiers; only Custom stores it. Custom stores every key, so its
+`policy_state` alone is the server's `ctx.state`.
+
 The server-only enrichment functions `price`, `fetch`, `internet_search`, `marketplace_search`,
 `systemone`, `request_screening` and `clear_systemone_context` exist only in the host backend.
 There they are stubs that return `Unsupported` until the server fills them. A Custom policy that

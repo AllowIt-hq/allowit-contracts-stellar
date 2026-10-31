@@ -28,6 +28,8 @@
 //! server runs a policy through `evaluate`, which also discards the writes of a denied run. The
 //! standard contract runs the leading canonical calls,
 //! supplied by the owner as `rules`, through `preflight`, which skips unset fields.
+//! Simple and Common store only standard keys: the server keeps its suffix's own keys and builds
+//! `ctx.state` with `offchain_state`, in which every key the chain holds wins.
 //!
 //! Portable authored code uses rule calls, `get_state` and `set_state`, typed scalar fields and
 //! enum comparisons. `scripts/policy_source.py` admits only an allowlist of names, paths and

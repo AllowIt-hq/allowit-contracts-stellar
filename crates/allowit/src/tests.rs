@@ -653,3 +653,21 @@ fn evaluate_discards_writes_of_a_denied_or_stale_run() {
         assert_eq!(read::<u64>(&env, &next, "seen"), Ok(None));
     });
 }
+
+#[test]
+fn offchain_state_keeps_policy_keys_and_takes_every_chain_key() {
+    let env = Env::default();
+    let (spent, over) = (Symbol::new(&env, SPENT), Symbol::new(&env, "over"));
+    let mut kept = Map::new(&env);
+    kept.set(spent.clone(), 9i128.into_val(&env));
+    kept.set(over.clone(), 1u64.into_val(&env));
+    let mut chain = Map::new(&env);
+    chain.set(spent.clone(), 5i128.into_val(&env));
+    let state = offchain_state(&kept, &chain);
+    let read = |key: &Symbol| i128::try_from_val(&env, &state.get(key.clone()).unwrap());
+    assert_eq!(read(&spent), Ok(5));
+    assert_eq!(u64::try_from_val(&env, &state.get(over).unwrap()), Ok(1));
+    assert_eq!(state.len(), 2);
+    // Custom stores every key, so the chain alone is its state.
+    assert_eq!(offchain_state(&chain, &chain), chain);
+}

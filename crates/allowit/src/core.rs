@@ -469,6 +469,15 @@ pub fn evaluate(
     run.and_then(|()| post_flight(ctx))
 }
 
+/// The server's `ctx.state` for any wallet: the state it kept from its last approved `evaluate`,
+/// overlaid by the wallet's stored `policy_state`. Every key the chain holds wins. Simple and
+/// Common store only standard keys, so their suffix's own keys come from `kept`; Custom stores all.
+pub fn offchain_state(kept: &AllowitStateMap, chain: &AllowitStateMap) -> AllowitStateMap {
+    let mut state = kept.clone();
+    merge(&mut state, chain.clone());
+    state
+}
+
 impl AllowitGrant {
     /// Check owner configuration before storing it. Negative caps are `InvalidParameter`.
     /// The struct enforces types. Unset fields are valid configuration.

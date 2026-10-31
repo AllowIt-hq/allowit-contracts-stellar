@@ -15,6 +15,10 @@
 //! The simple contract runs no rules. Every contract then returns the shared post-flight result
 //! and stores exactly the post-flight state that the host computed. Kernel violations reject
 //! identically in every contract.
+//!
+//! A writing suffix on the standard tiers: the server keeps the suffix's own keys offchain and
+//! builds `ctx.state` with `allowit::offchain_state`, so Common and Simple approve exactly the
+//! operations that the catching custom contract approves.
 extern crate std;
 use super::tests::{CATCHING, COMMON, CUSTOM, Fixture, SIMPLE};
 use super::*;
@@ -325,14 +329,9 @@ struct Wallet {
     operations: core::cell::Cell<u64>,
 }
 impl Wallet {
+    /// Deploy the tier's Wasm, fund it and bind Common to the sample policy's prefix.
     fn new(tier: Tier) -> Self {
-        let wasm = match tier {
-            Tier::Custom => CUSTOM,
-            Tier::Common => COMMON,
-            Tier::Simple => SIMPLE,
-            Tier::Catching => CATCHING,
-        };
-        let f = Fixture::new(wasm, false);
+        let f = Fixture::new(Self::wasm(tier), false);
         f.env.mock_all_auths();
         StellarAssetClient::new(&f.env, &f.asset).mint(&f.wallet, &1_000_000);
         f.env.mock_auths(&[]);
@@ -340,33 +339,49 @@ impl Wallet {
         while universe.len() < vectors::ADDRESSES {
             universe.push(Address::generate(&f.env));
         }
-        if tier == Tier::Common {
-            // Bind the standard contract to the sample policy's prefix.
-            let mut rules = Vec::new(&f.env);
-            for rule in sample_prefix() {
-                rules.push_back(rule);
-            }
-            let module = f.env.crypto().sha256(&Bytes::from_slice(&f.env, wasm));
-            let digest = standard_prefix_digest(
-                &f.env,
-                &Symbol::new(&f.env, "common_policy_engine"),
-                &module.to_bytes(),
-                &f.asset,
-                &rules,
-            );
-            f.env.as_contract(&f.wallet, || {
-                let mut state = state(&f.env).unwrap();
-                state.rules = rules;
-                state.source_digest = digest;
-                store(&f.env, &state);
-            });
-        }
-        Self {
+        let wallet = Self {
             f,
             tier,
             universe,
             operations: core::cell::Cell::new(0),
+        };
+        if tier == Tier::Common {
+            wallet.bind(&sample_prefix());
         }
+        wallet
+    }
+    /// The deployed Wasm of a tier.
+    fn wasm(tier: Tier) -> &'static [u8] {
+        match tier {
+            Tier::Custom => CUSTOM,
+            Tier::Common => COMMON,
+            Tier::Simple => SIMPLE,
+            Tier::Catching => CATCHING,
+        }
+    }
+    /// Bind the standard contract to an authored policy's leading-rule prefix.
+    fn bind(&self, prefix: &[AllowitRule]) {
+        let env = &self.f.env;
+        let mut rules = Vec::new(env);
+        for rule in prefix {
+            rules.push_back(*rule);
+        }
+        let module = env
+            .crypto()
+            .sha256(&Bytes::from_slice(env, Self::wasm(self.tier)));
+        let digest = standard_prefix_digest(
+            env,
+            &Symbol::new(env, "common_policy_engine"),
+            &module.to_bytes(),
+            &self.f.asset,
+            &rules,
+        );
+        env.as_contract(&self.f.wallet, || {
+            let mut state = state(env).unwrap();
+            state.rules = rules;
+            state.source_digest = digest;
+            store(env, &state);
+        });
     }
     /// Install the vector's Grant and current state, and move the ledger to the request time.
     /// The owner can change Grant values without code redeployment.
@@ -565,5 +580,61 @@ fn kernel_violations_reject_identically_in_every_contract() {
         let mut replay = wallet.request(&v);
         replay.operation_id = e.operation_id;
         assert_eq!(wallet.execute(&replay), Err(W::Replay as u32), "{tier:?}");
+    }
+}
+
+/// Simple and Common store only standard keys: the catching suffix's own key never reaches the
+/// chain. The server keeps it and builds `ctx.state` with `allowit::offchain_state`, so the
+/// standard tiers allow exactly the two caught daily cap errors that the custom contract allows.
+#[test]
+fn standard_tier_server_keeps_suffix_writes_and_matches_the_custom_contract() {
+    let mut v = vectors::base();
+    v.caps[2] = Some(44);
+    let custom = Wallet::new(Tier::Catching);
+    let common = Wallet::new(Tier::Common);
+    // The catching policy's prefix is its leading `recipients` call.
+    common.bind(&[AllowitRule::recipients]);
+    let simple = Wallet::new(Tier::Simple);
+    let mut want = List::new();
+    custom.seed(&v, false);
+    for _ in 0..3 {
+        let result = custom.execute(&custom.request(&v));
+        let stored = line(&custom.f.env, &custom.f.client().policy_state());
+        want.push(result.map(|()| stored));
+    }
+    let denied = Err(wallet_error(AllowitError::DaySpentCapExceeded as u32));
+    assert!(
+        want[0].is_ok() && want[1].is_ok() && want[2] == denied,
+        "{want:?}"
+    );
+    for wallet in [&common, &simple] {
+        let env = &wallet.f.env;
+        wallet.seed(&v, false);
+        // The server's view: the state map of its last approved evaluation.
+        let mut kept = Map::new(env);
+        // Evaluate the full catching policy on the server's `ctx.state`, as the server would.
+        let evaluate = |state: Map<Symbol, Val>| {
+            env.as_contract(&wallet.f.wallet, || {
+                let mut c = context(env, &wallet.universe, &v);
+                c.state = state;
+                allowit::evaluate(&c, catching::execute).map_err(|e| wallet_error(e as u32))
+            })
+        };
+        for (i, want) in want.iter().enumerate() {
+            let chain = wallet.f.client().policy_state();
+            // Danger: from chain state alone the suffix never sees its count and approves the third.
+            assert!(evaluate(chain.clone()).is_ok(), "{i} {:?}", wallet.tier);
+            let got = evaluate(allowit::offchain_state(&kept, &chain)).and_then(|next| {
+                // The server signs only an approved evaluation; the wallet then agrees.
+                wallet.execute(&wallet.request(&v))?;
+                let after = wallet.f.client().policy_state();
+                // The chain stored the host's standard keys; only the suffix's key stays offchain.
+                assert_eq!(allowit::offchain_state(&next, &after), next, "{i}");
+                assert!(!after.contains_key(Symbol::new(env, vectors::OVER)), "{i}");
+                kept = next;
+                Ok(line(env, &kept))
+            });
+            assert_eq!(got, *want, "{i} {:?}", wallet.tier);
+        }
     }
 }
