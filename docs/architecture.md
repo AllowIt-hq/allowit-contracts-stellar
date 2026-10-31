@@ -1,10 +1,21 @@
 # Policy wallet engines
 
-Wallets keep one immutable underlying Stellar Asset Contract (SAC). The owner selects code, agent,
-independent server signer and params. `AllowitSimplePolicyEngine` relies on agent/server
-authorization. `AllowitCommonPolicyEngine` is the standard implementation for an owner-approved
-initial preflight prefix. `AllowitCustomPolicy` compiles a complete authored policy into its
-contract. Shared checkers have no custody.
+This page explains how an Allowit policy wallet is put together on Stellar: the three wallet
+implementations, the portable policy source, the canonical rules, the configuration the owner signs,
+what happens on every operation, and the operations only the owner can perform. Read the
+[README](../README.md) first for the short version and the build steps.
+
+A policy wallet keeps one immutable underlying Stellar Asset Contract (SAC). The owner selects the
+wallet code, the agent, an independent server signer and the params. Delegated operations need both
+the agent and the server. The owner needs nobody. The server signer is a plain co-signer; it is not
+a shared checker contract or that contract's parent administrator. Shared checkers have no custody.
+
+`AllowitSimplePolicyEngine` relies on agent/server authorization. `AllowitCommonPolicyEngine` is
+the standard implementation for an owner-approved initial preflight prefix. `AllowitCustomPolicy`
+compiles a complete authored policy into its contract. All three are built from the same custody
+core in `crates/policy-wallet`. The `policy_wallet!` macro attaches the complete owner and
+delegated-execution interface to an `AllowitPolicy` implementation, so Simple, Common and Custom
+expose identical entrypoints and differ only in their `AllowitPolicy` logic.
 
 ## Public names
 
