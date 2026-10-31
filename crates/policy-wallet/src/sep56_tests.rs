@@ -965,3 +965,74 @@ fn policy_and_kernel_denials_win_over_failing_effects_because_admission_runs_fir
         Err(Ok(AllowitWalletError::InsufficientFunds))
     );
 }
+
+/// Native SEP-56 vault that records, at the wallet's first external call, whether the wallet's
+/// replay marker is already stored and the wallet's asset balance, then deposits honestly.
+#[soroban_sdk::contract]
+struct AllowitOrderProbe;
+/// Probe configuration: underlying asset, observed wallet and observed operation.
+type ProbeConfig = (Address, Address, BytesN<32>);
+#[soroban_sdk::contractimpl]
+impl AllowitOrderProbe {
+    /// Fix the underlying asset, the wallet and the operation to observe.
+    pub fn __constructor(env: Env, asset: Address, wallet: Address, operation_id: BytesN<32>) {
+        env.storage()
+            .instance()
+            .set(&0u32, &(asset, wallet, operation_id));
+    }
+    /// The underlying asset. The first call, the wallet's first external call of a deposit,
+    /// records the observation.
+    pub fn query_asset(env: Env) -> Address {
+        let (asset, wallet, operation): ProbeConfig = env.storage().instance().get(&0u32).unwrap();
+        if !env.storage().instance().has(&1u32) {
+            let marker = Key::Operation(operation);
+            let stored = env.as_contract(&wallet, || env.storage().persistent().has(&marker));
+            let funds = token::Client::new(&env, &asset).balance(&wallet);
+            env.storage().instance().set(&1u32, &(stored, funds));
+        }
+        asset
+    }
+    /// The first call's observation: replay marker stored, and the wallet's asset balance.
+    pub fn observed(env: Env) -> (bool, i128) {
+        env.storage().instance().get(&1u32).unwrap()
+    }
+    /// Pull `assets` from `from` under its delegated authorization and credit equal shares.
+    pub fn deposit(env: Env, assets: i128, receiver: Address, from: Address, _op: Address) -> i128 {
+        let (asset, _, _): ProbeConfig = env.storage().instance().get(&0u32).unwrap();
+        let vault = env.current_contract_address();
+        token::Client::new(&env, &asset).transfer(&from, &vault, &assets);
+        let shares = Self::balance(env.clone(), receiver.clone()) + assets;
+        env.storage().instance().set(&receiver, &shares);
+        assets
+    }
+    /// Share balance of `id`.
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage().instance().get(&id).unwrap_or(0)
+    }
+    /// Shares redeem one to one.
+    pub fn preview_redeem(_env: Env, shares: i128) -> i128 {
+        shares
+    }
+}
+
+/// The order seen from outside: when the wallet first calls out, the replay marker that admission
+/// writes after the post-flight state and nonce is already stored, and no funds have moved. A
+/// mutant that runs any effect before admission's state write fails here.
+#[test]
+fn the_first_external_call_sees_admission_stored_and_no_funds_moved() {
+    for wasm in [SIMPLE, COMMON] {
+        let f = Fixture::new(wasm, false);
+        let operation = f.execution(50).operation_id;
+        let probe = f.env.register(
+            AllowitOrderProbe,
+            (f.asset.clone(), f.wallet.clone(), operation),
+        );
+        allow_recipient(&f, &probe);
+        let e = request(&f, &probe, 50, 50);
+        assert!(execute(&f, &e).is_ok());
+        let observed = AllowitOrderProbeClient::new(&f.env, &probe).observed();
+        assert_eq!(observed, (true, 1000));
+        assert_eq!((f.balance(), f.client().state().nonce), (950, 1));
+        assert_eq!(f.history().calls, 1);
+    }
+}
