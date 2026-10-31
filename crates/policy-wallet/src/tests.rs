@@ -1,8 +1,8 @@
 extern crate std;
 use super::*;
 use allowit::{
-    AllowitStandardState, CALL_CAP, DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, OPERATIONS, RECIPIENTS,
-    SPENT_CAP, TOKENS, TRANSACTION_CAP,
+    AllowitError, AllowitStandardState, CALL_CAP, DAY_SPENT_CAP, DAY_TOTAL_CAP, EXPIRY, OPERATIONS,
+    RECIPIENTS, SPENT_CAP, TOKENS, TRANSACTION_CAP,
 };
 use allowit_wallet_protocol::AllowitPolicyInvocation;
 use ed25519_dalek::{Signer, SigningKey};
@@ -1609,6 +1609,73 @@ fn x402_enforces_compiled_business_rules_without_committing() {
         assert_eq!(f.balance(), 1_000);
         assert_eq!(f.client().state().nonce, 0);
         assert_eq!(f.history(), AllowitStandardState::default());
+    }
+}
+
+/// A Custom policy that panics in the Wasm wallet aborts the call with the failed read's
+/// `AllowitError` code, which no wallet error shares, on `execute` and on the x402 hook. Its
+/// caught-cap write, the nonce and the replay marker stay unwritten, so the same operation then
+/// succeeds once the read passes.
+#[test]
+fn a_panicking_wasm_policy_aborts_with_its_allowit_code_and_writes_nothing() {
+    use soroban_sdk::InvokeError::Contract;
+    for x402 in [false, true] {
+        let f = Fixture::new(CATCHING, x402);
+        // Settle `e` for `amount` through the token's x402 hook or through `execute`.
+        let settle = |e: &AllowitExecutionRequest, amount, nonce| {
+            if x402 {
+                f.env.set_auths(&[f.host_entry(e.clone(), amount, nonce)]);
+                token::Client::new(&f.env, &f.asset).transfer(&f.wallet, &f.recipient, &amount);
+            } else {
+                f.auth(
+                    &[&f.agent, &f.server],
+                    "execute",
+                    (e.clone(),).into_val(&f.env),
+                );
+                f.client().execute(e);
+            }
+        };
+        settle(&f.execution(100), 100, 1);
+        // 60 more exceeds the daily cap of 150; the policy catches that and writes its count
+        // before it reads the refund's order number.
+        let mut e = f.execution(60);
+        set_param(&mut e.args, "refund", Some(AllowitValue::Bool(true)));
+        let before = f.client().state();
+        for (value, error) in [
+            (None, AllowitError::MissingParam),
+            (Some(AllowitValue::Bool(true)), AllowitError::InvalidParam),
+        ] {
+            set_param(&mut e.args, "order", value);
+            let result = if x402 {
+                let payload = BytesN::from_array(&f.env, &[6; 32]);
+                f.env.try_invoke_contract_check_auth::<AllowitWalletError>(
+                    &f.wallet,
+                    &payload,
+                    f.authorization(e.clone(), &payload).into_val(&f.env),
+                    &vec![&f.env, transfer_context(&f, 60)],
+                )
+            } else {
+                f.auth(
+                    &[&f.agent, &f.server],
+                    "execute",
+                    (e.clone(),).into_val(&f.env),
+                );
+                f.client().try_execute(&e).map(|_| ())
+            };
+            assert!(error as u32 > 100);
+            assert_eq!(result, Err(Err(Contract(error as u32))), "{error:?}");
+            assert_eq!(f.client().state(), before);
+            assert_eq!(f.balance(), 900);
+        }
+        set_param(&mut e.args, "order", Some(AllowitValue::Int(7)));
+        settle(&e, 60, 2);
+        assert_eq!(f.client().state().nonce, before.nonce + 1);
+        let over = f
+            .client()
+            .policy_state()
+            .get(Symbol::new(&f.env, "over_day_cap"));
+        assert_eq!(over, Some(AllowitValue::Int(1)));
+        assert_eq!(f.balance(), 840);
     }
 }
 

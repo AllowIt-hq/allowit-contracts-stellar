@@ -1,6 +1,7 @@
 use allowit::prelude::*;
 /// My agent may pay only destinations I approve. It may exceed its daily spending cap twice; count
-/// each time. A payment that names an invoice must stay within my invoice cap.
+/// each time. A payment that names an invoice must stay within my invoice cap. A refund must name
+/// its order number.
 pub fn execute(ctx: &AllowitContext) -> allowit::Result {
     // "only destinations I approve"
     allowit::recipients(ctx, ctx.params.get(allowit::RECIPIENTS))?;
@@ -22,6 +23,11 @@ pub fn execute(ctx: &AllowitContext) -> allowit::Result {
     if ctx.request.args.get("invoice").is_some() {
         // "must stay within my invoice cap"
         allowit::transaction_cap(ctx, ctx.params.get("invoice_cap"))?;
+    }
+    // "A refund"
+    if ctx.request.args.get("refund").is_some() {
+        // "must name its order number"
+        let _order: u64 = allowit::arg(ctx, "order");
     }
     Ok(())
 }
